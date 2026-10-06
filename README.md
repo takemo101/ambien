@@ -9,6 +9,6 @@
 
 UI は GPUI＋Ely、DSP は FunDSP、音声 I/O は CPAL、アプリ内更新は Sparkle を使う設計です。対象は Apple Silicon の macOS 15以降です。
 
-現在は実装前の仕様・開発文書を整備する段階です。
+現在は実装前です。承認済み仕様を基準に、[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)を整備しています。アプリコードと Cargo プロジェクトはまだありません。
 
-詳細な要件と進行条件は [SPEC.md](SPEC.md)、開発時の作業規約は [AGENTS.md](AGENTS.md) を参照してください。
+詳細な要件と進行条件は [SPEC.md](SPEC.md)、開発時の作業規約は [AGENTS.md](AGENTS.md)、文書の役割と読む順序は [docs/README.md](docs/README.md) を参照してください。

@@ -15,9 +15,9 @@ Ambien の調査・変更・Issue・PR・ローカル文書案内を、一つの
 1. 依頼の対象と、SPEC の [文書の状態](../SPEC.md#文書の状態)、[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件) を読む。署名・公証・配信に関係するなら [配布前提](../SPEC.md#配布前提) も読む。
 2. AGENTS と本書を読み、変更範囲、許可された操作、今回の確認方法を特定する。既存のユーザー変更を保持する。
 3. mikan で対象 Issue の本文・現在の Status・関連 Issue・Report を読み、要件はリンク先の SPEC で確認する。`depends_on` は助言であり、前提達成や承認の代わりではない。
-4. Lat の `locate`、`section`、`refs` で関係する入口を探し、リンク先の [構成説明](architecture.md)、[検証手順](verification.md)、[参考資料](references.md) の必要な範囲を読む。実装が存在する段階では、実際のソース・依存定義・利用可能な検証コマンドも読む。
+4. Lat の `locate`、`section`、`refs` で関係する入口を探し、リンク先の [構成説明](architecture.md)、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、[検証手順](verification.md)、[参考資料](references.md) の必要な範囲を読む。実装が存在する段階では、実際のソース・依存定義・利用可能な検証コマンドも読む。
 
-ツールと運用文書の導入は、仕様全体の最終承認ではない。現在はアプリコードと Cargo プロジェクトが未作成であり、アプリ検証も未実施である。mikan の設定や Issue 作成、GitButler の target 設定、Lat の検査成功だけで、実装計画・Cargo・アプリコードを開始しない。進行条件は常に SPEC に戻って確認する。
+ツールと運用文書の導入は、仕様全体の最終承認ではない。mikan の設定や Issue 作成、GitButler の target 設定、Lat の検査成功だけで、設計・実装・Cargo 作成の許可を作らない。現在の承認と依頼範囲は最新の SPEC で確認し、設計・計画の作成とアプリ実装開始を区別する。アプリコードと Cargo プロジェクトは未作成であり、アプリ検証も未実施である。
 
 ZenNotes は採用しない。別の引き継ぎ書や、製品要件・Issue 状態の第二の正本も作らない。
 
