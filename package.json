@@ -1,0 +1,15 @@
+{
+  "name": "ambien",
+  "private": true,
+  "engines": {
+    "node": "^24.15.0 || >=26.0.0"
+  },
+  "scripts": {
+    "lat": "env -u LAT_LLM_KEY -u LAT_LLM_KEY_FILE -u LAT_LLM_KEY_HELPER XDG_CONFIG_HOME=\"$PWD/lat.md/.cache/config\" lat",
+    "check:docs": "npm run lat -- check",
+    "check": "npm run check:docs"
+  },
+  "devDependencies": {
+    "lat.md": "0.12.2"
+  }
+}
