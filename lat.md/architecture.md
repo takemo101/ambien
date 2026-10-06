@@ -10,7 +10,17 @@
 - [構成と Interface](../SPEC.md#構成と-interface)、[依存の選定](../SPEC.md#依存の選定)、[構成説明](../docs/architecture.md)から責務の関係を読む。
 - [検証手順と証拠](../docs/verification.md)で未実施・限定成功・実機受け入れを区別する。
 
-分野別の入口は [[architecture#Audio and world]]、[[architecture#Scene and settings]]、[[architecture#Persistence]]、[[architecture#macOS and updates]]。進め方は [[architecture#Development]] を読む。
+具体的な実装契約と作業分割は [[architecture#Implementation design]]。分野別の入口は [[architecture#Audio and world]]、[[architecture#Scene and settings]]、[[architecture#Persistence]]、[[architecture#macOS and updates]]。進め方は [[architecture#Development]] を読む。
+
+## Implementation design
+
+承認済み SPEC を実装へ落とす予定 Interface・所有・時計・失敗と、P01〜P18 の成果・依存・検証・Issue 化条件への入口。設計済みを実装済みや実施許可と読み替えず、作業状態は mikan で確認する。
+
+- [詳細設計](../docs/detailed-design.md)で型付き契約・DSP・RT 境界・固定窓・保存・終了・更新の実現手段を読む。
+- [実装計画](../docs/implementation-plan.md)で予定ファイル、Consumes/Produces、behavior tests、実経路 smoke、coverage を読む。
+- [Issue 化の条件と本文](../docs/implementation-plan.md#issue-化の条件と実装-ai-向け本文)で AI 向け粒度・依存・対象別権限を確認する。
+
+製品判断は [[architecture#Specification]]、実際の操作フローは [[architecture#Development]] に戻る。
 
 ## Audio and world
 
@@ -26,9 +36,9 @@
 
 GPUI がホストするシーンと設定窓、Ely の設定部品、窓サイズ・描画負荷・アクセシビリティの案内。窓の寸法と音の世界の寸法を混同しない。
 
-- [窓](../SPEC.md#窓)、[サイズ変更への耐性](../SPEC.md#サイズ変更への耐性)、[最大サイズと描画負荷](../SPEC.md#最大サイズと描画負荷)。
+- [窓](../SPEC.md#窓)、[固定サイズと内部描画](../SPEC.md#固定サイズと内部描画)、[高DPIと描画負荷](../SPEC.md#高dpiと描画負荷)。
 - [設定窓](../SPEC.md#設定窓)、[ボリューム設定](../SPEC.md#ボリューム設定)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
-- [構成説明](../docs/architecture.md)で viewport と窓の寸法、操作を音へ渡す責任を読む。[検証手順](../docs/verification.md)でガラス表現・リサイズ・高 DPI の証拠を確認する。
+- [構成説明](../docs/architecture.md)で固定窓と viewport、操作を音へ渡す責任を読む。[検証手順](../docs/verification.md)で固定サイズ・画面収まり・ガラス表現・高 DPI の証拠を確認する。
 
 世界と粒の関係は [[architecture#Audio and world]]、復元と保存は [[architecture#Persistence]]、OS との境界は [[architecture#macOS and updates]]。
 
