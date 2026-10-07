@@ -17,7 +17,7 @@ Ambien の調査・変更・Issue・PR・ローカル文書案内を、一つの
 3. mikan で対象 Issue の本文・現在の Status・関連 Issue・Report を読み、要件はリンク先の SPEC で確認する。`depends_on` は助言であり、前提達成や承認の代わりではない。
 4. Lat の `locate`、`section`、`refs` で関係する入口を探し、リンク先の [構成説明](architecture.md)、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、[検証手順](verification.md)、[参考資料](references.md) の必要な範囲を読む。実装が存在する段階では、実際のソース・依存定義・利用可能な検証コマンドも読む。
 
-ツールと運用文書の導入は、仕様全体の最終承認ではない。mikan の設定や Issue 作成、GitButler の target 設定、Lat の検査成功だけで、設計・実装・Cargo 作成の許可を作らない。現在の承認と依頼範囲は最新の SPEC で確認し、設計・計画の作成とアプリ実装開始を区別する。アプリコードと Cargo プロジェクトは未作成であり、アプリ検証も未実施である。
+ツールと運用文書の導入は、仕様全体の最終承認ではない。mikan の設定や Issue 作成、GitButler の target 設定、Lat の検査成功だけで、設計・実装・Cargo 作成の許可を作らない。現在の明示依頼と操作範囲は最新の SPEC で確認する。アプリコードと Cargo の作成を開始しており、実際の検証と未確認範囲は [検証記録](verification.md) に置く。コードの存在を製品全体の受け入れや配布準備の成立に読み替えない。
 
 ZenNotes は採用しない。別の引き継ぎ書や、製品要件・Issue 状態の第二の正本も作らない。
 
@@ -119,12 +119,14 @@ reindex は読取り専用ではない。文書からローカル index の `lat
 
 Lat は現存する文書への案内として保守する。意味のある文書・責務の変更では関連 entry とリンクを更新するが、SPEC 全文、Issue Status、過去の試験件数を複製しない。未作成の `src`・Cargo・将来 API を実装済み graph として記述しない。`lat init`、自動 hooks、MCP 登録、CI は追加しない。
 
-## 検査範囲と将来のアプリ検証
+## 文書検査と Rust アプリ検証
 
 現在使える `npm run check:docs` と `npm run check` は **Lat の参照・section・graph 構造検査だけ**である。Rust の build、fmt、Clippy、テスト、リンク先内容の意味的な仕様整合、実機動作、製品受け入れ、配布準備を証明しない。検査手順を書いたことも、その実行成功の記録ではない。
 
 文書や graph を変更した作業の完了前に Lat 検査を行い、実行したコマンドと実際の結果を残す。並行作業では変更が揃った後に統合担当がまとめて検査し、途中の未完成状態で各担当が重複実行しない。検査の範囲を超える成功を報告しない。
 
-将来、SPEC の gate を満たして Cargo とアプリが実在する段階では、実際の workspace と依存定義から検証対象を決める。コード変更には対象挙動・境界・失敗ケースの試験、Rust formatting、workspace tests、Clippy、必要な build・診断をまとめ、独立レビューの指摘修正後に影響する検査を行う。未定義の npm scripts や架空の workspace コマンドを現在利用可能なものとして足さない。
+現在のアプリは単一 Cargo package である。macOS の Xcode Command Line Tools と SPEC の Rust toolchain を使い、リポジトリ root で `cargo fmt --all -- --check`、`cargo test --locked`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo build --locked` を実行する。実際の GUI の起動は `MACOSX_DEPLOYMENT_TARGET=15.0 cargo run --locked`。Ely の `runtime_shaders` を使用するため、この経路に full Xcode を必須にしない。Rust 実行ファイルが PATH にない環境では、既存の `~/.cargo/bin` を当該コマンドの PATH に渡し、無断でインストールや全体設定の変更をしない。独立レビューの指摘修正後は影響する検査と実経路を再確認する。npm の `check` は Rust の検査を実行しない。
+
+操作・状態を機械判定できる native E2E は、build 後に `/usr/bin/swift scripts/native-e2e.swift "$PWD/target/debug/ambien"` で実行する。runner は自分で起動した候補の実 AX 窓・メニューと foreground CGEvent を使い、窓数・同一性・外枠・最小化復帰・無効な zoom・⌘,・両窓からの ⌘Q・実 PID 消失・終了コードを観測する。Accessibility と event-post preflight の不足は失敗とし、許可要求や設定変更は行わない。前面へ候補を移すため、実行中は他アプリへの入力と競合させない。画面録画・新依存・source hook は不要で、ガラス・音質・物理同期や全 OS サイズ操作を自動合格にはしない。[実行証拠と限界](verification.md#native-e2e-runner) を併記する。
 
 アプリの実動作は [検証手順と証拠の扱い](verification.md) に従い、SPEC の該当条件に必要な観測を別に実施する。ツール検査と製品受け入れ、操作許可と製品仕様の最終承認を最後まで分離する。

@@ -1,0 +1,10 @@
+mod app;
+mod platform;
+mod ui;
+
+fn main() {
+    gpui_platform::application()
+        .with_assets(ely::Assets)
+        .with_quit_mode(gpui::QuitMode::Explicit)
+        .run(app::start);
+}
