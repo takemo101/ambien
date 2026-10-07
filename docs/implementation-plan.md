@@ -1,6 +1,6 @@
 # Ambien Implementation Plan
 
-> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo と P01 の固定二窓のソースは作成したが、以降の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
+> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
 >
 > **実装 AI 向け:** writing-plans の成果単位・checkbox・境界試験の考え方を使う。未導入の superpowers 実行器や worktree は必須にしない。実行フローは [AGENTS](../AGENTS.md)、[開発手順](development.md)、[Lat 運用](../lat.md/workflow.md) に従う。P01〜P18 は計画の安定参照であり、mikan ID や Status ではない。checkbox は成果の受け入れ項目であって進捗台帳ではなく、進捗は mikan のみで管理する。
 
@@ -150,9 +150,11 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **DependsOn:** P01。**SPEC:** [音と絵](../SPEC.md#音と絵)、[視覚イベント](../SPEC.md#視覚イベント)、[再生予定時刻](../SPEC.md#再生予定時刻)、[シチュエーション](../SPEC.md#シチュエーション)、[初期のシチュエーションとノブ](../SPEC.md#初期のシチュエーションとノブ)、[スレッドと資源](../SPEC.md#スレッドと資源)。
 
-**Files:** Create `src/controls.rs`, `src/situations/mod.rs`, `src/situations/rain.rs`, `src/situations/synthesis.rs`, `src/audio/mod.rs`, `src/audio/render.rs`, `src/audio/world.rs`, `src/audio/transport.rs`, `src/audio/lease.rs`, `src/audio/timing.rs`; Modify `src/app.rs`, `src/ui/scene.rs`, `Cargo.toml`, `Cargo.lock`。Tests は `rain.rs`, `synthesis.rs`, `render.rs`, `lease.rs`, `timing.rs` 内。
+**Files:** Create `src/controls.rs`, `src/situations/mod.rs`, `src/situations/rain.rs`, `src/situations/synthesis.rs`, `src/audio/mod.rs`, `src/audio/render.rs`, `src/audio/world.rs`, `src/audio/transport.rs`, `src/audio/lease.rs`, `src/audio/timing.rs`; Modify `src/main.rs`, `src/app.rs`, `src/ui/scene.rs`, `src/ui/settings.rs`, `Cargo.toml`, `Cargo.lock`。Behavior tests は制御境界、雨・共有合成、実 typed callback、lease、atomic transport、世界・予定時刻、シーンの凍結キャッシュに置く。`src/rt_alloc.rs` は `cfg(test)` 専用の thread-local Rust allocator 観測器であり、実 callback／固定 pool の試験区間だけ確保・再確保・解放を数える。native backend 全体の測定器ではない。
 
 **Consumes:** I11 の実 host。**Produces:** I01 `Registry`/`SituationDefinition`/`KnobDefinition`/`VoicePreparation`、I02 `Voice`/`VisualWriter`、I03 `ControlState`、I04 mailbox 境界、I06 `WorldClock`、I07 `VisualEvent`/`WorldVisualState`/`VisualRing`、I08 `PreparedEngine`/`EngineLease`/`StreamEpoch`、I11 `AudioController` の雨 E2E。
+
+現存の source は上記の経路を接続している。設定窓は出力状態と候補の説明表示までで、操作は P03。現行環境の外部 native E2E と雨のユーザー確認を、コード作成・自動試験・標準 stream・境界試験の証拠と区別して [検証記録](verification.md#p02-雨の標準出力と視覚境界の限定検証) に記録する。非可視・ロック中の過去の失敗を成功に書き換えず、三環境の音質・初期値確定、物理同期、native backend 全体の RT・最悪負荷へ一般化しない。作業状態・統合結果は mikan Report で確認する。
 
 - [ ] worker で標準 Device の config、声、固定 pool、DSP、atomic arrays/scratch を準備し build/play を行う。default Device を HalOutput として再列挙しない。BufferSize は Default。
 - [ ] 雨連続成分・近い粒・独立風を noise/pink/filter と短い包絡、Poisson、帯域制限した色付き揺らぎで合成する。FunDSP は準備後 `tick` のみ。composite `process` の未初期化経路、Slot/Net/Sequencer の callback 差替えは採らない。
@@ -499,7 +501,7 @@ SPEClinks: 当該PのSPEC最新節、詳細設計の責務、検証記録への�
 
 ## 最終レビュー時にも残る gate
 
-- **P01/P02:** 固定依存の実 build/ABI は未確認。FunDSP composite process の未初期化問題を避け tick 経路に限定しても、選択したノードの実 RT/有限性検証は必要。
+- **P01/P02/P18:** 現行環境で固定依存の実 build、窓・標準 stream・FunDSP tick 経路を確認した。選択したノードと Rust callback の有限性・scoped heap 試験を、native backend 全失敗経路や最悪 timing の保証にしない。
 - **P08/P18:** CPAL の estimates、latency query failure、Bluetooth/WindowServer、dry DSP delay の物理同期は実出力測定が必要。数学的時刻対応だけで目標達成を宣言しない。
 - **P10/P18:** CPAL 内 monitor/closure の寿命と worker join 不在の影響は実 lockfile/失敗注入で診断する。EngineLease はアプリ engine 回収の設計で、依存全資源の無漏れ保証ではない。
 - **P11/P18:** 固定 GPUI でも描画面/中間面と旧資源コストは残る。下限 OS と対応 screen/DPI の実測が必要。resize/fullscreen/巨大任意窓や GPUI サイズ patch へ scope を広げない。

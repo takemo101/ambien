@@ -10,13 +10,35 @@ use gpui::{
 
 pub(crate) struct SettingsView {
     focus: FocusHandle,
+    audio_status: String,
+    control_summary: Option<String>,
 }
 
 impl SettingsView {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        audio_status: String,
+        control_summary: Option<String>,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self { focus }
+        Self {
+            focus,
+            audio_status,
+            control_summary,
+        }
+    }
+
+    pub(crate) fn update_audio(
+        &mut self,
+        status: String,
+        control_summary: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.audio_status = status;
+        self.control_summary = control_summary;
+        cx.notify();
     }
 }
 
@@ -42,10 +64,13 @@ impl Render for SettingsView {
                             .p_6()
                             .child(Heading::h2("設定"))
                             .child(Paragraph::new(
-                                "この実装では、シーンと設定の固定サイズの窓を操作できます。",
+                                self.audio_status.clone(),
                             ))
                             .child(Paragraph::new(
-                                "音の再生と設定操作はまだ接続されていません。音量や環境を変更するコントロールは、この実装にはありません。",
+                                self.control_summary.clone().unwrap_or_else(|| "試聴候補は、標準出力の準備が成功した後に表示します。".into()),
+                            ))
+                            .child(Paragraph::new(
+                                "雨の音と同じ粒を、シーンの光として表示します。音量・雨量・風のコントロールは、この段階ではまだありません。試聴候補は音質を確認済みの既定値ではありません。",
                             ))
                             .child(Paragraph::new(
                                 "シーンの空白部分をドラッグすると窓を移動できます。閉じた窓は、アプリのメニューから再び表示できます。",

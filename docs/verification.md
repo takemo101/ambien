@@ -312,3 +312,47 @@ helper の output を unbuffered にし、OS の PID 存在を `kill(pid, 0)`／
 startup failure 用の使い捨て executable は、修正前に runner exit1 だが診断欠落、修正後に `EXPECTED_NATIVE_E2E_STARTUP_DIAGNOSTIC` と元の startup error を出して exit1。fixture と空 directory は除去した。修正後の実 Ambien native E2E は3.97秒・exit0、全 scenario が PASS。menu Quit PID13013、scene／settings の foreground ⌘Q PID13167／13168 は、送信直前の exact keyboard focus と実 PID 消失・正常 exit0 を確認した。
 
 修正後の Standards follow-up review は3件の必須指摘の解消と、残る evidence-backed 必須指摘なしを確認した（source review のみ）。統合担当の `cargo fmt --all -- --check`、`cargo test --locked`（8 passed）、`cargo clippy --all-targets --locked -- -D warnings`、`cargo build --locked` はすべて exit0。`npm run check:docs` は All checks passed、既存の No init version recorded 警告は保持した。再buildした候補の native E2E は4.91秒・exit0／全 scenario PASS、menu／scene keyboard／settings keyboard Quit の PID19406／19418／19419 が消失・正常 exit0。実行した binary の SHA256 は `da593032c8f9a05dcf789353b5e3c3842d16c3dbb8320daea49b07d8d637eab3`。PR の head・normal merge・workspace 同期は mikan Report に記録し、これらの観測から未実施の製品全体の合格を作らない。
+
+## P02 雨の標準出力と視覚境界の限定検証
+
+2026-10-07、Darwin 27.0.0／arm64、`feat/amb-004-rain-audio` の未 commit source、P01 normal merge `cd3cc1b762455881f2dc70fb9d73cfebfa228316` を基点として観測した。固定 FunDSP／CPAL と実 Cargo lock を使い、GPUI host を維持した。試聴候補はアプリ volume 0.30、雨量 0.34、風 0.12。確定済み音質・初期値とは呼ばず、OS 音量・TCC・画面ロックは変更していない。
+
+### 自動試験とレビュー
+
+初回の統合試験は fixture の未実装 `Revision::checked_next` と `An`／`AudioNode` の型違いで compile 失敗した。存在する `Revision::from_raw` と実 node の fixture に修正した。次の55 pass／1 failは、補償加算した世界秒と一度の除算を bit-exact に比較していた差（1 ulp）であり、生成 frame 数の不変条件に修正した。これらを対象規則の assertion RED と取り違えない。
+
+レビューは復帰初回の古い粒、故障時の再読取りによる最終表示の変化、GPUI globals の Drop に依存した worker 終了を必須指摘した。凍結 cache の regression は修正前に `MachNanos(99)` 対期待 `MachNanos(40)` で assertion RED、修正後に受入済み header・粒・gains/breath・fade 時刻を保持した。新規の凍結シーンは checkpoint で一度だけ初期化する。復帰は timer の前に live 読取と notify を行い、quit は保持した `Context::on_app_quit` で停止・回収・join する。両 reviewer の follow-up は対象範囲に必須指摘なし（source review のみ）。
+
+`cargo test --locked --bin ambien` は60 passed／0 failed、1.67秒。実 f32/i16 callback entrypoint の busy／closed／worker 所有の silence と世界不変、checked timestamp overflow、可変 frame と channel／端数、mute の世界継続、旧 epoch、atomic snapshot、amount／wind の zero・tail、64粒満杯と視覚 overflow、実 Mach clock、凍結 cache を含む。実 callback と満杯 pool の計測区間で Rust の確保・再確保・解放は0だった。これは `cfg(test)` の thread-local `GlobalAlloc` 観測であり、C／native heap、CPAL が user callback 前に行う timestamp conversion、条件付き owned error の整形・Drop、contended error discard、最悪 timing を測ったとはしない。
+
+### 実 host と限定的な描画観測
+
+使い捨て observer executable は現存 production modules を含み、実 GPUI／CPAL 標準出力を起動した。標準 stream は44,100 Hz・2 channel・F32、出力状態と予定時刻付き sample 世界の進行を観測した。GPUI public close API で実シーンを除去した後も zero-window host が生存し、世界 snapshot は0.767→1.800→2.833秒と進んだ。その後 epoch error cell へ `DeviceNotAvailable` を注入すると、実 worker が出力を止め、engine 世界3.007秒を保持し、実 app consumer が設定窓を再生成した。以降の世界 snapshot は3.000秒のままだった。これは実 Device の除去・標準 Device 不在の試験、物理スピーカーでの継続聴取、red button 操作の証拠ではない。
+
+実 GPUI host の programmatic quit は修正前に exit0でも `worker_shutdown_complete=false`、修正後は停止・join の後に `true` と正常 exit0を観測した。両実行は4.12／4.18秒。Native keyboard・menu Quit の再確認と区別する。
+
+同じ実 callback entrypoint の throwaway smoke は、確保／解放各1回の positive control で観測器を確認した後、frame 1／127／513、channel 1／2／6、両 format 各256回、最大 knob・容量1の視覚 overwrite を実行した。984,576 sample frames、世界22.325986秒、有限出力、error bits0、各区間の Rust heap操作0。callback pair の観測最大は17.875〜6,611.584 µsで、frame1／mono の初回区間には1,421 µsの外れ値もあった。debug build の直列 fixture／wall time であり、実 RT thread の deadline・native backend 全体の保証には用いない。
+
+`gpui_platform/test-support` を使った `Window::render_to_image` は、自分の実 rendered scene から1920×1200 RGBAを2枚取得した。異なる位置の淡い青い点と弱い中心 glow を画像で確認した。画面録画 permission は使わず、実際の canvas／Metal の出力確認である。ただし offscreen readback に native glass、WindowServer の呈示、音との物理同期は含まれない。取得時の debug accessibility tree は `None` だった。observer／SDK の診断 source は最終検査前に除去し、production に source hook を残さない。
+
+### Native 前提の不成立と残る受け入れ
+
+新しい候補の既存 native E2E runner は `AXSize: -25205` で exit1した。SDK attribute probe では `AXWindows` の子が `AXApplication` を報告し、size／position は unsupported。一方 CGWindow metadata に自分の窓は存在し、stderr／startup panic はなかった。保存していた P01 の同一 SHA256 binary でも同じ AX 結果となり、P02 による regression と判定しない。AX 制約の原因そのものは未確定である。
+
+別の SDK probe は主 display の `CGDisplayIsAsleep=1`／`CGDisplayIsActive=0`、session の on-console=1／screen-locked=1 を観測した。自分の app は activation policy Regular、activate の戻りはtrueでも foreground PIDは変わらず、自分の窓中心は別 PIDの窓に覆われていた。CGEvent driver は foreground 不成立で停止し、その owned child の SIGTERM cleanup を Quit 成功には数えていない。初回 error 注入時の cache時刻0→checkpointという観測は、まだ受入 frame のないシーンであり、表示済み cache の不具合証拠には用いない。
+
+画面ロック解除・display復帰後に、既存の外部 native E2E、雨の実表示・同じ左右の光、scene close 後の音継続、故障表示の実画面、visibility復帰、実 key／menu Quitを確認する必要がある。試聴・物理同期・native RT error／最悪負荷の未確認を、自動試験・own-frame画像・programmatic lifecycle・source確認から合格にしない。受け入れ不足のまま normal merge／completed／P03への移行は行わず、次の操作は mikan と SPEC の gate に従う。
+
+最終統合検査の初回は fmt・60 tests が通った後、strict Clippy が nested `if` 3件と fixture の `% 2` で exit101した。同じ short-circuit／入力境界の let-chain と `is_multiple_of` に直し、lint allow は加えていない。診断 source 除去後の `cargo fmt --all -- --check`、`cargo test --offline --locked`（60 passed、1.62秒）、`cargo clippy --all-targets --offline --locked -- -D warnings`、`cargo build --offline --locked` は exit0。`npm run check:docs` は All checks passed、既存の No init version recorded 警告を保持した。最終 `target/debug/ambien` の SHA256 は `4d6a9d1195a2f78c7d72592bb0492c757b7c7e741c45efdf03cf77ae3d455c76`。
+
+受け入れ境界で SDK を読み直すと display は asleep=0／active=1に変化していたが、screen-locked=1は継続していた。AX／foreground scenario の同じ失敗を反復せず、未解除の前提を維持した。最終の診断なし binary 自体を SDK の owned child として起動し、native CG window 1個と startup stderrなしを観測した。`NSRunningApplication.terminate()` による cooperative quit は requested=true、PID62099が正常 `.exit`／status0で終了し、parent SDK も exit0。これは native termination request の実経路であり、foreground ⌘Q／menu操作・実表示・試聴の合格へ広げない。P02 の commit／PR／normal merge／completed は未実施である。
+
+### 外部 native 再検証と雨のユーザー確認
+
+続行依頼後の SDK 読取りでは、on-console=1、主 display の asleep=0／active=1、前回の screen-locked=1 は返らず lock metadata は nil だった。nil だけから未ロックを保証せず、既存の外部操作を実行した。ロック中の起動を抑止する案の使い捨て fixture は、この時点で前提が成立しなかったため regression と扱わず、runner への変更は行わなかった。
+
+`swift scripts/native-e2e.swift /Users/takemo101/Desktop/workspace/ambien/target/debug/ambien` は4.54秒で8件の PASS と最終完了を返した。実メニューによる同一設定窓、両窓の最小化／復元・寸法不変・zoom無効、設定 close、foreground ⌘,、シーン close／zero-window host／再生成、menu Quit、シーン／設定からの foreground ⌘Q を確認した。Quit の PID は6842／7142／7145で実消失・正常 exit0。対象 binary の SHA256 は上記の最終統合候補と同一だった。
+
+同じ external AX 操作を使う使い捨て SDK preview は PID22184 を起動し、シーンを15秒前面表示、実 close button で閉じて8秒、実メニューで再生成して8秒後に実 menu Quit した。32.44秒で native lifecycle／正常 exit0を確認した。OS音量、TCC、画面 capture、アプリ source hook は変更・使用していない。ユーザーは「確認できた」を選び、雨・近い粒の音と左右の光・シーン閉鎖中の音継続・再表示時に古い粒が一斉に出ないことを確認した。これはユーザーの試聴／実表示の証拠で、AI が音を聞いたとの主張ではない。
+
+P02 の今回の smoke 条件の受け入れが揃った。三環境の心地よさと初期値確定、物理的な50ms以内の同期、native backend 全失敗経路・最悪負荷、別画面・下限OS・署名配布は未確認のまま各後続 gate に残す。PR の normal merge・workspace同期・Issue 完了は mikan Report で記録する。

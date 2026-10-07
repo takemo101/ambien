@@ -8,7 +8,7 @@
 - **計画 Interface／設計**：製品全体の型・関数・規則を示す代表断片。実際に作成した部分は以下の現存ソースへの参照と区別し、断片をコンパイル済みコードの転載として扱わない。
 - **限定検証**：固定二窓は build・幾何試験・実 GPUI/NSWindow の状態観測を実施し、2x主画面でガラス・シーン／設定操作・最小化と復帰・system appearance・全OSタイリングの成功回答を得た。診断を除去した shipping source に外部 AX／foreground CGEvent の E2E runner を実行し、設定・窓の lifecycle と、両窓からの ⌘Q による実 PID 消失・exit0 を確認した。過去の physical 終了報告と host 生存の不一致の原因特定とは区別する。別1x画面・倍率切替・負荷、音質、RT、物理同期、署名・公証・更新へ一般化しない。証拠は [検証記録](verification.md) に置く。
 
-ユーザーの追加依頼に基づき Cargo と P01 の固定二窓を作成した。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
+ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界を作成した。P02 は現行環境で外部 native 操作を確認し、雨・左右の光・シーン閉鎖中の音継続・再表示にユーザーの確認を得た。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
 
 ## 予定ファイル構成
 
@@ -29,6 +29,7 @@
 | `src/audio/transport.rs` | `ControlMailbox`、`StatusMailbox`、`VisualRing` と固定容量の数値転送 |
 | `src/audio/lease.rs` | `EngineLease` の排他所有だけ。unsafe とその安全証明を閉じる |
 | `src/audio/timing.rs` | `StreamEpoch`、Mach 時刻、CPAL 再生予定時刻、DSP 因果遅延 |
+| `src/rt_alloc.rs` | 現存する `cfg(test)` 専用の Rust allocator 観測器。callback／固定 pool の区間だけ thread-local に数え、native backend 全体の観測とは分ける |
 | `src/ui/mod.rs` | `SceneView`／`SettingsView` の生成・再表示 |
 | `src/ui/scene.rs` | `VisibleParticles`、直接 paint、可視時だけの更新 Task |
 | `src/ui/settings.rs` | controlled Ely フォーム、stable id、操作・状態・失敗の表示 |
@@ -513,7 +514,11 @@ gpui_platform::application()
 
 scene は Blurred、透明 titlebar・タイトル文字なし、OS 信号ボタンを保持。空いた領域の drag を GPUI の titlebar drag 機構で有効化し、scene にボタン／label を置かない。設定は別通常窓、項目が収まらなければ scroll。window handle と root Subscription を保持し、close で handle／window-specific observer を解除する。root の解放を音声停止へ接続しない。「シーンを表示」は live handle なら前面、closed なら新しい root と Task を作る。設定も重複窓を作らず、既存 handle を前面へ。menu の登録済み選択は registry 順、wander／mute は model と同じ check 状態、quit は Coordinator 経由。
 
-P01 の現存経路は [`src/main.rs`](../src/main.rs) → [`app::start`](../src/app.rs) → `SceneView::new`／`SettingsView::new` である。App global に `Entity<AppModel>` を保持し、close subscription は窓 ID を照合して handle と window-specific appearance observer を解除する。global action は GPUI が active window を借用中に呼ぶため、`App::defer` 後に同じ窓の handle を更新する。scene の `app_owns_titlebar_drag=true` と左ボタンの `Window::start_window_move` を使い、Native delegate は変更しない。設定は system appearance を Ely Theme に反映した説明表示であり、未接続 controls は置かない。registry menu・音声・Coordinator は後続の成果で作成し、現在の quit は GPUI の明示 quit である。
+現存経路は [`src/main.rs`](../src/main.rs) → [`app::start`](../src/app.rs) → `SceneView::new`／`SettingsView::new` である。App global に `Entity<AppModel>`、独立した `AudioController` と制御 state を保持し、close subscription は窓 ID を照合して handle と window-specific observer を解除する。global action は active window の借用後に `App::defer` で適用する。scene は `Window::start_window_move` と直接 canvas を使い、native delegate は変更しない。設定は system appearance を Ely Theme に反映した出力状態・試聴候補の説明表示で、未接続の操作部品は置かない。通常 quit は GPUI の明示 quit だが、globals の Drop に依存せず保持した `Context::on_app_quit` で worker の停止・engine 回収・join を完了する。P12 の fade／保存 Coordinator を実装済みとはしない。
+
+P02 の声 factory は worker で rate・DSP・固定 delay を準備し、`Voice::prepared_delay` で検査済み dry metadata を取り出す。同じ初期 rate を二重に準備しない。CPAL の f32/i16 closure は [`audio::render`](../src/audio/render.rs) の実 entrypoint に入り、全 data を silence にした後に lease を一回だけ CAS で借り、checked playback ns・frame offset・voice dry delay を対応づける。実行中は sample 世界時計と全声の world を進め、寄与声だけを tick する。全体 volume／mute は世界と視覚を止めない。数値 state と粒は SeqCst atomic slot／sequence、error は epoch 別 bitset。worker の出力通知だけが非 RT の `AudioShared`／bounded wake を使う。故障は worker が gate を閉じて回収・pause し、設定を維持する。自動復旧は P10。
+
+`VisibleParticles` は固定 event 配列、registry に合わせた gains/breath と scratch、整合 header、受入済み frame の Mach 時刻を持つ。失敗時は受入済み cache と fade 時刻を変更せず、新しく開いた凍結シーンだけ worker の checkpoint 時刻で初期化する。epoch 変更では旧 cache を消し、固定 event 配列は再利用する。registry arrays の確保は境界だけで、paint／timer のたびに粒を clone しない。
 
 ### シーンpaintと更新
 
@@ -759,15 +764,15 @@ native 通知の補助依存は `async-channel=2.5.0`（native→main だけ）�
 
 | gate | 現在の状態と、未成立時の扱い |
 |---|---|
-| 実 GPUI／Ely／native／CPAL／FunDSP の build と ABI | GPUI/Ely/native の P01 候補は現行環境で build・実窓の状態観測まで。CPAL/FunDSP は未実装・未実行。範囲別の証拠を検証記録で確認する |
+| 実 GPUI／Ely／native／CPAL／FunDSP の build と ABI | 現行環境で固定依存を build し、実 GPUI 窓・標準 CPAL stream・FunDSP tick 経路を実行した。外部 native E2E と雨のユーザー確認を得た。下限 OS・署名版や他機器へ一般化しない |
 | 固定窓と desktop tiling | 現行一次画面で実 NSWindow の外枠・制約・flags を観測し、2x主画面の全OSタイリングにユーザーの成功回答を得た。native quit の識別と最終候補の状態は検証記録を参照。別1x画面・倍率切替・負荷へ一般化せず、位置固定や GPUI patch へ無断変更しない |
 | 高DPI資源と透明性 | 対応画面・倍率で未実測。固定粒／30fpsだけでGPU一定・確保成功を主張しない |
-| RTとEngineLease | 最小unsafeの証明は本書の設計。Rust競合／実最大声／初回callback／停止・build失敗で未検証。依存monitor残留も独立に確認 |
-| Mach／CPAL／物理同期 | host基準はsource確認、latency推定精度・Bluetooth・WindowServerは未実測。SPEC目標は実音光で判断 |
-| 音質・initial値 | 未試聴。候補を確定値にせずP13でユーザー試聴とSPEC／Module同時更新 |
+| RTとEngineLease | 競合・旧 epoch・閉鎖 gate・worker 回収と Rust callback／満杯 pool の scoped heap を試験した。native backend 全失敗経路・最悪 timing・最大三声・依存 monitor の残留は独立に確認する |
+| Mach／CPAL／物理同期 | Mach 変換・予定時刻 fixture と実標準 stream を確認した。latency 推定精度・Bluetooth・WindowServer・SPEC の物理同期目標は未測定 |
+| 音質・initial値 | 雨の試聴候補の smoke にユーザー確認を得た。三環境の心地よさ・初期値は未確定で、P13 でユーザー試聴と SPEC／Module を同時更新する |
 | 保存・終了 | 実I/O、latest ack、directory sync failure、fadeの予定deadline、OS termination追加selectorは未検証 |
 | Sparklecancel／agent同定 | 条件付きソース推論。実agent事前一意同定・host一意性・terminated KVO・取消後通常QuitがP16で成立しなければ技術未解決、公開不可 |
 | 署名・鍵・配信権限 | SPECの前提が未準備。仮値で代用せずP14、人の承認と実credentialsが必要 |
 | 下限OSとsignedDMG／2version更新 | 未観測。現在OS・文書検査・mock helperを代用品にしない |
 
-固定二窓と Cargo の build・幾何試験・実 GPUI/NSWindow の限定観測、2x主画面でのユーザーの画面操作の成功回答を得た。診断を除去した shipping source で外部 native E2E を実行し、実メニューと両窓からの foreground ⌘Q による対象 PID 消失・exit0 を確認した。過去の終了報告と host 生存の不一致は履歴として保持する。別1x画面・倍率切替・負荷、音声再生、RT、物理同期、保存・更新、鍵生成・署名・公証・公開は未確認である。証拠は [検証記録](verification.md) で区別し、[実装計画](implementation-plan.md) と [検証手順](verification.md) に従う。文書検査や build から未観測の合格を作らない。
+固定二窓の build・幾何試験・実 GPUI/NSWindow の限定観測と2x主画面でのユーザー回答、shipping source の外部 native E2E による menu／両窓 foreground ⌘Q の PID 消失・exit0 の履歴を保持する。P02 では標準 stream の build/play と sample 世界時計、Rust callback／満杯 pool の scoped heap 試験、出力 error bitset への注入、実 GPUI host quit の worker join を観測した。ロック中の失敗履歴と、その後の外部 native E2E 成功・雨のユーザー確認は別の観測として記録する。三環境の音質・初期値確定、物理同期、native backend の全 RT 失敗経路・最悪 timing、別1x画面・倍率切替・負荷、保存・更新・署名・公証・公開は未確認である。証拠は [検証記録](verification.md) で区別し、[実装計画](implementation-plan.md) と [検証手順](verification.md) に従う。文書検査や build から未観測の合格を作らない。

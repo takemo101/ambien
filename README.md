@@ -9,7 +9,7 @@
 
 UI は GPUI＋Ely、DSP は FunDSP、音声 I/O は CPAL、アプリ内更新は Sparkle を使う設計です。対象は Apple Silicon の macOS 15以降です。
 
-承認済み仕様に沿って実装を開始し、Cargo と固定した GPUI シーン・Ely 設定窓のコードを作成しています。音声・粒の描画・保存・更新はまだ実装されていません。[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)は予定する製品全体、[検証記録](docs/verification.md)は実際の確認と残る制約を示します。Issue の状態は mikan で管理します。
+承認済み仕様に沿って、Cargo と固定した GPUI シーン・Ely 設定窓、雨の合成・CPAL 標準出力・同じ粒の canvas 描画を実装しています。現在の環境で外部 native 操作を確認し、雨と左右の光・シーン閉鎖中の音継続・再表示についてユーザーの確認を得ました。設定操作、他の声、切り替え、保存・更新は後続の成果です。三環境の音質・初期値確定、物理同期、高DPI負荷、配布の受け入れとは区別します。[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)は予定する製品全体、[検証記録](docs/verification.md)は実際の確認と残る制約を示します。Issue の状態は mikan で管理します。
 
 詳細な要件と進行条件は [SPEC.md](SPEC.md)、開発時の作業規約は [AGENTS.md](AGENTS.md)、文書の役割と読む順序は [docs/README.md](docs/README.md) を参照してください。
 
