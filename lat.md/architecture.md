@@ -1,6 +1,6 @@
 # Architecture
 
-選択済み設計を説明する現存文書と、現在の固定二窓のソースへの案内。製品要件は [SPEC](../SPEC.md)、補助説明は [docs](../docs/README.md) を読む。予定する製品全体の Module と現存ソースを区別し、実機受け入れや作業状態の一覧にはしない。
+選択済み設計を説明する現存文書と、固定二窓・雨の音声／視覚境界のソースへの案内。製品要件は [SPEC](../SPEC.md)、補助説明は [docs](../docs/README.md) を読む。予定する製品全体の Module と現存ソースを区別し、実機受け入れや作業状態の一覧にはしない。
 
 ## Specification
 
@@ -29,6 +29,7 @@
 - [体験](../SPEC.md#体験)、[切り替えと途中操作](../SPEC.md#切り替えと途中操作)、[シチュエーション](../SPEC.md#シチュエーション)。
 - [音と絵](../SPEC.md#音と絵)、[消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止)、[スレッドと資源](../SPEC.md#スレッドと資源)。
 - [構成説明](../docs/architecture.md)で操作から音と絵への進行、世界停止と無音の違い、時計の対応づけを読む。[検証手順](../docs/verification.md)で必要な観測を確認する。
+- 現存する登録・雨合成は [`src/situations/`](../src/situations/)、標準出力・世界時計・atomic 配送・epoch lease は [`src/audio/`](../src/audio/)、制御値は [`src/controls.rs`](../src/controls.rs)。設定操作・他の声・移動は後続の成果であり、source の存在を音質・物理同期の受け入れに置き換えない。
 
 操作と表示の入口は [[architecture#Scene and settings]]。要件は [[architecture#Specification]] に戻る。
 

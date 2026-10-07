@@ -4,7 +4,7 @@
 
 本書は、[SPEC の構成と Interface](../SPEC.md#構成と-interface)で選択された構成を、責務・所有・時間・失敗の関係から説明する補助文書である。製品要件と継続条件の唯一の正本は [SPEC.md](../SPEC.md) であり、本書から新しい仕様を決めない。数値、初期値、依存の改訂は正本の該当節を参照する。
 
-以下は製品全体の選択済み設計の説明であり、稼働中の構成や性能の実測結果ではない。固定二窓のコードと Cargo は作成したが、音声・保存・更新などの Module はまだ実装していない。本書では具体的な型・呼び出し形式・細かな配置・実装順序を定めず、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、実際のソースを区別して読む。観測済みの範囲と未確認 gate は [検証記録](verification.md) に置く。最終承認と次の作業への条件は [文書の状態](../SPEC.md#文書の状態)と[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)に従う。
+以下は製品全体の選択済み設計の説明であり、性能の実測結果ではない。固定二窓と、雨の合成・標準出力・粒イベント・描画を実装した。現行環境での雨の実表示・試聴と外部 native 操作の限定確認を得たが、設定操作、他の声、移動、保存・更新は後続の成果である。本書では具体的な型・呼び出し形式・細かな配置・実装順序を定めず、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、実際のソースを区別して読む。観測済みの範囲と未確認 gate は [検証記録](verification.md) に置く。最終承認と次の作業への条件は [文書の状態](../SPEC.md#文書の状態)と[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)に従う。
 
 関連文書は [索引](README.md)、[検証手順](verification.md)、[参考資料](references.md) を参照する。
 
@@ -24,7 +24,9 @@ Interface は渡す値だけでなく、その意味、更新の扱い、失敗�
 
 GPUI がアプリの実行ループを持ち、シーンと設定はその上の別窓となる。AppKit の窓制約や Sparkle の操作に必要な Adapter は、OS と既存の Module をつなぐ範囲に限定する。設定窓や更新のために別のアプリホストへ置き換える構成ではない。
 
-現在の固定二窓の経路は、[`src/main.rs`](../src/main.rs) が GPUI を起動し、[`src/app.rs`](../src/app.rs) の global root が窓 handles と close・外観の subscriptions を所有する。設定の再表示は新しい窓を増やさず、既存窓を前面へ出す。action は active window の借用が終わってから適用する。[`src/ui/`](../src/ui/) は空白のシーンと Ely の説明表示、[`src/platform/macos.rs`](../src/platform/macos.rs) は生成前の実 workarea 補正と、同期借用した NSWindow の固定制約だけを扱う。閉窓は host 終了と分離し、音声・保存・OS 更新の仮実装は置かない。
+現存経路は、[`src/main.rs`](../src/main.rs) が GPUI を起動し、[`src/app.rs`](../src/app.rs) の global root が窓 handles、close・外観・音声更新・quit の subscriptions と Task、音声 controller、整合した制御 state を所有する。窓の close と音声停止は分離し、GPUI の quit observer では worker の停止・DSP 回収・join を明示的に待つ。設定の再表示は既存窓を前面へ出し、action は active window の借用後に適用する。[`src/ui/`](../src/ui/) は雨の固定キャッシュを直接 paint するシーンと Ely の出力状態・試聴候補表示、[`src/platform/macos.rs`](../src/platform/macos.rs) は実 workarea 補正と借用 NSWindow の固定制約を扱う。設定フォーム・終了 fade／保存調停・OS 更新の仮実装は置かない。
+
+[`src/situations/`](../src/situations/) が登録と雨固有の声・粒・揺らぎ・残響を持ち、[`src/audio/`](../src/audio/) の worker が標準 Device と config、声・固定配列を準備して stream を開始する。callback は単発 lease 借用の間だけ engine と sample 世界時計を進め、数値制御・視覚リング・epoch 専用 error bitset に触れる。UI は DSP を所有しない。worker の離散的な出力通知は非 RT の `AudioShared` と bounded wake 経路で渡し、callback から channel へ送らない。出力失敗時は worker が gate を閉じて engine を回収し、シーンは既に受け入れたキャッシュと fade 時刻を保持する。非可視シーンの更新は止め、復帰時は現在の生存イベントを読み直してから timer を開始する。
 
 ## 操作から音と絵まで
 

@@ -3,11 +3,13 @@ use std::error::Error;
 use ely::theme::{Mode, Theme};
 use gpui::{
     App, AppContext, Context, Entity, Global, KeyBinding, Menu, MenuItem, Render, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId,
-    WindowOptions, actions,
+    Task, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowId, WindowOptions, actions,
 };
 
 use crate::{
+    audio::{AudioController, OutputStatus},
+    controls::ControlState,
     platform::macos::{WindowGeometryError, WindowRole, constrain_window, prepare_window},
     ui::{scene::SceneView, settings::SettingsView},
 };
@@ -23,6 +25,10 @@ impl Global for AppRoot {}
 pub(crate) struct AppModel {
     scene: Option<WindowHandle<SceneView>>,
     settings: Option<WindowHandle<SettingsView>>,
+    audio: AudioController,
+    controls: Option<ControlState>,
+    audio_updates: Option<Task<()>>,
+    audio_quit: Option<Subscription>,
     // The global root keeps subscriptions alive; callbacks do not own the root.
     _window_closed: Option<Subscription>,
     settings_appearance: Option<Subscription>,
@@ -32,11 +38,16 @@ pub(crate) fn start(cx: &mut App) {
     ely::init(cx);
     Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
 
-    let owner = cx.new(|_| AppModel {
+    let (audio, updates) = AudioController::start();
+    let owner = cx.new(move |_| AppModel {
         scene: None,
         settings: None,
         _window_closed: None,
         settings_appearance: None,
+        audio,
+        controls: None,
+        audio_updates: None,
+        audio_quit: None,
     });
     cx.set_global(AppRoot(owner.clone()));
 
@@ -50,6 +61,26 @@ pub(crate) fn start(cx: &mut App) {
         });
     });
     owner.update(cx, |model, _| model._window_closed = Some(closed));
+    owner.update(cx, |model, cx| {
+        // GPUI retains globals through native shutdown; root Drop alone is not a quit hook.
+        model.audio_quit = Some(cx.on_app_quit(|model, _| {
+            model.audio.shutdown();
+            std::future::ready(())
+        }));
+    });
+    let update_task = owner.update(cx, |_, cx| {
+        cx.spawn(async move |owner, cx| {
+            while updates.recv().await.is_ok() {
+                if owner
+                    .update(cx, |model, cx| model.audio_updated(cx))
+                    .is_err()
+                {
+                    break; // The application owner has been released.
+                }
+            }
+        })
+    });
+    owner.update(cx, |model, _| model.audio_updates = Some(update_task));
 
     cx.bind_keys([
         KeyBinding::new("cmd-,", ShowSettings, None),
@@ -101,7 +132,12 @@ impl AppModel {
             })?;
             return Ok(());
         }
-        self.scene = Some(open_window(WindowRole::Scene, SceneView::new, cx)?);
+        let audio = self.audio.shared();
+        self.scene = Some(open_window(
+            WindowRole::Scene,
+            move |window, cx| SceneView::new(window, cx, audio),
+            cx,
+        )?);
         Ok(())
     }
 
@@ -114,7 +150,13 @@ impl AppModel {
             return Ok(());
         }
         Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
-        let handle = open_window(WindowRole::Settings, SettingsView::new, cx)?;
+        let (status, source) = self.audio.shared().snapshot();
+        let description = self.control_description(source.as_deref());
+        let handle = open_window(
+            WindowRole::Settings,
+            move |window, cx| SettingsView::new(window, cx, status.text(), description),
+            cx,
+        )?;
         self.settings_appearance = Some(handle.update(cx, |_, window, _| {
             window.observe_window_appearance(|_, cx| {
                 cx.defer(|cx| {
@@ -124,6 +166,62 @@ impl AppModel {
         })?);
         self.settings = Some(handle);
         Ok(())
+    }
+
+    fn control_description(&self, source: Option<&crate::audio::AudioSource>) -> Option<String> {
+        let controls = self.controls.as_ref()?;
+        let registry = &source?.registry;
+        let mut text = format!(
+            "試聴候補: 出力音量 {:.0}%（OS 音量は変更しません）",
+            controls.volume.get() * 100.0
+        );
+        for definition in registry.definitions() {
+            let index = registry
+                .resolve(definition.id)
+                .expect("validated registry definitions resolve their own IDs");
+            for (knob, flat) in definition.knobs.iter().zip(registry.knob_range(index)) {
+                let key = crate::situations::KnobIndex::from_index(flat, controls.knobs.len())
+                    .expect("validated registry range fits the full control state");
+                let value = controls.knobs[key.get()];
+                text.push_str(&format!(" / {} {:.0}%", knob.label, value.get() * 100.0));
+            }
+        }
+        Some(text)
+    }
+
+    fn audio_updated(&mut self, cx: &mut Context<Self>) {
+        let (status, source) = self.audio.shared().snapshot();
+        if self.controls.is_none()
+            && let Some(source) = &source
+        {
+            let state = ControlState::new(&source.registry);
+            // Main now owns the full control state and its sole publication authority.
+            source.controls.publish(&state);
+            self.controls = Some(state);
+        }
+        if let Some(handle) = self.scene {
+            let status = status.clone();
+            let source = source.clone();
+            if let Err(error) = handle.update(cx, |view, window, cx| {
+                view.update_audio(status, source, window, cx);
+            }) {
+                eprintln!("Ambien: シーンに音声状態を表示できません: {error}");
+            }
+        }
+        if matches!(status, OutputStatus::Failed { .. })
+            && self.settings.is_none()
+            && let Err(error) = self.show_settings(cx)
+        {
+            eprintln!("Ambien: 音声出力の失敗を表示できません: {error}");
+        }
+        if let Some(handle) = self.settings {
+            let description = self.control_description(source.as_deref());
+            if let Err(error) = handle.update(cx, |view, _, cx| {
+                view.update_audio(status.text(), description, cx);
+            }) {
+                eprintln!("Ambien: 設定に音声状態を表示できません: {error}");
+            }
+        }
     }
 
     fn window_closed(&mut self, window_id: WindowId) {

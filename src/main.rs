@@ -1,5 +1,10 @@
 mod app;
+mod audio;
+mod controls;
 mod platform;
+#[cfg(test)]
+mod rt_alloc;
+mod situations;
 mod ui;
 
 fn main() {
