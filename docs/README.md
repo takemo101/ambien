@@ -36,6 +36,10 @@ SPEC.md                製品要件・受け入れ条件・継続条件
 AGENTS.md              開発規約
 package.json           開発用 Lat CLI・Node 条件・実在する検査コマンド
 package-lock.json      固定された開発依存の再現
+Cargo.toml             GPUI/Ely と実使用 native 依存の定義
+Cargo.lock             解決したアプリ依存の固定
+rust-toolchain.toml    実使用 Rust toolchain
+src/                   現存する固定二窓の entry・所有・view・AppKit Adapter
 
 docs/
   README.md            この索引

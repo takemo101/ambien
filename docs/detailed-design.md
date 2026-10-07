@@ -5,10 +5,10 @@
 2026-10-07 時点の、承認済み [SPEC](../SPEC.md) を実装へ落とす設計である。製品要件・既定値・依存改訂の唯一の正本は SPEC。本書は実現方法、Interface の意味、所有、失敗、時計を定め、[実装計画](implementation-plan.md) は P01〜P18 の順序・作業・受け入れを定める。作業 Status は複製しない。[概念構成](architecture.md) と [検証手順](verification.md) はそれぞれ関係の説明と観測方法を扱う。
 
 - **確認済みソース**：固定改訂の一次資料で確認したライブラリの Interface・Implementation。節内の URL が根拠である。
-- **計画 Interface／設計**：Ambien がこれから作る型・関数・規則。Rust／C／疑似コードはこの契約を示す代表断片であり、現存するアプリコードやコンパイル済みコードではない。
-- **未実機検証**：音質、RT 経路、固定窓、物理同期、署名・公証・更新。ソースの実現手段、数学モデルの計算、文書検査をこれらの合格に読み替えない。
+- **計画 Interface／設計**：製品全体の型・関数・規則を示す代表断片。実際に作成した部分は以下の現存ソースへの参照と区別し、断片をコンパイル済みコードの転載として扱わない。
+- **限定検証**：固定二窓は build・幾何試験・実 GPUI/NSWindow の状態観測を実施し、2x主画面でガラス・シーン／設定操作・最小化と復帰・system appearance・全OSタイリングの成功回答を得た。診断を除去した shipping source に外部 AX／foreground CGEvent の E2E runner を実行し、設定・窓の lifecycle と、両窓からの ⌘Q による実 PID 消失・exit0 を確認した。過去の physical 終了報告と host 生存の不一致の原因特定とは区別する。別1x画面・倍率切替・負荷、音質、RT、物理同期、署名・公証・更新へ一般化しない。証拠は [検証記録](verification.md) に置く。
 
-本書の予定配置は未実装である。ユーザーは詳細設計・計画の作成と詰めの完了後、全作業の mikan Issue 作成を依頼したが、Cargo、`src/`、`native/`、配布スクリプトの作成・実装開始は依頼していない。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
+ユーザーの追加依頼に基づき Cargo と P01 の固定二窓を作成した。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
 
 ## 予定ファイル構成
 
@@ -16,8 +16,8 @@
 
 | 予定ファイル | 所有・変更理由 |
 |---|---|
-| `src/main.rs` | GPUI host 起動、Assets、Ely 初期化、アプリ寿命の root 保持。保存・DSP を実装しない |
-| `src/app.rs` | `AppModel`、メニュー actions、設定端点、窓 handles、失敗表示、各 Module の接続 |
+| `src/main.rs` | GPUI host 起動、Assets、明示的な quit mode。保存・DSP を実装しない |
+| `src/app.rs` | `AppModel` の所有 root、Ely 初期化、メニュー actions、設定端点、窓 handles、失敗表示、各 Module の接続 |
 | `src/controls.rs` | `Normalized`、登録 index、`Revision`、`ControlState` と UI 操作 Reducer。viewport は制御に混ぜない |
 | `src/situations/mod.rs` | `Registry`、`SituationDefinition`、`KnobDefinition`、`Voice`、`PreparedVoice`、登録リスト |
 | `src/situations/rain.rs`・`rock.rs`・`deep.rs` | 各声の固有合成、曲線、見え方、試聴で確定するノブ初期値 |
@@ -499,7 +499,7 @@ scene hidden／最小化／完全 occlusion／close では scene Task を止め�
 [GPUI platform entry](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_platform/src/gpui_platform.rs)、[Ely init](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/lib.rs) の呼出し順を使う。
 
 ```rust
-// 確認済み呼出し形式。elyはely_gpui_componentのimport名、AppModelだけが計画型。
+// 固定 host API の呼出し形式。実際の entry/root は src/main.rs と src/app.rs。
 gpui_platform::application()
     .with_assets(ely::Assets)
     .with_quit_mode(gpui::QuitMode::Explicit)
@@ -512,6 +512,8 @@ gpui_platform::application()
 `App::open_window(WindowOptions, ...)` で root `Entity<SceneView>`／`Entity<SettingsView>` を作る。両窓とも `WindowBounds::Windowed`、`titlebar:Some(...)`、`is_resizable:false`、`show:false`、`focus:false`、tabbing 無し。open 前 fit、同期 AppKit 設定の後 `activate_window()` で表示する。[WindowOptions](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/platform.rs#L2174-L2236)、[native style／renderer 初期化](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/window.rs#L990-L1107)
 
 scene は Blurred、透明 titlebar・タイトル文字なし、OS 信号ボタンを保持。空いた領域の drag を GPUI の titlebar drag 機構で有効化し、scene にボタン／label を置かない。設定は別通常窓、項目が収まらなければ scroll。window handle と root Subscription を保持し、close で handle／window-specific observer を解除する。root の解放を音声停止へ接続しない。「シーンを表示」は live handle なら前面、closed なら新しい root と Task を作る。設定も重複窓を作らず、既存 handle を前面へ。menu の登録済み選択は registry 順、wander／mute は model と同じ check 状態、quit は Coordinator 経由。
+
+P01 の現存経路は [`src/main.rs`](../src/main.rs) → [`app::start`](../src/app.rs) → `SceneView::new`／`SettingsView::new` である。App global に `Entity<AppModel>` を保持し、close subscription は窓 ID を照合して handle と window-specific appearance observer を解除する。global action は GPUI が active window を借用中に呼ぶため、`App::defer` 後に同じ窓の handle を更新する。scene の `app_owns_titlebar_drag=true` と左ボタンの `Window::start_window_move` を使い、Native delegate は変更しない。設定は system appearance を Ely Theme に反映した説明表示であり、未接続 controls は置かない。registry menu・音声・Coordinator は後続の成果で作成し、現在の quit は GPUI の明示 quit である。
 
 ### シーンpaintと更新
 
@@ -552,7 +554,7 @@ AppKit Adapter が collectionBehavior の既存 bits から FullScreenPrimary／
 
 ### screen、outer、content、top-left
 
-**計画する AppKit Adapter** は `WindowPlacement`（display UUID、相対 outer top-left、補正後 content size）、`WindowGeometryError`（display unavailable／invalid finite geometry／native handle unavailable）を返す。基準 content は SPEC、saved width／height を任意サイズとして採らない。
+P01 の現存 Adapter は [`src/platform/macos.rs`](../src/platform/macos.rs) の `prepare_window(WindowRole, DisplayId) -> Result<PreparedWindow, WindowGeometryError>` と `constrain_window(&Window, &PreparedWindow) -> Result<(), WindowGeometryError>` である。`PreparedWindow` は GPUI の bounds と display ID、error は main-thread required／display unavailable／invalid geometry／native handle unavailable を区別する。GPUI の f32 dimensions が workarea を超えて丸められないよう縮小側に表現し、相対 outer top-left も外枠の収まる表現可能範囲へ補正する。保存 UUID と画面変更通知を伴う `WindowPlacement` は P11 の計画 Interface であり、現在の保存・復元 API ではない。基準 content は SPEC、saved width／height を任意サイズとして採らない。
 
 1. 現在 displays の UUID を保存 UUID と照合し、無ければ現在 primary display。UUID の取得失敗を一致と扱わない。display 未取得は最後に確認した finite geometry／制約を維持し、架空の無限領域を作らない。初回から有効 display が無い場合は窓生成を延期して明示失敗とし、取得後に通常 fit を行う。
 2. AppKit NSScreen の global bottom-left `frame` と `visibleFrame` を取得する。GPUI の display bounds／visible_bounds は display 内 top-left 論理座標なので区別する。[GPUI MacDisplay 変換](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/display.rs#L112-L150)
@@ -749,16 +751,16 @@ HTTPS Pages と Releases redirect、公開権限、実初回取得、隔離2vers
 
 本文の primary URL は SPEC の固定改訂を指す。GPUI／Ely は宣言と Implementation の読取り、CPAL／FunDSP は実 config・timestamp・tick・所有の確認、Sparkle は実 headers と cancel／agent の因果経路を確認したもの。Library 名だけで no-alloc、所有回収、標準UI integration、安全な更新取消を保証しない。
 
-native 通知の補助依存は固定 GPUI workspace と Ely lock に対応する候補として `async-channel=2.5.0`（native→main だけ）、`objc2=0.6.4`、`objc2-app-kit`／`objc2-foundation=0.3.2`、`raw-window-handle=0.6.2`、`block2=0.6.2` を予定する。gpui は default-features=false＋stacker、gpui_platform は false＋font-kit、Ely は false＋runtime_shaders。manifest の rev は [SPEC](../SPEC.md#依存の選定) を参照する。AppKit features は実使用の NSAccessibility／NSButton／NSControl／NSResponder／NSScreen／NSView／NSWindow／NSWorkspace と必要な Foundation observer に限定する。Sparkle／KVOを ObjC bridge に閉じるなら未使用の Rust NSRunningApplication／NSBundle features を先に追加しない。
+native 通知の補助依存は `async-channel=2.5.0`（native→main だけ）と `block2=0.6.2` を候補とするが、未使用の P01 では直接依存に追加しない。現存 P01 の借用 Adapter は `objc2=0.6.4`、`objc2-app-kit`／`objc2-foundation=0.3.2`、`raw-window-handle=0.6.2` を使う。gpui は default-features=false＋stacker、gpui_platform は false＋font-kit、Ely は false＋runtime_shaders。rev の正本は [SPEC](../SPEC.md#依存の選定)、実使用 features と解決版は [`Cargo.toml`](../Cargo.toml)／[`Cargo.lock`](../Cargo.lock)。現在の screen geometry には NSGraphics、NSNumber には Foundation の NSValue feature が必要である。通知・アクセシビリティ・Sparkle の features はそれぞれを実装する時に限定して追加する。
 
-[Zed manifest](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/Cargo.toml#L704-L755)、[Ely manifest](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/Cargo.toml#L1-L23) に対応する候補であり、両 project lock が完全一致する主張でも Ambien build 成功でもない。実 lockfile で transitive版・features・ABI を固定し、依存更新を勝手な互換 shim で吸収しない。
+[Zed manifest](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/Cargo.toml#L704-L755)、[Ely manifest](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/Cargo.toml#L1-L23) と実使用 API に合わせて P01 の lockfile を作成し、現行開発環境で GPUI/Ely/native の build と実窓の経路を確認した。両 project lock の完全一致や、未実装の CPAL/FunDSP/Sparkle の ABI・下限 OS の成立は主張しない。依存更新を勝手な互換 shim で吸収しない。
 
 ### 完了を止める具体的gate
 
 | gate | 現在の状態と、未成立時の扱い |
 |---|---|
-| 実 GPUI／Ely／native／CPAL／FunDSP の build と ABI | 未実装・未実行。実 lockfile／framework link で成立しなければ実装を完了にしない |
-| 固定窓と desktop tiling | source は nonresizable／fullscreen flags まで。通常desktop全経路のcontent不変は未実機。位置固定やGPUI patchへ無断変更しない |
+| 実 GPUI／Ely／native／CPAL／FunDSP の build と ABI | GPUI/Ely/native の P01 候補は現行環境で build・実窓の状態観測まで。CPAL/FunDSP は未実装・未実行。範囲別の証拠を検証記録で確認する |
+| 固定窓と desktop tiling | 現行一次画面で実 NSWindow の外枠・制約・flags を観測し、2x主画面の全OSタイリングにユーザーの成功回答を得た。native quit の識別と最終候補の状態は検証記録を参照。別1x画面・倍率切替・負荷へ一般化せず、位置固定や GPUI patch へ無断変更しない |
 | 高DPI資源と透明性 | 対応画面・倍率で未実測。固定粒／30fpsだけでGPU一定・確保成功を主張しない |
 | RTとEngineLease | 最小unsafeの証明は本書の設計。Rust競合／実最大声／初回callback／停止・build失敗で未検証。依存monitor残留も独立に確認 |
 | Mach／CPAL／物理同期 | host基準はsource確認、latency推定精度・Bluetooth・WindowServerは未実測。SPEC目標は実音光で判断 |
@@ -768,4 +770,4 @@ native 通知の補助依存は固定 GPUI workspace と Ely lock に対応す�
 | 署名・鍵・配信権限 | SPECの前提が未準備。仮値で代用せずP14、人の承認と実credentialsが必要 |
 | 下限OSとsignedDMG／2version更新 | 未観測。現在OS・文書検査・mock helperを代用品にしない |
 
-アプリは未実装であり、build／アプリの test／音声再生／実GUI／鍵生成／署名／公証／公開は未実施。文書の独立レビュー・参照検査・数学モデルの計算とその限界は [検証記録](verification.md) に残す。実装後の観測は [実装計画](implementation-plan.md) と [検証手順](verification.md) の責務であり、文書検査から未観測の合格を作らない。
+固定二窓と Cargo の build・幾何試験・実 GPUI/NSWindow の限定観測、2x主画面でのユーザーの画面操作の成功回答を得た。診断を除去した shipping source で外部 native E2E を実行し、実メニューと両窓からの foreground ⌘Q による対象 PID 消失・exit0 を確認した。過去の終了報告と host 生存の不一致は履歴として保持する。別1x画面・倍率切替・負荷、音声再生、RT、物理同期、保存・更新、鍵生成・署名・公証・公開は未確認である。証拠は [検証記録](verification.md) で区別し、[実装計画](implementation-plan.md) と [検証手順](verification.md) に従う。文書検査や build から未観測の合格を作らない。

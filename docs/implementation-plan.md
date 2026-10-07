@@ -1,6 +1,6 @@
 # Ambien Implementation Plan
 
-> **実装前の計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に詳細設計・計画・調査・文書検証を完了し、ユーザーの依頼により P01〜P18 を mikan Issue 化して登録内容を検証した。さらに対象文書の PR 作成・通常マージまでを依頼された。今回の許可は文書の検証・レビュー・Git 書込み・PR 統合と同期までであり、アプリ実装、Cargo 作成、鍵生成、署名、一般公開は開始しない。以下の `src/`、`native/`、`resources/`、`scripts/package-app.sh`、Cargo 関連 paths は**未作成の予定配置**であり、コマンドもそれらを作成し実行権限を得た後の手順である。
+> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo と P01 の固定二窓のソースは作成したが、以降の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
 >
 > **実装 AI 向け:** writing-plans の成果単位・checkbox・境界試験の考え方を使う。未導入の superpowers 実行器や worktree は必須にしない。実行フローは [AGENTS](../AGENTS.md)、[開発手順](development.md)、[Lat 運用](../lat.md/workflow.md) に従う。P01〜P18 は計画の安定参照であり、mikan ID や Status ではない。checkbox は成果の受け入れ項目であって進捗台帳ではなく、進捗は mikan のみで管理する。
 
@@ -20,7 +20,7 @@
   - [ ] 実経路を最小実装し、対象試験・境界・失敗注入を通す。実機 smoke を行い、推測・自動試験・実機・ユーザー判断を別々に記録する。
   - [ ] 関係する `docs/architecture.md`、`docs/verification.md`、`docs/detailed-design.md`、`docs/implementation-plan.md` と現存 Lat entry の古くなった案内だけを更新する。SPEC を変更する製品判断は先にユーザーへ戻す。
   - [ ] 必要な全体検査、独立レビュー、指摘修正、許可された PR の通常 merge、but 同期、mikan Report を [開発手順](development.md#mikan-の-issue-進行) に従って完了する。未 merge・未受入を completed にしない。
-- **予定する検査コマンド:** P01 で実在する単一 Cargo package を作成した後に、`cargo test`（当該 behavior test と workspace 回帰）、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build` を用いる。期待は exit 0 と当該 assertion の成功であり、未実施を成功扱いしない。`cargo run` は開発 app の smoke、`scripts/package-app.sh` は P15/P17 で作成後の署名 bundle 経路に限る。native/Sparkle が必要になると framework と認証前提も必要で、`cargo run` 単体を配布物成功にしない。
+- **Rust 検査コマンド:** P01 の実在する単一 Cargo package に対して、`cargo test --locked`（当該 behavior test と package 回帰）、`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo build --locked` を用いる。期待は exit 0 と当該 assertion の成功であり、未実施を成功扱いしない。`cargo run --locked` は開発 app の smoke、`scripts/package-app.sh` は P15/P17 で作成後の署名 bundle 経路に限る。native/Sparkle が必要になると framework と認証前提も必要で、`cargo run` 単体を配布物成功にしない。
 - 文書・Lat の変更後は統合担当が `npm run check:docs` を一度まとめて実行する。これは Rust、通常リンク、意味的整合、実機受け入れの証明ではない。検証結果の形式・安全な音量・停止条件は [検証手順](verification.md#安全な試行条件と中止条件) に従う。
 
 ## 予定ファイルと責務

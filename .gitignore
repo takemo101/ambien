@@ -5,3 +5,6 @@
 # Installed development dependencies and local mikan state
 /node_modules/
 /.mikan/
+
+# Rust build outputs
+/target/

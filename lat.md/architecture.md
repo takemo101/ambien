@@ -1,6 +1,6 @@
 # Architecture
 
-選択済み設計を説明する現存文書への案内。製品要件は [SPEC](../SPEC.md)、補助説明は [docs](../docs/README.md) を読む。以下は実装済み Module・API・ソース配置の一覧ではない。
+選択済み設計を説明する現存文書と、現在の固定二窓のソースへの案内。製品要件は [SPEC](../SPEC.md)、補助説明は [docs](../docs/README.md) を読む。予定する製品全体の Module と現存ソースを区別し、実機受け入れや作業状態の一覧にはしない。
 
 ## Specification
 
@@ -39,6 +39,7 @@ GPUI がホストするシーンと設定窓、Ely の設定部品、窓サイ�
 - [窓](../SPEC.md#窓)、[固定サイズと内部描画](../SPEC.md#固定サイズと内部描画)、[高DPIと描画負荷](../SPEC.md#高dpiと描画負荷)。
 - [設定窓](../SPEC.md#設定窓)、[ボリューム設定](../SPEC.md#ボリューム設定)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
 - [構成説明](../docs/architecture.md)で固定窓と viewport、操作を音へ渡す責任を読む。[検証手順](../docs/verification.md)で固定サイズ・画面収まり・ガラス表現・高 DPI の証拠を確認する。
+- 現存する窓の接続は [`src/main.rs`](../src/main.rs) と [`src/app.rs`](../src/app.rs)、表示は [`src/ui/scene.rs`](../src/ui/scene.rs) と [`src/ui/settings.rs`](../src/ui/settings.rs)、生成前の実 workarea 補正と借用 NSWindow の固定制約は [`src/platform/macos.rs`](../src/platform/macos.rs)。
 
 世界と粒の関係は [[architecture#Audio and world]]、復元と保存は [[architecture#Persistence]]、OS との境界は [[architecture#macOS and updates]]。
 
@@ -68,6 +69,7 @@ macOS の窓制約・アクセシビリティと、Sparkle による手動更新
 
 - [開発規約](../AGENTS.md)、[開発手順](../docs/development.md)、[文書案内](../docs/README.md)、[参考資料](../docs/references.md)。
 - [package.json](../package.json)と[package-lock.json](../package-lock.json)が開発用 Lat CLI と Node 条件を定義する。アプリの依存定義ではない。
+- [`Cargo.toml`](../Cargo.toml)、[`Cargo.lock`](../Cargo.lock)、[`rust-toolchain.toml`](../rust-toolchain.toml) が実際のアプリ依存と toolchain を固定する。Rust の検査・GUI 起動の現在のコマンドと条件は [開発手順](../docs/development.md#文書検査と-rust-アプリ検証) を読む。
 - [[workflow]] で実在する npm コマンドと副作用を読む。`check` は現状 `check:docs` のみであり、製品コードの試験・ビルド・実機証明ではない。
 
 作業前に [[architecture#Specification]] と対象の正本文書を読み、変更後は関係する案内だけを更新する。Issue の Status・試験件数・仕様全文をここへ複製しない。
