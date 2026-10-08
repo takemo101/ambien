@@ -931,5 +931,13 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 
 新shipping SHA256は `2c2dbd50e647846bf1e6235cb1438f6a99052a5c91a82a961a7658f8bed3cddd`。同SHAの実GPUI `lifecycle` 7.08秒PASS、`target/native-e2e/run-C44CEEA0-8DA6-4B91-A4FB-AAABE3189E36/report.json` に所有menu／minimize／zero-window再生成／3正常Quit40118・40274・40280 exit0を記録。native lifetime read-only review1分17秒findings0／confidence0.95、recovery consumer review1分32秒findings0／confidence0.94。reviewerは検査・起動・編集なし。
 
-是正後の本人による実出力切替／rate変更・再接続・出力不可からの復旧、sleepに関するworld／消音／シーン保持と可聴復帰は依然未確認。過去の実失敗や限定成功を全面成功に書き換えず、修正候補で判別する結果を明示して残る受け入れを再開する。PR12はDraftのまま、受け入れ後の通常merge・but同期・Mikan反映を最後に停止し、P11へ進まない。
+是正後の本人による実出力切替は、次節のユーザー報告で問題なしと確認された。実rate変更・再接続・出力不可からの復旧、sleepに関するworld／消音／シーン保持と可聴復帰の未観測条件は別に残す。過去の実失敗や限定成功を全面成功に書き換えず、確認済みの切替を同じ失敗の再確認のために繰り返さない。PR12はDraftのまま、受け入れ後の通常merge・but同期・Mikan反映を最後に停止し、P11へ進まない。
+
+### 修正版の実出力切替についてのユーザー成功報告
+
+ユーザーは「問題ありませんでした」と報告し、2026-10-09 06:40:00 localの設定画像を提示した。960×784の実画像は「標準出力で再生中: 44100 Hz / 2 channel / F32。出力世代1」、雨、音量30%／消音off／wander on、滞在12分／40分・自動40秒、main／receiptとも設定0・手動0、receipt world5.375秒で、旧listener shutdownエラーは表示されていない。本人による出力切替の問題なしという結果を受け入れ、画像の再生状態と別々の証拠として記録する。1枚の出力世代1から切替前後の世代増加や実rate変更を推定せず、消音offの画像を復旧による消音解除とも消音保持の成功とも扱わない。
+
+受領後のread-only OS metadataは唯一のlive Ambien PID35400、起動2026-10-09 06:39:41 local、native executableは現存 `target/debug/ambien`。そのpathの現在のbytesは上記shipping SHA256 `2c2dbd…` と一致する。画像にPIDやbinary hashが埋め込まれているとは主張しない。AI-owned private候補62621は、それ以前の2026-10-08T21:39:00ZにProcessのnormal exit0で終了、private stderrは0bytes、終了操作の種類は未観測である。終了済みhuman helperを除去して、private fixtureと観測証拠を保持した。現在のユーザー起動appへAIの入力・終了・HOME／音量変更は行っていない。
+
+次の未完観測は修正版での実sleep/wake、寝る直前のworld／残り滞在・交差からの再開、消音onの保持、シーン再開と古い光の一斉再生がないこと。さらに実再接続／rate変更／出力使用不能を作れる範囲と滑らかな可聴復帰を個別に判定する。出力切替の成功報告だけでP10全体を受け入れ・通常mergeしない。
 
