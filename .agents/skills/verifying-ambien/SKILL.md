@@ -1,6 +1,6 @@
 ---
 name: verifying-ambien
-description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・短い連続選択・ひとりで移ると時間設定・音量・消音の受理、または固有の検証コマンドと受け入れ条件を確認するとき。
+description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・短い連続選択・ひとりで移ると時間設定・音量・消音の受理、予定表示・非表示と再表示、または固有の検証コマンドと受け入れ条件を確認するとき。
 ---
 
 # Ambien 固有の検証レシピ
@@ -25,6 +25,7 @@ description: Use when Ambien の native E2E、実行元の権限不足・許可�
 | 深海の2ノブ・三環境選択・消音中frame | `deep` | 「シチュエーション」「切り替えと途中操作」／深さ0・空気0→空気100・深さ100、三環境のmenu／settings choiceと独立mute保持、深海へ戻った両端点の保持、exact receipt0/0→11/10。設定close後2.3秒のsetup分離、所有シーンの`deep-muted` PNG3枚／隣接2比較、実menu Quit正常0。receipt・待ち時間・画像は実gain／低い可聴音／気泡頻度／物理的な暗さ・速度／同期を証明せず、端点を品質採用値にしない |
 | 三環境の短い連続選択・既に鳴る対象・独立mute／volume | `mixing` | 「切り替えと途中操作」「設定窓」／実menu雨→岩→深海→岩→深海→選択済み深海の開始間隔を各2秒未満で観測（入力cadenceのみ）。実settings pointerで雨→岩→深海→選択済み深海、観測depthの1段編集、消音中volume0→10→20→19→18、実viewport scroll後もfocused volume identity／receipt17/11不変、settings pointer解除18%→19→20とmenu再消音、最新深海22/12。各操作のexact main/audio receipt・排他radio／menu mark・独立mute、所有`mixing-muted` PNG3枚／2比較、設定再生成後の最新値、実menu Quit正常0。DSP settle待ちを置かず、captureが交差中か到着後かは保証しない。receipt・入力間隔・画像は実gain／最大三声RT／再入場tail／波形peak・RMS・click／物理同期を証明しない |
 | 自動移動・時間の対補正・手動介入 | `wandering` | 「体験」「時間設定」「切り替えと途中操作」／実menuと設定pointerのon/off、menu岩・settings雨・雨ノブ1段がoff、消音volume1段と時間だけの編集はon保持、main/audio世代・排他menu/radio。focused Home／Right／Leftからmin1→2でmax1→2、max2→1でmin2→1、最終1/1分・自動1秒、実説明「次の滞在から適用」「次の自動切り替えから適用」。最終雨19/4・2.3秒setup分離・on20/4、wall60〜95秒内の別表示と60秒保持、最初の変更からwall60〜95秒内の二回目の別表示、off21/4後65秒最新対象保持、正常Quit0。capture不要、時間短縮hook・仮想時計なし。main／receipt／menuを前後照合し、5秒内にcoherentな排他表示が得られなければFAIL。wall・AX・receiptを生成sample数、gain／到着、PRNG一様性、RT、可聴無音・品質、物理同期の証拠にしない |
+| 最小化中のworld/wander・hide/closeと復帰 | `presentation` | 「視覚イベント」「再生予定時刻」「窓」／capture必須。fresh0/0からmenu消音1/0・wander off2/0、focused Homeで滞在1/1分・自動1秒3/0→5/0、on6/0。sceneの実AX最小化を保持し、on開始からwall60〜95秒内の実別対象、unchanged6/0・manual0・排他menu/radio・finite receipt worldの進行を前後照合。最小化restore、own opaque cover3秒の除去、AXHidden=trueを実NS/AX状態で3秒観測してfalseへ、scene close2秒中のtime1→2とreceipt7/0・wander/mute on・現在のcoherent target/world進行、実menu再生成。minimize/unhide/reopenの各stageで所有PNG3枚／隣接2比較（合計9枚／6比較）と正常menu Quit0。coverはrunner自身の非対話NSWindowだけで、他appへ入力・撮影しない。UI/wall/PNGはsample数・old particle同定・Task停止/maxfps・RT・可聴品質・物理同期の証拠にしない |
 | 消音中の実シーン窓 frame 変化 | `visual` | 「音と絵」「検証条件」／所有窓 PNG と内部 pixel 比較。背景透過の変化も含み得る |
 | 上記すべて | `all`（省略時） | 選択した全ケースの証拠 |
 | 値・時間・状態・容量・callback 境界 | `cargo test --locked` | 現存 `src/controls.rs`、`src/audio/`、`src/platform/` の対応試験。native smoke の代わりにしない |
@@ -41,7 +42,7 @@ description: Use when Ambien の native E2E、実行元の権限不足・許可�
 /usr/bin/swift -e 'import CoreGraphics; print(CGPreflightScreenCaptureAccess())'
 ```
 
-falseなら取得APIや未完の`visual`／`situations`／`deep`／`mixing`画像段階を実行せず、共通手順で次の具体的な準備を案内する。trueは画面取得の利用可否だけであり、安全入力や画像ケースの合格ではない。現存runnerがsession／display／AX／event／所有を確認する。`lock=true`なら候補起動前にblockedとして停止し、ユーザー本人のunlock後の実セッション変化があるまで再試行しない。binary hashと関連条件の影響を照合し、既存lifecycle／controlsの成功が有効なら、準備のためにそれらを繰り返さず、未完の選択ケースだけを新規runで実行する（以下はvisualの例。岩は`--case situations`、深海は`--case deep`、三環境の連打は`--case mixing`）：
+falseなら取得APIや未完の`visual`／`situations`／`deep`／`mixing`／`presentation`画像段階を実行せず、共通手順で具体的な手動準備を案内する。trueは取得可否だけで安全入力／画像合格ではない。runnerはsession／display／AX／event／所有を確認し、lock=trueなら起動前blocked、本人unlockによる実変化まで再試行しない。hashと関連条件が有効な既存lifecycle／controlsは繰り返さず、未完caseだけを新規runで選ぶ（以下はvisualの例。岩はsituations、深海はdeep、連打はmixing、予定視覚と非表示復帰はpresentation）。permission不足をAIがOS/TCC設定変更で補わない。
 
 ```sh
 /usr/bin/swift scripts/native-e2e.swift "$PWD/target/debug/ambien" \
@@ -50,12 +51,14 @@ falseなら取得APIや未完の`visual`／`situations`／`deep`／`mixing`画�
 
 現存visualの契約は、実menu消音と受理、同じ所有シーン窓・bounds・window ID・消音markとexact foreground／AX focused windowの確認、間隔を置いた実PNG3枚、隣接2組ともhelperのcropped interior比較で変化、実menu Quit正常exit0である。helperのJSONにある所有identity・寸法・crop・測定・限界と今回のreportを照合する。途中で止まったら過去のfail／blockedと保存済みPNG／測定を保持し、2枚取得や1組の変化を全契約の成功にしない。failure cleanupは正常Quitではない。権限成功後のfocus不一致を権限不足へ戻さず、共通スキルの通常再開／限定診断の条件に従う。未実装の診断flagや自動focus回復を案内しない。
 
+`presentation` のAXHiddenはpublic AX setterの成功と実NS/AX hidden状態を両方確認する。hide/unhideの便利APIのreturnだけを状態の証拠にしない。新sceneのAX boundsとCG frameはOS開窓animation中に一致しない場合があるため、同じowned window／foreground／固定AX boundsと一意のexact CG matchを既存5秒内で観測してから最初のcaptureを開始する。幅・位置の許容差を広げず、その後は同じID/boundsを毎回確認する。自動対象の更新でretireされたowned AX virtual descendantは既存のPID／同じsettings window検査でsnapshot全体を破棄する。入力・captureのguardはcatchせず、安定した不一致・重複世代を通さない。scopeの異なる一般retryやfake clockは導入しない。
+
 
 ## runner 固有の証拠契約
 
 stdout の今回の report path を読む。一意の run directory0700、`report.json`0600。`schema_version:1`、`executable`、`binary_sha256`、`selected_case`、`started_at/finished_at`、`status`、`checks[].id/status/expected/observed/artifacts` を照合する。
 
-退出は fail=1、blocked=77、選択全ケースpass=0、優先順は fail > blocked > pass。capture不足は`visual`／`situations`／`deep`／`mixing`の画像段階をblockedにし、独立したlifecycle／controls／wanderingは続ける。situations／deep／mixingの途中controls受理を全ケースPASSにせず、controls単独passを画像や製品全体の合格にしない。雨・岩・深海の初期ノブ値はP13の品質判断前の候補で、public採用値として固定しない。
+退出はfail=1、blocked=77、選択全case pass=0、優先順fail > blocked > pass。capture不足はvisual／situations／deep／mixing／presentationの画像段階をblockedにし、独立lifecycle／controls／wanderingは続ける。途中のcontrolsや一組の画像だけを全case PASSにせず、controls単独PASSを画像／製品全体の合格にしない。雨・岩・深海の初期ノブ値はP13品質判断前の候補でpublic採用値として固定しない。
 
 画像 helper は通常 runner が呼ぶ。直接使う場合の現存 CLI：
 
@@ -66,7 +69,7 @@ stdout の今回の report path を読む。一意の run directory0700、`repor
 /usr/bin/swift scripts/native-screenshot.swift --self-test
 ```
 
-PID／window IDは今回の所有候補から取得する。capture outputは既存の自分所有のprivate directory内の未使用絶対path。helperは空・透明・単色・不変・寸法不一致を拒否する**このシーン向け**の比較器。両scriptは `ambien` executableと固有UI／ケースを前提にし、他アプリへそのまま流用しない。
+PID／window IDは今回の所有候補から取得する。capture outputは自分所有のprivate directory内の未使用絶対path。helperは空・全透明・uniformなcropped premultiplied RGBA・不変・寸法不一致を拒否する。透明background上のmonochrome shapeはcoverage/alphaが異なるためuniform interiorではない。alpha差を含むpixel変化も可視品質や粒同定の証拠にしない。両scriptは `ambien` executableと固有UI／caseの専用実装で、他appへそのまま流用しない。
 
 ## 個別に残す受け入れ
 

@@ -432,14 +432,26 @@ enum ReceiptObservation {
     case waiting, exact, invalidated
 }
 
-func expectReceipt(_ candidate: Candidate, _ window: AXUIElement, settings: Int, manual: Int) throws {
-    func requireSameWindow() throws {
-        let current = try candidate.settings()
-        try require(CFEqual(current, window), "Owned settings window changed during receipt observation")
+func observeOwnedSettings<T>(_ candidate: Candidate, _ window: AXUIElement,
+                             _ read: () throws -> T) throws -> T? {
+    try require(CFEqual(try candidate.settings(), window), "Owned settings window changed during observation")
+    do { return try read() }
+    catch let failure as AXReadFailure
+        where failure.status == .invalidUIElement && !CFEqual(failure.element, window) {
+        // AccessKit may retire a virtual descendant during a non-atomic walk.
+        // Discard the entire owned observation; never catch input/capture errors.
+        var pid: pid_t = 0
+        try require(AXUIElementGetPid(failure.element, &pid) == .success && pid == candidate.pid,
+                    "Invalidated AX descendant is not owned by the candidate")
+        try require(CFEqual(try candidate.settings(), window), "Owned settings window invalidated")
+        print("OBSERVE invalidated owned AX descendant (\(failure.name)); discard snapshot")
+        return nil
     }
+}
+
+func expectReceipt(_ candidate: Candidate, _ window: AXUIElement, settings: Int, manual: Int) throws {
     func observe() throws -> ReceiptObservation {
-        try requireSameWindow()
-        do {
+        try observeOwnedSettings(candidate, window) {
             guard let main = try line(window, prefix: "現在の設定:"),
                   let receipt = try line(window, prefix: "音声側の受理:") else { return .waiting }
             let m = try generations(main), r = try generations(receipt)
@@ -447,17 +459,7 @@ func expectReceipt(_ candidate: Candidate, _ window: AXUIElement, settings: Int,
                         "Unexpected/duplicate revision: main=\(main), receipt=\(receipt), expected=\(settings)/\(manual)")
             return m.0 == settings && m.1 == manual && r.0 == settings && r.1 == manual &&
                 !receipt.contains("受理待ち") ? .exact : .waiting
-        } catch let failure as AXReadFailure
-            where failure.status == .invalidUIElement && !CFEqual(failure.element, window) {
-            // AccessKit destroys removed virtual descendants while this non-atomic
-            // walk is in flight. Discard the whole observation, never a required field.
-            var pid: pid_t = 0
-            try require(AXUIElementGetPid(failure.element, &pid) == .success && pid == candidate.pid,
-                        "Invalidated receipt descendant does not belong to the candidate")
-            try requireSameWindow()
-            print("OBSERVE invalidated owned AX descendant (\(failure.name)); discard receipt snapshot \(settings)/\(manual)")
-            return .invalidated
-        }
+        } ?? .invalidated
     }
     try waitFor("main endpoints and actual audio receipt \(settings)/\(manual)") {
         try observe() == .exact
@@ -1143,17 +1145,7 @@ func wandering(_ executable: URL, artifacts: URL) throws -> String {
             // AccessKit can retire virtual descendants during a non-atomic read.
             // Retry only owned invalid descendants, never mismatching stable data.
             func observation<T>(_ read: () throws -> T) throws -> T? {
-                try require(CFEqual(try candidate.settings(), window), "Wandering settings window changed")
-                do { return try read() }
-                catch let failure as AXReadFailure
-                    where failure.status == .invalidUIElement && !CFEqual(failure.element, window) {
-                    var pid: pid_t = 0
-                    try require(AXUIElementGetPid(failure.element, &pid) == .success && pid == candidate.pid,
-                                "Invalidated wandering descendant is not owned")
-                    try require(CFEqual(try candidate.settings(), window), "Wandering window invalidated")
-                    print("OBSERVE invalidated owned wandering descendant (\(failure.name)); discard snapshot")
-                    return nil
-                }
+                try observeOwnedSettings(candidate, window, read)
             }
             func wanderingSwitch() throws -> AXUIElement {
                 guard let node = try named(window, role: "AXCheckBox", name: "ひとりで移る") else {
@@ -1430,7 +1422,7 @@ func privateFile(_ data: Data, at url: URL) throws {
     }
 }
 
-func windowID(_ candidate: Candidate, _ scene: AXUIElement) throws -> CGWindowID {
+func matchingSceneWindowIDs(_ candidate: Candidate, _ scene: AXUIElement) throws -> [CGWindowID] {
     let expected = try bounds(scene)
     guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                   kCGNullWindowID) as? [[String: Any]] else {
@@ -1448,6 +1440,11 @@ func windowID(_ candidate: Candidate, _ scene: AXUIElement) throws -> CGWindowID
             matches.append(id)
         }
     }
+    return matches
+}
+
+func windowID(_ candidate: Candidate, _ scene: AXUIElement) throws -> CGWindowID {
+    let matches = try matchingSceneWindowIDs(candidate, scene)
     try require(matches.count == 1, "Expected exactly one on-screen owned scene matching AX bounds; got \(matches)")
     return matches[0]
 }
@@ -1510,7 +1507,17 @@ func sceneFrames(_ candidate: Candidate, _ scene: AXUIElement, executable: URL,
     }
     try foreground(candidate, scene)
     let initialBounds = try bounds(scene)
-    let id = try windowID(candidate, scene)
+    var readyID: CGWindowID?
+    try waitFor("owned scene opening animation reaches its exact AX bounds") {
+        try requireSession()
+        try require(try isForeground(candidate, scene) && bounds(scene) == initialBounds,
+                    "Scene ownership or AX bounds changed while awaiting its CG frame")
+        let matches = try matchingSceneWindowIDs(candidate, scene)
+        try require(matches.count <= 1, "Ambiguous owned scene CG frames: \(matches)")
+        readyID = matches.first
+        return readyID != nil
+    }
+    guard let id = readyID else { throw Failure("Owned scene CG frame was not accepted") }
     var evidence: [String] = []
     var images: [URL] = []
     for index in 1...3 {
@@ -1562,6 +1569,194 @@ func sceneFrames(_ candidate: Candidate, _ scene: AXUIElement, executable: URL,
     if !comparisonFailures.isEmpty { throw Failure(comparisonFailures.joined(separator: "; ")) }
     if !comparisonBlockers.isEmpty { throw Blocked(comparisonBlockers.joined(separator: "; ")) }
     evidence.append("Owned scene PID \(candidate.pid), CGWindowID \(id); real menu mute; three spaced actual PNGs/two changed cropped-interior pairs. Evidence only rendered-frame change: not audible silence, particle identity, physical synchronization, or subjective glass/music. Through-glass background can affect pixels.")
+    return evidence.joined(separator: "\n")
+}
+
+func presentation(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
+    guard CGPreflightScreenCaptureAccess() else {
+        throw Blocked("Presentation requires own-window captures; no capture requested without authorization")
+    }
+    guard FileManager.default.fileExists(atPath: helper.path) else {
+        throw Blocked("Screenshot helper missing at \(helper.path)")
+    }
+    let worldExpression = try NSRegularExpression(pattern: "受理通知時点の世界時刻 ([0-9]+(?:\\.[0-9]+)?) 秒")
+    var evidence: [String] = []
+    let began = DispatchTime.now().uptimeNanoseconds
+    func elapsed(_ from: UInt64) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - from) / 1_000_000_000
+    }
+    func record(_ value: String) {
+        let entry = String(format: "t+%.3fs ", elapsed(began)) + value
+        evidence.append(entry)
+        print("PRESENTATION \(entry)")
+    }
+    try withCandidate(executable, artifacts: artifacts) { candidate in
+        var stage = "fresh owned presentation setup"
+        do {
+            let scene = try candidate.scene()
+            let originalSize = try windowSize(scene)
+            try candidate.menu("設定…"); try candidate.expectWindows(2)
+            let settings = try candidate.settings()
+            try foreground(candidate, settings)
+            try expectReceipt(candidate, settings, settings: 0, manual: 0)
+            try candidate.menu("消音")
+            try expectReceipt(candidate, settings, settings: 1, manual: 0)
+            try candidate.menu("ひとりで移る")
+            try expectReceipt(candidate, settings, settings: 2, manual: 0)
+            for (revision, label) in [(3, "最小滞在時間"), (4, "最大滞在時間"), (5, "自動切り替え時間")] {
+                let control = try slider(settings, label: label)
+                try visible(candidate, settings, control)
+                try focus(control); try key(candidate, settings, code: 115)
+                try waitFor("\(label) reaches production minimum1") { abs(try number(control) - 1) < 0.001 }
+                try expectReceipt(candidate, settings, settings: revision, manual: 0)
+            }
+            let onAt = DispatchTime.now().uptimeNanoseconds
+            try candidate.menu("ひとりで移る")
+            try expectReceipt(candidate, settings, settings: 6, manual: 0)
+            let choices = ["雨", "岩", "深海"]
+            func displayed(_ revision: Int) throws -> (String, Double)? {
+                try observeOwnedSettings(candidate, settings) { () throws -> (String, Double)? in
+                    guard let main = try line(settings, prefix: "現在の設定:"),
+                          let receipt = try line(settings, prefix: "音声側の受理:") else { return nil }
+                    let m = try generations(main), r = try generations(receipt)
+                    guard m == (revision, 0), r == (revision, 0), !receipt.contains("受理待ち"),
+                          main.contains("/ ひとりで移る オン /"), main.contains("/ 消音 オン /") else { return nil }
+                    guard let choice = choices.first(where: {
+                        main.hasPrefix("現在の設定: \($0) /") && receipt.contains("表示対象 \($0)")
+                    }) else { return nil }
+                    var marks: [String] = []
+                    for label in choices where try menuMarked(candidate, title: label) { marks.append(label) }
+                    guard marks == [choice], try menuMarked(candidate) else { return nil }
+                    for label in choices {
+                        guard try number(segment(settings, label: label)) == (label == choice ? 1 : 0) else { return nil }
+                    }
+                    guard main == (try line(settings, prefix: "現在の設定:")),
+                          receipt == (try line(settings, prefix: "音声側の受理:")) else { return nil }
+                    let range = NSRange(receipt.startIndex..<receipt.endIndex, in: receipt)
+                    guard let match = worldExpression.firstMatch(in: receipt, range: range),
+                          let secondsRange = Range(match.range(at: 1), in: receipt),
+                          let world = Double(receipt[secondsRange]), world.isFinite else {
+                        throw Failure("Receipt lacks finite observed world timestamp: \(receipt)")
+                    }
+                    return (choice, world)
+                } ?? nil
+            }
+            var initial: (String, Double)?
+            try waitFor("coherent initial rain6/0 before scene minimize") {
+                initial = try displayed(6)
+                return initial?.0 == "雨"
+            }
+            stage = "minimized scene with actual automatic display, bound95s"
+            try foreground(candidate, scene)
+            try press(try attribute(scene, "AXMinimizeButton") as! AXUIElement)
+            try waitFor("owned scene minimizes") { (try attribute(scene, "AXMinimized") as? Bool) == true }
+            try foreground(candidate, settings)
+            record("Scene minimized; settings remains available; on6/0 receipt world=\(initial!.1); UI dwell1/1min and transition1sec")
+            var automatic: (String, Double)?
+            while elapsed(onAt) <= 95 {
+                try requireSession(); try require(candidate.alive(), "Candidate exited while scene minimized")
+                try require((try attribute(scene, "AXMinimized") as? Bool) == true, "Scene restored during minimized observation")
+                if let value = try displayed(6), value.0 != "雨" {
+                    try require(elapsed(onAt) >= 60, "Coherent automatic display arrived before60 wall seconds")
+                    try require(value.1 > initial!.1, "World did not progress while minimized")
+                    automatic = value
+                    record("Actual automatic 雨→\(value.0), unchanged6/0, world=\(value.1), \(elapsed(onAt)) wall seconds after on; scene still minimized")
+                    break
+                }
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            }
+            guard let automatic else { throw Failure("No coherent automatic display within95s while minimized") }
+            let restored = AXUIElementSetAttributeValue(scene, "AXMinimized" as CFString, kCFBooleanFalse)
+            try require(restored == .success, "Cannot restore owned scene")
+            try waitFor("owned scene restores") { (try attribute(scene, "AXMinimized") as? Bool) == false }
+            try require(try windowSize(scene) == originalSize, "Minimize changed fixed scene size")
+            stage = "minimize restoration owned frames"
+            evidence.append(try sceneFrames(candidate, scene, executable: executable, helper: helper,
+                                            artifacts: artifacts, prefix: "presentation-minimize"))
+
+            stage = "owned opaque full-occlusion fixture"
+            try foreground(candidate, scene)
+            let rect = try bounds(scene)
+            guard let mainScreen = NSScreen.screens.first else { throw Failure("No actual primary screen for AppKit coordinates") }
+            // This runner-owned blank window covers only the candidate's bounds;
+            // it never receives input, captures another app, or replaces GPUI.
+            NSApplication.shared.setActivationPolicy(.accessory)
+            let overlay = NSWindow(contentRect: CGRect(x: rect.minX, y: mainScreen.frame.maxY - rect.maxY,
+                                                       width: rect.width, height: rect.height),
+                                   styleMask: [.borderless], backing: .buffered, defer: false)
+            overlay.isReleasedWhenClosed = false
+            overlay.isOpaque = true; overlay.backgroundColor = .black
+            overlay.hasShadow = false; overlay.ignoresMouseEvents = true
+            overlay.level = .floating
+            overlay.orderFrontRegardless()
+            defer { overlay.orderOut(nil); overlay.close() }
+            try waitFor("runner-owned opaque cover is visible") { overlay.isVisible }
+            let coverAt = DispatchTime.now().uptimeNanoseconds
+            while elapsed(coverAt) < 3 {
+                try requireSession(); try require(candidate.alive() && overlay.isVisible, "Owned occlusion fixture disappeared")
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            }
+            overlay.orderOut(nil)
+            record("Runner-owned noninteractive opaque cover held candidate bounds3s; removed without input or capture")
+
+            stage = "hide and re-show the owned application"
+            try foreground(candidate, scene)
+            guard let running = NSRunningApplication(processIdentifier: candidate.pid) else { throw Failure("Owned app disappeared") }
+            var hiddenSettable = DarwinBoolean(false)
+            try require(AXUIElementIsAttributeSettable(candidate.app, "AXHidden" as CFString, &hiddenSettable) == .success &&
+                        hiddenSettable.boolValue, "Owned application AXHidden is not settable")
+            try require(AXUIElementSetAttributeValue(candidate.app, "AXHidden" as CFString, kCFBooleanTrue) == .success,
+                        "Cannot set owned application AXHidden")
+            try waitFor("owned application hides") {
+                try (attribute(candidate.app, "AXHidden") as? Bool) == true && running.isHidden
+            }
+            let hideAt = DispatchTime.now().uptimeNanoseconds
+            while elapsed(hideAt) < 3 {
+                try requireSession(); try require(candidate.alive() && running.isHidden, "Owned application became visible during hide")
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            }
+            try require(AXUIElementSetAttributeValue(candidate.app, "AXHidden" as CFString, kCFBooleanFalse) == .success,
+                        "Cannot clear owned application AXHidden")
+            try waitFor("owned application unhides") {
+                try (attribute(candidate.app, "AXHidden") as? Bool) == false && !running.isHidden
+            }
+            stage = "hide restoration owned frames"
+            evidence.append(try sceneFrames(candidate, scene, executable: executable, helper: helper,
+                                            artifacts: artifacts, prefix: "presentation-unhide"))
+
+            stage = "closed scene preserves world and wander"
+            try press(try attribute(scene, "AXCloseButton") as! AXUIElement)
+            try candidate.expectWindows(1)
+            let closeAt = DispatchTime.now().uptimeNanoseconds
+            while elapsed(closeAt) < 2 {
+                try requireSession(); try require(candidate.alive(), "Scene close stopped the app")
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            }
+            let transition = try slider(settings, label: "自動切り替え時間")
+            try visible(candidate, settings, transition)
+            try focus(transition); try key(candidate, settings, code: 124)
+            try expectReceipt(candidate, settings, settings: 7, manual: 0)
+            var afterClose: (String, Double)?
+            try waitFor("time edit after scene close retains latest target/wander and advancing world") {
+                afterClose = try displayed(7)
+                return afterClose != nil && (afterClose?.1 ?? 0) > automatic.1 + 1
+            }
+            record("Scene closed; actual time1→2 edit receipt7/0, wander/mute on, latest \(afterClose!.0), world=\(afterClose!.1); no scene window")
+            try candidate.menu("シーンを表示"); try candidate.expectWindows(2)
+            let reopened = try candidate.scene()
+            try require(try windowSize(reopened) == originalSize, "Recreated scene changed fixed size")
+            stage = "close restoration owned frames"
+            evidence.append(try sceneFrames(candidate, reopened, executable: executable, helper: helper,
+                                            artifacts: artifacts, prefix: "presentation-reopen"))
+            record("Three restoration sets each own PNG3/two changed interior pairs; image/UI only, not old particle identity, task/fps measurement, audible continuity or physical sync")
+            try candidate.menu("終了"); try candidate.expectExit()
+            record("Real menu Quit; owned PID \(candidate.pid) disappeared normal exit0")
+        } catch let blocked as Blocked {
+            throw Blocked("presentation stage=\(stage); \(blocked); partial evidence:\n\(evidence.joined(separator: "\n"))")
+        } catch {
+            throw Failure("presentation stage=\(stage); \(error); partial evidence:\n\(evidence.joined(separator: "\n"))")
+        }
+    }
     return evidence.joined(separator: "\n")
 }
 
@@ -1646,7 +1841,7 @@ final class Checks {
 }
 
 let usage = """
-Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|mixing|wandering|visual|all] [--artifacts PARENT_DIR]
+Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|mixing|wandering|presentation|visual|all] [--artifacts PARENT_DIR]
        /usr/bin/swift scripts/native-e2e.swift --help
 
 Default case: all. Each run creates a unique private directory (0700) under
@@ -1655,7 +1850,7 @@ and authorized own-window PNG/helper measurements. No permission prompts,
 desktop captures, image uploads, or production test hooks.
 
 Exit: 0 every selected case passed; 1 any failure; 77 prerequisites blocked
-when no failure. Missing capture permission blocks visual/situations/deep/mixing image stages;
+when no failure. Missing capture permission blocks visual/situations/deep/mixing/presentation image stages;
 independent lifecycle/controls/wandering still run. Null lock metadata alone is not unlocked proof.
 Visual evidence is rendered-frame change while muted, not audible silence,
 particle identity, physical synchronization, or subjective glass/music.
@@ -1667,6 +1862,11 @@ another60s with wander on after the first, then65s staying off at the latest
 destination. These are case-local wall-clock bounds, not generated-sample
 timing, gain, PRNG uniformity or physical-sync proof.
 No capture permission is needed for wandering; retain an awake active output.
+Presentation keeps the scene minimized during one real automatic display change,
+then exercises an owned opaque full-cover fixture, application hide/show and
+scene close/recreation. Each of three restoration stages captures own PNG3/two
+interior comparisons. UI/world receipts and images do not measure scene task/fps,
+old particle identity, audible continuity, RT or physical synchronization.
 """
 
 struct Options {
@@ -1690,7 +1890,7 @@ struct Options {
                         "Unknown, duplicate, or incomplete argument: \(option)\n\(usage)")
             let value = arguments[index + 1]
             if option == "--case" {
-                try require(["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
+                try require(["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "presentation", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
                 selected = value
             } else {
                 try require(!value.isEmpty && !value.hasPrefix("--"), "Invalid artifacts parent\n\(usage)")
@@ -1746,7 +1946,7 @@ do {
     let nativeReady = checks.checks.last?.status == "pass" && binaryReady
     let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
         .deletingLastPathComponent().appendingPathComponent("native-screenshot.swift")
-    for selected in ["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "visual"] where options.selected == "all" || options.selected == selected {
+    for selected in ["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "presentation", "visual"] where options.selected == "all" || options.selected == selected {
         let expected: String
         switch selected {
         case "lifecycle":
@@ -1761,6 +1961,8 @@ do {
             expected = "Fresh owned candidate; all three actual menu/radio choices; mute1/0; rapid menu rain2/1, rock3/2, deep4/3, rock5/4, deep6/5, selected deep7/6 with command-start intervals <2s (input cadence only); settings pointer rain8/7, rock9/8, deep10/9, selected deep11/10; observed depth one-step12/11; muted volume0 13/11,10 14/11,20 15/11,19 16/11,18 17/11; settings unmute18/11, volume19 19/11,20 20/11; menu remute21/11 and selected deep22/12; three owned mixing-muted PNGs/two cropped-interior-change pairs with crossing-or-live-frame limits; reopened latest deep/depth/20%/mute exact22/12; menu Quit normal0. Not actual gains, maximum-three RT work, audio re-entry, waveform bounds, no-click or physical-sync proof."
         case "wandering":
             expected = "Fresh owned candidate; actual menu mute; visible focused production time sliders and exact next-application descriptions; paired min/max correction both directions; time/volume/mute preserve wander/manual revision; menu/settings on/off, explicit menu/settings selection and knob turn disable wander; final dwell1/1min/transition1sec and staying off→on starts fresh; within95 wall seconds observe a different registered automatic menu/settings/audio-receipt display, not before60 wall seconds; retain that display another60s on and require a second actual automatic change within95s of the first, then65s off at latest destination while muted; observed monotonic main revisions and exact accepted receipts recorded per real command; menu Quit normal0. No capture prerequisite; not generated-sample count, actual gains, uniform PRNG, physical-audio synchronization or audible proof."
+        case "presentation":
+            expected = "Production focused time sliders set dwell1/1min and transition1sec, muted wander on6/0; keep owned scene minimized until a coherent current-excluding automatic menu/radio/main/audio display within60..95 wall seconds; unchanged manual0 and progressing receipt world; restore same fixed scene and PNG3/two cropped-interior changes; runner-owned noninteractive opaque full-cover3s, own app hide3s/unhide and second PNG3/two pairs; scene close leaves settings/world/wander alive, actual time1→2 receipt7/0 latest retained; recreate fixed scene and third PNG3/two pairs; real menu Quit normal0. Not generated-sample counts, old particle identity, task/fps measurement, audible continuity, RT or physical synchronization."
         default:
             expected = "Authorized actual owned scene-window PNGs; real menu mute; stable CG owner/bounds; three spaced captures; two cropped-interior nonblank/nontransparent pixel-change comparisons; retained PNGs and measurements; menu Quit normal0"
         }
@@ -1773,6 +1975,7 @@ do {
             case "deep": return try deep(options.executable, helper: helper, artifacts: artifacts)
             case "mixing": return try mixing(options.executable, helper: helper, artifacts: artifacts)
             case "wandering": return try wandering(options.executable, artifacts: artifacts)
+            case "presentation": return try presentation(options.executable, helper: helper, artifacts: artifacts)
             default: return try visual(options.executable, helper: helper, artifacts: artifacts)
             }
         }

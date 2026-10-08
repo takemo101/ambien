@@ -42,6 +42,8 @@ GPUI がアプリの実行ループを持ち、シーンと設定はその上の
 
 視覚イベントは容量固定のリングバッファで渡す。表示側も固定容量で扱い、容量超過では古い・弱い視覚イベントを省く。これは音声を待たせたり、音の粒を省いたりする理由ではない。シーンを再表示するときも、隠れていた間の粒をまとめて光らせず、生存中のイベントだけを扱う。詳細は [音と絵](../SPEC.md#音と絵)と[視覚イベント](../SPEC.md#視覚イベント)を参照する。
 
+現存I07はatomic state historyからeligibleと最短futureのcoherent bracketを読み、同epoch／同phase内のg²と息だけをmainで補間する。phase境界は跨がず、future birthを先に光らせない。raw配列用scratchと表示粒は事前確保し、snapshot上書きでは受け入れ済みframeを保持する。callbackは視覚cadence／phase変更時に公開、sceneだけがvisible時にtimerを所有する。空・非有限viewportはpaintを休み、現在の論理boundsと円のradiusでclipする。物理同期・frame costの結果は [検証記録](verification.md) と分ける。
+
 ## 実行場所と準備の関係
 
 [スレッドと資源](../SPEC.md#スレッドと資源)では、処理の責任とリアルタイム経路を分けている。

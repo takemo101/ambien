@@ -65,6 +65,12 @@ pub(crate) struct WorldVisualHeader {
     pub(crate) phase: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WorldVisualBracket {
+    pub(crate) current: WorldVisualHeader,
+    pub(crate) next: Option<WorldVisualHeader>,
+}
+
 pub(crate) struct VisualWriter<'a> {
     ring: &'a VisualRing,
     epoch: StreamEpoch,
@@ -267,9 +273,13 @@ impl VisualRing {
         now: MachNanos,
         gains: &mut [f32],
         breath: &mut [f32],
-    ) -> Option<WorldVisualHeader> {
+        next_gains: &mut [f32],
+        next_breath: &mut [f32],
+    ) -> Option<WorldVisualBracket> {
         assert_eq!(gains.len(), self.registry_count);
         assert_eq!(breath.len(), self.registry_count);
+        assert_eq!(next_gains.len(), self.registry_count);
+        assert_eq!(next_breath.len(), self.registry_count);
         let published = self.state_serial.load(Ordering::SeqCst);
         if published == 0 {
             return None;
@@ -278,6 +288,7 @@ impl VisualRing {
             .saturating_sub(self.states.len() as u64 - 1)
             .max(1);
         let mut latest: Option<(usize, StateSnapshot)> = None;
+        let mut next: Option<(usize, StateSnapshot)> = None;
         for (index, slot) in self.states.iter().enumerate() {
             let Some(snapshot) = slot.header() else {
                 continue;
@@ -286,20 +297,42 @@ impl VisualRing {
                 || snapshot.serial > published
                 || (snapshot.serial - 1) % self.states.len() as u64 != index as u64
                 || snapshot.header.epoch != epoch
-                || snapshot.header.present > now
             {
                 continue;
             }
-            if latest.as_ref().is_none_or(|(_, previous)| {
-                snapshot.header.present > previous.header.present
+            if snapshot.header.present <= now {
+                if latest.as_ref().is_none_or(|(_, previous)| {
+                    snapshot.header.present > previous.header.present
+                        || (snapshot.header.present == previous.header.present
+                            && snapshot.serial > previous.serial)
+                }) {
+                    latest = Some((index, snapshot));
+                }
+            } else if next.as_ref().is_none_or(|(_, previous)| {
+                snapshot.header.present < previous.header.present
                     || (snapshot.header.present == previous.header.present
                         && snapshot.serial > previous.serial)
             }) {
-                latest = Some((index, snapshot));
+                next = Some((index, snapshot));
             }
         }
         let (index, snapshot) = latest?;
-        self.states[index].read_arrays(snapshot, gains, breath)
+        let current = self.states[index].read_arrays(snapshot, gains, breath)?;
+        let next = match next {
+            Some((next_index, next_snapshot)) if next_snapshot.header.phase == current.phase => {
+                let header =
+                    self.states[next_index].read_arrays(next_snapshot, next_gains, next_breath)?;
+                // The two payload reads must overlap one coherent publication
+                // interval: a current slot overwritten while reading next
+                // invalidates the whole bracket, not just the current arrays.
+                if self.states[index].sequence.load(Ordering::SeqCst) != snapshot.sequence {
+                    return None;
+                }
+                Some(header)
+            }
+            _ => None,
+        };
+        Some(WorldVisualBracket { current, next })
     }
 }
 
@@ -1148,37 +1181,183 @@ mod tests {
     }
 
     #[test]
+    fn p08_bracket_selects_nearest_times_and_latest_serial_ties() {
+        let ring = VisualRing::new(1, 2);
+        for (world, present, value) in [
+            (1, 10, 0.1),
+            (2, 40, 0.4),
+            (3, 30, 0.3),
+            (4, 10, 0.2),
+            (5, 30, 0.5),
+        ] {
+            let values = [value; 2];
+            let mut packet = state(world, present, &values, &values);
+            packet.phase = 7;
+            assert!(ring.push_state(packet));
+        }
+        let mut gains = [0.0; 2];
+        let mut breath = [0.0; 2];
+        let mut next_gains = [0.0; 2];
+        let mut next_breath = [0.0; 2];
+        let bracket = ring
+            .read_state_into(
+                epoch(1),
+                MachNanos::new(20),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .unwrap();
+        assert_eq!(bracket.current.world.get(), 4.0);
+        assert_eq!(bracket.current.present, MachNanos::new(10));
+        assert_eq!(bracket.next.unwrap().world.get(), 5.0);
+        assert_eq!(bracket.next.unwrap().present, MachNanos::new(30));
+        assert_eq!(gains, [0.2; 2]);
+        assert_eq!(breath, [0.2; 2]);
+        assert_eq!(next_gains, [0.5; 2]);
+        assert_eq!(next_breath, [0.5; 2]);
+    }
+
+    #[test]
+    fn p08_bracket_does_not_leap_over_phase_boundaries_or_old_epochs() {
+        let ring = VisualRing::new(1, 2);
+        assert!(ring.push_state(state(1, 10, &[0.25; 2], &[0.1; 2])));
+        let mut other_epoch = state(1, 15, &[0.9; 2], &[0.9; 2]);
+        other_epoch.epoch = epoch(2);
+        assert!(ring.push_state(other_epoch));
+        assert!(ring.push_state(state(2, 30, &[0.5; 2], &[0.2; 2])));
+        assert!(ring.push_state(state(1, 40, &[0.75; 2], &[0.3; 2])));
+        let mut gains = [0.0; 2];
+        let mut breath = [0.0; 2];
+        let mut next_gains = [0.8; 2];
+        let mut next_breath = [0.8; 2];
+        let bracket = ring
+            .read_state_into(
+                epoch(1),
+                MachNanos::new(20),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .unwrap();
+        assert_eq!(bracket.current.phase, 1);
+        assert!(bracket.next.is_none());
+        assert_eq!(gains, [0.25; 2]);
+        assert_eq!(breath, [0.1; 2]);
+        assert_eq!(next_gains, [0.8; 2]);
+        assert_eq!(next_breath, [0.8; 2]);
+    }
+
+    #[test]
+    fn p08_invalid_future_payload_omits_the_entire_bracket() {
+        let ring = VisualRing::new(1, 2);
+        assert!(ring.push_state(state(1, 10, &[0.25; 2], &[0.1; 2])));
+        assert!(ring.push_state(state(1, 30, &[0.75; 2], &[0.3; 2])));
+        ring.states[1].breath[1].store(f32::NAN.to_bits(), Ordering::SeqCst);
+        let mut gains = [0.0; 2];
+        let mut breath = [0.0; 2];
+        let mut next_gains = [0.0; 2];
+        let mut next_breath = [0.0; 2];
+        assert!(
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(20),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn selected_state_overwritten_before_payload_read_is_omitted() {
+        let slot = StateSlot::new(2);
+        assert!(slot.publish(state(1, 10, &[0.25; 2], &[0.1; 2]), 1));
+        let selected = slot.header().unwrap();
+        assert!(slot.publish(state(2, 30, &[0.75; 2], &[0.3; 2]), 129));
+        let mut gains = [0.0; 2];
+        let mut breath = [0.0; 2];
+        assert!(
+            slot.read_arrays(selected, &mut gains, &mut breath)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn world_state_uses_latest_arrived_time_not_newest_future_publication() {
         let ring = VisualRing::new(1, 2);
         assert!(ring.push_state(state(1, 10, &[0.25, 0.75], &[0.1, 0.2])));
         assert!(ring.push_state(state(3, 30, &[0.75, 0.25], &[0.3, 0.4])));
         let mut gains = [0.0; 2];
         let mut breath = [0.0; 2];
+        let mut next_gains = [0.0; 2];
+        let mut next_breath = [0.0; 2];
         assert!(
-            ring.read_state_into(epoch(1), MachNanos::new(9), &mut gains, &mut breath)
-                .is_none()
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(9),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .is_none()
         );
         let header = ring
-            .read_state_into(epoch(1), MachNanos::new(20), &mut gains, &mut breath)
+            .read_state_into(
+                epoch(1),
+                MachNanos::new(20),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
             .unwrap();
-        assert_eq!(header.phase, 1);
+        assert_eq!(header.current.phase, 1);
         assert_eq!(gains, [0.25, 0.75]);
         assert_eq!(breath, [0.1, 0.2]);
         assert!(ring.push_state(state(2, 20, &[0.5, 0.5], &[0.2, 0.3])));
         assert_eq!(
-            ring.read_state_into(epoch(1), MachNanos::new(20), &mut gains, &mut breath)
-                .unwrap()
-                .phase,
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(20),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .unwrap()
+            .current
+            .phase,
             2
         );
         assert!(
-            ring.read_state_into(epoch(2), MachNanos::new(40), &mut gains, &mut breath)
-                .is_none()
+            ring.read_state_into(
+                epoch(2),
+                MachNanos::new(40),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .is_none()
         );
         assert_eq!(
-            ring.read_state_into(epoch(1), MachNanos::new(30), &mut gains, &mut breath)
-                .unwrap()
-                .phase,
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(30),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .unwrap()
+            .current
+            .phase,
             3
         );
     }
@@ -1191,16 +1370,33 @@ mod tests {
         }
         let mut gains = [0.0; 2];
         let mut breath = [0.0; 2];
+        let mut next_gains = [0.0; 2];
+        let mut next_breath = [0.0; 2];
         assert!(
-            ring.read_state_into(epoch(1), MachNanos::new(1), &mut gains, &mut breath)
-                .is_none()
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(1),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .is_none()
         );
         assert!(!ring.push_state(state(999, 999, &[f32::NAN, 0.5], &[0.25, 0.75])));
         assert!(!ring.push_state(state(999, 999, &[0.5], &[0.25, 0.75])));
         assert_eq!(
-            ring.read_state_into(epoch(1), MachNanos::new(999), &mut gains, &mut breath)
-                .unwrap()
-                .phase,
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(999),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .unwrap()
+            .current
+            .phase,
             STATE_CAPACITY as u32 + 1
         );
     }
@@ -1213,17 +1409,34 @@ mod tests {
         assert!(!ring.push_state(state(2, 0, &[0.75, 0.25], &[0.5, 0.5])));
         let mut gains = [0.0; 2];
         let mut breath = [0.0; 2];
+        let mut next_gains = [0.0; 2];
+        let mut next_breath = [0.0; 2];
         assert_eq!(
-            ring.read_state_into(epoch(1), MachNanos::new(0), &mut gains, &mut breath)
-                .unwrap()
-                .phase,
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(0),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .unwrap()
+            .current
+            .phase,
             1
         );
         let index = ((u64::MAX - 1) % STATE_CAPACITY as u64) as usize;
         ring.states[index].gains[1].store(f32::NAN.to_bits(), Ordering::SeqCst);
         assert!(
-            ring.read_state_into(epoch(1), MachNanos::new(0), &mut gains, &mut breath)
-                .is_none()
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(0),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .is_none()
         );
         let another = VisualRing::new(1, 2);
         another.states[0]
@@ -1253,10 +1466,18 @@ mod tests {
         barrier.wait();
         let mut gains = [0.0; 2];
         let mut breath = [0.0; 2];
+        let mut next_gains = [0.0; 2];
+        let mut next_breath = [0.0; 2];
         for _ in 0..10_000 {
-            if let Some(header) =
-                ring.read_state_into(epoch(1), MachNanos::new(0), &mut gains, &mut breath)
-            {
+            if let Some(header) = ring.read_state_into(
+                epoch(1),
+                MachNanos::new(0),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            ) {
+                let header = header.current;
                 assert_eq!(header.world.get(), header.phase as f64);
                 let expected = if header.phase % 2 == 0 {
                     [0.25, 0.75]
@@ -1269,9 +1490,17 @@ mod tests {
         }
         writer.join().unwrap();
         assert_eq!(
-            ring.read_state_into(epoch(1), MachNanos::new(0), &mut gains, &mut breath)
-                .unwrap()
-                .phase,
+            ring.read_state_into(
+                epoch(1),
+                MachNanos::new(0),
+                &mut gains,
+                &mut breath,
+                &mut next_gains,
+                &mut next_breath,
+            )
+            .unwrap()
+            .current
+            .phase,
             10_000
         );
     }
