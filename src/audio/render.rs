@@ -12,8 +12,11 @@ use crate::{
 
 use super::{
     lease::EngineLease,
-    timing::{MachNanos, WorldSeconds, presentation_time},
-    transport::{ControlMailbox, ErrorCell, VisualRing, VisualWriter, WorldVisualState},
+    timing::{MachNanos, StreamEpoch, WorldSeconds, presentation_time},
+    transport::{
+        ControlMailbox, ControlReceipt, ErrorCell, StatusMailbox, VisualRing, VisualWriter,
+        WorldVisualState,
+    },
     world::WorldClock,
 };
 
@@ -61,6 +64,61 @@ fn callback_playback(info: &cpal::OutputCallbackInfo, errors: &ErrorCell) -> Opt
     }
 }
 
+// An implementation constant, not a new product timing control. The two
+// independent output ramps finish in 20 ms and preserve exact endpoint zeros.
+const OUTPUT_RAMP_MILLISECONDS: u32 = 20;
+
+struct OutputRamp {
+    current: f32,
+    start: f32,
+    target: f32,
+    elapsed: u32,
+    frames: u32,
+    inverse_frames: f32,
+}
+
+impl OutputRamp {
+    fn new(value: f32, rate: u32) -> Self {
+        debug_assert!(rate > 0);
+        let frames = (u64::from(rate) * u64::from(OUTPUT_RAMP_MILLISECONDS)).div_ceil(1_000) as u32;
+        Self {
+            current: value,
+            start: value,
+            target: value,
+            elapsed: frames,
+            frames,
+            inverse_frames: 1.0 / frames as f32,
+        }
+    }
+
+    fn retarget(&mut self, target: f32) {
+        if self.target == target {
+            return;
+        }
+        self.start = self.current;
+        self.target = target;
+        self.elapsed = if self.current == target {
+            self.frames
+        } else {
+            0
+        };
+    }
+
+    fn advance(&mut self) -> f32 {
+        if self.elapsed < self.frames {
+            self.elapsed += 1;
+            if self.elapsed == self.frames {
+                self.current = self.target;
+            } else {
+                let fraction = self.elapsed as f32 * self.inverse_frames;
+                let eased = fraction * fraction * (3.0 - 2.0 * fraction);
+                self.current = self.start + (self.target - self.start) * eased;
+            }
+        }
+        self.current
+    }
+}
+
 struct PreparedVoice {
     index: SituationIndex,
     knobs: Range<usize>,
@@ -76,6 +134,10 @@ pub(crate) struct PreparedEngine {
     scratch: ControlState,
     mailbox: Arc<ControlMailbox>,
     visuals: Arc<VisualRing>,
+    receipts: Arc<StatusMailbox>,
+    receipt_published: bool,
+    volume_gain: OutputRamp,
+    mute_gain: OutputRamp,
     world: WorldClock,
     gains: Box<[f32]>,
     breath: Box<[f32]>,
@@ -129,12 +191,18 @@ impl PreparedEngine {
         }
         let scratch = controls.clone();
         let mailbox = Arc::new(ControlMailbox::new(&controls));
+        let volume_gain = OutputRamp::new(controls.volume.get(), sample_rate);
+        let mute_gain = OutputRamp::new(if controls.mute { 0.0 } else { 1.0 }, sample_rate);
         Ok(Self {
             voices: voices.into_boxed_slice(),
             controls,
             scratch,
             mailbox,
             visuals,
+            receipts: Arc::new(StatusMailbox::new(count)),
+            receipt_published: false,
+            volume_gain,
+            mute_gain,
             world: WorldClock::new(sample_rate)?,
             gains: gains.into_boxed_slice(),
             breath: vec![0.0; count].into_boxed_slice(),
@@ -149,6 +217,59 @@ impl PreparedEngine {
 
     pub(crate) fn control_mailbox(&self) -> &Arc<ControlMailbox> {
         &self.mailbox
+    }
+
+    pub(crate) fn status_mailbox(&self) -> &Arc<StatusMailbox> {
+        &self.receipts
+    }
+
+    fn accept_controls(&mut self) -> bool {
+        // Failed reads touch only the prepared scratch, never committed values.
+        if !self.mailbox.try_read_into(&mut self.scratch) {
+            return false;
+        }
+        let changed = self.controls.settings_revision != self.scratch.settings_revision
+            || self.controls.manual_revision != self.scratch.manual_revision;
+        // A fault after acceptance must not leave the previous revision acknowledged.
+        self.receipt_published &= !changed;
+        std::mem::swap(&mut self.controls, &mut self.scratch);
+        self.volume_gain.retarget(self.controls.volume.get());
+        self.mute_gain
+            .retarget(if self.controls.mute { 0.0 } else { 1.0 });
+        changed
+    }
+
+    fn publish_receipt(&mut self, epoch: StreamEpoch) -> bool {
+        // Current P03 registration has one voice. Read actual situation gains,
+        // independent of output volume/mute, rather than echoing an endpoint.
+        let mut dominant = 0;
+        let mut power = self.gains[0] * self.gains[0];
+        for (position, gain) in self.gains.iter().enumerate().skip(1) {
+            let candidate = gain * gain;
+            if candidate > power {
+                dominant = position;
+                power = candidate;
+            }
+        }
+        let published = self.receipts.publish(ControlReceipt {
+            epoch,
+            ack_revision: self.controls.settings_revision,
+            ack_manual_revision: self.controls.manual_revision,
+            display_dominant: self.voices[dominant].index,
+            world: self.world.now(),
+        });
+        self.receipt_published |= published;
+        published
+    }
+
+    /// Called only by the worker after taking exclusive ownership of the lease.
+    /// Control acknowledgment remains live while generated world time is frozen.
+    pub(crate) fn sync_frozen_controls(&mut self, epoch: StreamEpoch) -> bool {
+        if self.accept_controls() || !self.receipt_published {
+            self.publish_receipt(epoch)
+        } else {
+            true
+        }
     }
 
     pub(crate) fn world(&self) -> WorldSeconds {
@@ -188,17 +309,9 @@ impl PreparedEngine {
             errors.report_invalid_sample();
             return;
         }
-        // An incomplete read may modify scratch, never committed controls.
-        if self.mailbox.try_read_into(&mut self.scratch) {
-            std::mem::swap(&mut self.controls, &mut self.scratch);
-        }
+        self.accept_controls();
         let rate = self.world.sample_rate();
         let delta_seconds = 1.0 / f64::from(rate);
-        let gain = if self.controls.mute {
-            0.0
-        } else {
-            self.controls.volume.get()
-        };
         for (frame_offset, output) in data.chunks_exact_mut(channels).enumerate() {
             let frame = VoiceFrame {
                 world: self.world.now(),
@@ -236,6 +349,7 @@ impl PreparedEngine {
                     stereo[1] += sample[1] * self.gains[position];
                 }
             }
+            let gain = self.volume_gain.advance() * self.mute_gain.advance();
             stereo[0] *= gain;
             stereo[1] *= gain;
             if stereo
@@ -275,6 +389,9 @@ impl PreparedEngine {
             }
             self.until_state -= 1;
             self.world.advance_sample();
+        }
+        if !self.publish_receipt(errors.epoch()) {
+            errors.report_timing_fault();
         }
     }
 
@@ -368,17 +485,17 @@ mod tests {
         let mut controls = muted.controls.clone();
         controls.mute = true;
         muted.mailbox.publish(&controls);
-        let mut a = [0.0; 1026];
-        let mut b = [0.0; 1026];
+        let mut a = [0.0; 2_560];
+        let mut b = [0.0; 2_560];
         audible.render_f32(&mut a, 2, MachNanos::new(0), &errors);
         muted.render_f32(&mut b, 2, MachNanos::new(0), &errors);
-        assert_eq!(b, [0.0; 1026]);
+        assert!(b[1_918..].iter().all(|sample| *sample == 0.0));
         assert_eq!(audible.world(), muted.world());
         controls.mute = false;
         muted.mailbox.publish(&controls);
-        audible.render_f32(&mut a, 2, MachNanos::new(11_000_000), &errors);
-        muted.render_f32(&mut b, 2, MachNanos::new(11_000_000), &errors);
-        assert_eq!(a, b);
+        audible.render_f32(&mut a, 2, MachNanos::new(30_000_000), &errors);
+        muted.render_f32(&mut b, 2, MachNanos::new(30_000_000), &errors);
+        assert_eq!(a[1_918..], b[1_918..]);
         assert_eq!(errors.take_bits(), 0);
     }
 
@@ -397,6 +514,275 @@ mod tests {
         }
         assert_eq!(floating.world(), integer.world());
         assert_eq!(errors.take_bits(), 0);
+    }
+
+    fn callback_gain_step_is_smoothed(mute: bool) {
+        let epoch = StreamEpoch::new(3).unwrap();
+        let reference_engine = prepared(103);
+        let edited_engine = prepared(103);
+        let mailbox = edited_engine.control_mailbox().clone();
+        let mut controls = edited_engine.controls.clone();
+        let reference = EngineLease::new(reference_engine, epoch);
+        let edited = EngineLease::new(edited_engine, epoch);
+        let errors = ErrorCell::new(epoch);
+        let mut a = [0.0; 9_600];
+        let mut b = [0.0; 9_600];
+        let info = callback_info(0);
+        output_f32(&reference, &mut a, 2, &info, &errors);
+        output_f32(&edited, &mut b, 2, &info, &errors);
+        assert_eq!(a, b);
+
+        controls.volume = Normalized::new(0.8).unwrap();
+        controls.mute = mute;
+        mailbox.publish(&controls);
+        let info = callback_info(100_000_000);
+        let (_, heap) = crate::rt_alloc::measure(|| {
+            output_f32(&reference, &mut a, 2, &info, &errors);
+            output_f32(&edited, &mut b, 2, &info, &errors);
+        });
+        assert_eq!(heap, crate::rt_alloc::Counts::default());
+        assert!(a[..1_920].iter().any(|sample| sample.abs() > 0.000_001));
+        for (frame, (reference, edited)) in a.chunks_exact(2).zip(b.chunks_exact(2)).enumerate() {
+            // A conservative implementation ramp lasts 20 ms (960 frames here).
+            // Both independent endpoints move smoothly and reach exact values.
+            let fraction = ((frame + 1) as f32 / 960.0).min(1.0);
+            let eased = fraction * fraction * (3.0 - 2.0 * fraction);
+            let volume = if frame + 1 >= 960 {
+                0.8
+            } else {
+                0.3 + (0.8 - 0.3) * eased
+            };
+            let mute_gain = if mute { 1.0 - eased } else { 1.0 };
+            for channel in 0..2 {
+                let expected = reference[channel] * (volume * mute_gain / 0.3);
+                assert!(
+                    (edited[channel] - expected).abs() < 0.000_001,
+                    "abrupt {kind} endpoint at frame {frame}: expected {expected}, got {actual}",
+                    kind = if mute { "mute" } else { "volume" },
+                    actual = edited[channel],
+                );
+            }
+        }
+        if mute {
+            assert!(b[1_918..].iter().all(|sample| *sample == 0.0));
+        }
+        assert_eq!(
+            reference.try_take().unwrap().world(),
+            edited.try_take().unwrap().world()
+        );
+        assert_eq!(errors.take_bits(), 0);
+    }
+
+    #[test]
+    fn actual_callback_volume_step_uses_a_finite_post_mix_ramp() {
+        callback_gain_step_is_smoothed(false);
+    }
+
+    #[test]
+    fn actual_callback_mute_step_uses_an_independent_finite_post_mix_ramp() {
+        callback_gain_step_is_smoothed(true);
+    }
+
+    #[test]
+    fn output_ramps_reach_exact_endpoints_and_do_not_restart_unchanged_targets() {
+        for rate in [1, 22_050, 44_100, 48_000, 96_000] {
+            let frames = (u64::from(rate) * 20).div_ceil(1_000);
+            let mut ramp = OutputRamp::new(0.3, rate);
+            ramp.retarget(0.0);
+            let mut previous = 0.3;
+            for frame in 1..=frames {
+                ramp.retarget(0.0);
+                let value = ramp.advance();
+                assert!(value.is_finite());
+                assert!((0.0..=previous).contains(&value));
+                if frame == frames {
+                    assert_eq!(value, 0.0);
+                }
+                previous = value;
+            }
+            assert_eq!(ramp.advance(), 0.0);
+            ramp.retarget(1.0);
+            for _ in 0..frames {
+                ramp.advance();
+            }
+            assert_eq!(ramp.advance(), 1.0);
+        }
+    }
+
+    #[test]
+    fn output_ramp_retargets_from_the_actual_current_value_without_a_step() {
+        let mut ramp = OutputRamp::new(0.3, 48_000);
+        ramp.retarget(0.8);
+        for _ in 0..317 {
+            ramp.advance();
+        }
+        let current = ramp.current;
+        assert!((0.3..0.8).contains(&current));
+        ramp.retarget(0.0);
+        assert_eq!(ramp.current, current);
+        assert!((ramp.advance() - current).abs() < 0.000_01);
+        for _ in 1..960 {
+            ramp.advance();
+        }
+        assert_eq!(ramp.current, 0.0);
+    }
+
+    #[test]
+    fn silent_output_keeps_actual_particle_world_and_voice_history_alive() {
+        for mute in [false, true] {
+            let epoch = StreamEpoch::new(12).unwrap();
+            let errors = ErrorCell::new(epoch);
+            let mut audible = prepared(211);
+            let mut silent = prepared(211);
+            let mut controls = silent.controls.clone();
+            if mute {
+                controls.mute = true;
+            } else {
+                controls.volume = Normalized::ZERO;
+            }
+            silent.mailbox.publish(&controls);
+            let mut a = [0.0; 9_600];
+            let mut b = [0.0; 9_600];
+            let mut a_events = [None; crate::audio::transport::VISIBLE_CAPACITY];
+            let mut b_events = [None; crate::audio::transport::VISIBLE_CAPACITY];
+            let mut first_event = None;
+            let mut latest_event = 0.0_f64;
+            for block in 0..10 {
+                let playback = MachNanos::new(block * 100_000_000);
+                audible.render_f32(&mut a, 2, playback, &errors);
+                silent.render_f32(&mut b, 2, playback, &errors);
+                assert!(b[1_918..].iter().all(|sample| *sample == 0.0));
+                let now = MachNanos::new((block + 1) * 100_000_000);
+                let count = audible.visuals.read_live_into(epoch, now, &mut a_events);
+                assert_eq!(
+                    silent.visuals.read_live_into(epoch, now, &mut b_events),
+                    count
+                );
+                for (a, b) in a_events.iter().zip(&b_events).take(count) {
+                    let a = a.unwrap();
+                    let b = b.unwrap();
+                    assert_eq!(a.serial, b.serial);
+                    assert_eq!(a.world, b.world);
+                    assert_eq!(a.present, b.present);
+                    assert_eq!(a.x, b.x);
+                    assert_eq!(a.y, b.y);
+                    assert_eq!(a.strength, b.strength);
+                    first_event.get_or_insert(b.world.get());
+                    latest_event = latest_event.max(b.world.get());
+                }
+            }
+            assert_eq!(audible.world(), silent.world());
+            assert_eq!(silent.world().get(), 1.0);
+            assert!(
+                first_event.is_some_and(|first| latest_event > first && latest_event > 0.5),
+                "actual seeded particle event times must continue during silent output"
+            );
+            let now = MachNanos::new(1_000_000_000);
+            controls.mute = false;
+            controls.volume = Normalized::new(0.3).unwrap();
+            silent.mailbox.publish(&controls);
+            audible.render_f32(&mut a, 2, now, &errors);
+            silent.render_f32(&mut b, 2, now, &errors);
+            assert_eq!(a[1_918..], b[1_918..]);
+            assert_eq!(errors.take_bits(), 0);
+        }
+    }
+
+    #[test]
+    fn actual_callback_receipts_ack_latest_endpoints_without_rewriting_main_controls() {
+        use crate::{controls::ControlEdit, situations::KnobIndex};
+
+        let epoch = StreamEpoch::new(13).unwrap();
+        let engine = prepared(307);
+        let mut main = engine.controls.clone();
+        let mailbox = engine.control_mailbox().clone();
+        let receipts = engine.status_mailbox().clone();
+        assert_eq!(receipts.try_read(), None);
+        main.edit_knob(
+            KnobIndex::from_index(0, main.knobs.len()).unwrap(),
+            Normalized::ONE,
+        )
+        .unwrap();
+        mailbox.publish(&main);
+        main.apply(ControlEdit::Mute(true)).unwrap();
+        main.apply(ControlEdit::Volume(Normalized::new(0.8).unwrap()))
+            .unwrap();
+        let latest = main.clone();
+        mailbox.publish(&main);
+        let lease = EngineLease::new(engine, epoch);
+        let errors = ErrorCell::new(epoch);
+        let mut output = [0.0; 2_048];
+        let (_, heap) = crate::rt_alloc::measure(|| {
+            output_f32(&lease, &mut output, 2, &callback_info(0), &errors);
+        });
+        assert_eq!(heap, crate::rt_alloc::Counts::default());
+        let receipt = receipts.try_read().unwrap();
+        assert_eq!(receipt.epoch, epoch);
+        assert_eq!(receipt.ack_revision, latest.settings_revision);
+        assert_eq!(receipt.ack_manual_revision, latest.manual_revision);
+        assert_eq!(receipt.display_dominant, latest.manual_target);
+        assert!(receipt.world.get() > 0.0);
+        assert_eq!(main, latest);
+        let engine = lease.try_take().unwrap();
+        assert_eq!(engine.controls, latest);
+        assert_eq!(engine.volume_gain.current, 0.8);
+        assert_eq!(engine.mute_gain.current, 0.0);
+        assert_eq!(receipt.world, engine.world());
+        assert!(output[1_918..].iter().all(|sample| *sample == 0.0));
+        assert_eq!(errors.take_bits(), 0);
+    }
+
+    #[test]
+    fn frozen_owner_accepts_controls_without_advancing_the_generated_world() {
+        use crate::controls::ControlEdit;
+
+        let epoch = StreamEpoch::new(14).unwrap();
+        let mut engine = prepared(409);
+        let mut main = engine.controls.clone();
+        let before = engine.world();
+        main.apply(ControlEdit::Mute(true)).unwrap();
+        engine.mailbox.publish(&main);
+        assert!(engine.sync_frozen_controls(epoch));
+        let receipt = engine.status_mailbox().try_read().unwrap();
+        assert_eq!(receipt.ack_revision, main.settings_revision);
+        assert_eq!(receipt.world, before);
+        assert_eq!(engine.world(), before);
+        assert!(engine.controls.mute);
+        assert!(engine.sync_frozen_controls(epoch));
+        assert_eq!(engine.status_mailbox().try_read(), Some(receipt));
+    }
+
+    #[test]
+    fn frozen_worker_acknowledges_controls_accepted_before_a_callback_fault() {
+        use crate::controls::ControlEdit;
+
+        let epoch = StreamEpoch::new(17).unwrap();
+        let engine = prepared(409);
+        let mailbox = engine.control_mailbox().clone();
+        let receipts = engine.status_mailbox().clone();
+        let mut main = engine.controls.clone();
+        let lease = EngineLease::new(engine, epoch);
+        let errors = ErrorCell::new(epoch);
+        let mut output = [1.0; 4];
+        output_f32(&lease, &mut output, 2, &callback_info(0), &errors);
+        let previous = receipts.try_read().unwrap();
+        main.apply(ControlEdit::Mute(true)).unwrap();
+        mailbox.publish(&main);
+        output_f32(&lease, &mut output, 2, &callback_info(u64::MAX), &errors);
+        assert_eq!(
+            errors.take_bits(),
+            crate::audio::transport::ErrorCode::TIMING_FAULT
+        );
+        assert_eq!(receipts.try_read(), Some(previous));
+        lease.close();
+        let mut frozen = lease.try_take().unwrap();
+        let frozen_world = frozen.world();
+        assert!(frozen.controls.mute);
+        assert!(frozen.sync_frozen_controls(epoch));
+        let accepted = receipts.try_read().unwrap();
+        assert_eq!(accepted.ack_revision, main.settings_revision);
+        assert_eq!(accepted.world, frozen_world);
+        assert_eq!(frozen.world(), frozen_world);
     }
 
     fn callback_info(nanos: u64) -> cpal::OutputCallbackInfo {

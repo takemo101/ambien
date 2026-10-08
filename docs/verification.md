@@ -356,3 +356,165 @@ startup failure 用の使い捨て executable は、修正前に runner exit1 �
 同じ external AX 操作を使う使い捨て SDK preview は PID22184 を起動し、シーンを15秒前面表示、実 close button で閉じて8秒、実メニューで再生成して8秒後に実 menu Quit した。32.44秒で native lifecycle／正常 exit0を確認した。OS音量、TCC、画面 capture、アプリ source hook は変更・使用していない。ユーザーは「確認できた」を選び、雨・近い粒の音と左右の光・シーン閉鎖中の音継続・再表示時に古い粒が一斉に出ないことを確認した。これはユーザーの試聴／実表示の証拠で、AI が音を聞いたとの主張ではない。
 
 P02 の今回の smoke 条件の受け入れが揃った。三環境の心地よさと初期値確定、物理的な50ms以内の同期、native backend 全失敗経路・最悪負荷、別画面・下限OS・署名配布は未確認のまま各後続 gate に残す。PR の normal merge・workspace同期・Issue 完了は mikan Report で記録する。
+
+## P03 雨ノブ・音量・独立消音の限定検証
+
+### RED とレビュー指摘の修正
+
+対象は P02 統合後の `feat/amb-005-rain-controls` の worktree、Apple Silicon／Darwin 27.0.0、固定 Cargo.lock の dependency である。変更前の shipping binary を外部 AX で起動すると、実メニューの「消音」がなく exit1した（1.54秒）。これは expected RED で、失敗後の owned child cleanup を Quit 成功にはしない。SDK stderr の IMK mach-port message も消去・成功扱いしない。
+
+既存 `output_f32`／`EngineLease` を用いる seed 固定の音量・消音急変 regression は、変更前に2件とも失敗した。frame0の音量変更は期待 `-0.000119940196` 対 `-0.00031983876`、消音変更は期待 `-0.000119939796` 対 `-0`。独立した有限長 ramp に変更し、同じ callback consumer の検査で確認した。metadata wrapper の初回コンパイルは unkeyed `Div` の `aria_label` で失敗し、安定 ID を付けて解消した。key listener は具体的な `KeyDownEvent`／`KeyUpEvent` 型を指定した。
+
+独立レビューは、受理した新制御を callback 途中失敗時に公開できないと、凍結 worker が旧受理を保持し続ける点を指摘した。新 regression は正常 callback→mute 編集→最大 u64 の再生時刻による実 callback timing fault→lease の worker への排他移譲を通し、修正前に ack `Revision(0)` 対期待 `Revision(1)` で失敗した。新 revision 採用時に受理未公開を記録し、凍結 worker が世界を進めず当該受理を公開する修正後は通った。
+
+もう一人の reviewer は、固定 Ely が選択済み segment の change を抑止し、明示的な雨の再選択が消える点を指摘した。mouse bubble に加え、selector 内の clean Enter／Space pair と実 focus handle／blur subscription で再選択を配送し、新 segment の change は propagation を止める。両 follow-up は source review の対象範囲に重要指摘なし。実 UI の event／focus 成功を source review から主張しない。blur は draw 時の通知であり、任意の同一 frame focus ABA の完全な検証ではない。
+
+### 実標準 stream と通知
+
+production audio／controls／situations modules を直接含む使い捨て CLI を、標準 Device の実 worker／CPAL stream で実行した。44,100 Hz・2 channel・F32。mute revision1を受理した後、mute を維持して volume0.8 revision2を受理し、manual revision は初期値のままだった。消音中の実 `VisualRing` state 世界は0.033→0.533秒と進み、その500msでは出力状態不変かつ main 通知0件だった。volume0.2と mute解除の最新 snapshot は revision4で受理し、initial receipt の世界0.012→最新0.708秒。明示 shutdown の worker join が完了し、全 command は exit0（対象 regression と CLI の合計3.74秒）。
+
+これは実 Device の control受理／論理世界と通知の証拠であり、物理スピーカーの静音・解除後の聴感、実画面の光、OS音量の比較、物理同期の合格にはしない。部分 modules の使い捨て CLI に出た unused-code warnings は shipping source の lint 結果ではない。CLI source は除去した。依存・feature・production testing hook は追加していない。
+
+### Native 観測と現在の前提不成立
+
+最初の実 P03 shipping AX 観測では、「設定」窓と3つの Slider（雨34%、風12%、音量30%）・「消音」CheckBox0を確認し、実 menu Quit による PID消失・exit0を観測した（3.10秒）。numeric値は候補端点の表示であり、音質の採用値ではない。generic wrapper の label はこの tree に現れなかったため、現存 metadata と画面に表示する端点／受理文を意味付き Group／Label にも渡すよう修正した。この修正後の AX 内容は未観測。
+
+後の SDK 実行は Settings window missing（1.36秒）、さらに native window作成後の title を待つ診断では両窓の AXTitle が `ambien` のまま timeout（buildを含め7.93秒）だった。読取り専用 SDK で session の screen-locked=1／on-console=1、主 display の asleep=0／active=1を確認した。前回のロック中 AX 制約と整合するが、これだけで title の実装不具合や完全な原因特定を宣言しない。対象の cleanup は正常 Quit 成功に数えず、同じ操作失敗の反復を止めた。OS／TCC／認証や画面 capture は変更・使用していない。
+
+解除後に必要なのは、診断なし binary の実雨ノブ・音量・menu／設定 mute の交互操作、受理と最新値の一致、明示再選択の mouse／keyboard、viewport／受理更新中の focus 保持、消音中の実光と解除後の最新音量、既存 native lifecycle E2E の再確認である。現時点では P03 の PRマージ・completed・P04開始は行わない。三環境の品質・初期値確定、下限OS／他画面・native backend 全RT経路・物理同期・配布はそれぞれ後続 gate に残す。
+
+### 診断 source 除去後の統合検査
+
+使い捨て CLI／SDK source を除去し、`cargo fmt --all -- --check`、`cargo test --offline --locked`（82 passed／0 failed、1.64秒）、`cargo clippy --all-targets --offline --locked -- -D warnings`、`cargo build --offline --locked` は exit0。全 Rust 検査と hash の command は6.06秒。新しい急変・有限端点・retarget・世界／イベント継続、coherent受理・通知・凍結中の受理と callback fault の regression を含む。診断なし `target/debug/ambien` の SHA256 は `31582a07b6d7559cd18e6e844b6ff617fd7598bb118f463f6be5cc0e14d997ac`。この合格を未実施の native操作に広げない。
+
+ユーザーの「解除したので検証を続ける」回答を受け、実窓検証を再開した。SDK preflight の初回は `NSNumber` の import 不足でコンパイル失敗し、Foundation を明示して当該段階を直した。再開時の実行先 SDK は screen-locked=1／on-console=1／display-asleep=1／display-active=0を返し、guard が exit77で実アプリの起動前に停止した。外部 UI の失敗を反復したのではない。別の読取りで console UID は実行プロセスと一致し、foreground は `so.stencil.tern` だった。これだけで画面復帰や lock metadata の stale を判定せず、ユーザーの解除操作とその後の SDK 状態を別の事実として保持する。OS設定・ロック解除・認証は AI が変更していない。
+
+実ノブ／menu・設定消音／世代受理／selector mouse・keyboard／scroll時 focus・identity／設定再生成を通る外部 SDK driver は `swiftc -typecheck` が exit0（2.78秒）だったが、前提不成立のため未実行であり PASS ではない。使い捨て source は除去し、次回は実行先の display が復帰し、解除状態を維持できるときに同じ未完 native 条件を確認する。文書検査は `npm run check:docs` が All checks passed（0.53秒、既存の No init version recorded 警告を保持）。
+
+### Native 自動判定と検証スキル
+
+ユーザーの追加依頼に従い、操作だけでなく期待値のチェックを runner に組み込み、実窓 PNG のローカル比較とプロジェクト内の [検証スキル](../.agents/skills/verifying-ambien/SKILL.md) を追加した。画面収録権限はユーザーが準備する経路を選び、AI による許可 UI・TCC／OS／認証設定変更や画像外部送信は許可範囲に含めない。SPEC の進行条件・実機／試聴／配布 gate は変えていない。
+
+2026-10-07、Darwin 27.0.0／arm64、同じ診断なし binary SHA256 `31582a07b6d7559cd18e6e844b6ff617fd7598bb118f463f6be5cc0e14d997ac` を使用した。SDK は console=1、display asleep=0／active=1、AX=true、event-post=true、capture=false、lock metadata=nilを返した。nil 単独では未ロックと判定せず、runner は完了 login・一致 UID・前面 PID／実 focus 窓も確認した。
+
+旧 runner に `--case controls --artifacts ...` を渡した変更前の確認は Usage／exit1（0.43秒）。保管していた外部 driver は選択済み雨の Space／Enter／mouse の各1回受理、雨／風編集、消音中 volume0／10／20%、menu一致、実scrollでのfocus／identity保持まで通ったが、消音解除後の未チェック menu の `AXMenuItemMarkChar` が `.noValue`（-25212）を返して exit1（2.94秒）。これは観測器の未チェック値解釈の失敗として残し、production の成功や Quit に読み替えない。統合 runner は `.noValue` と取得成功時の空文字だけを未チェックとして扱い、unsupported／他エラーは失敗にした。
+
+両 Swift source の `swiftc -typecheck` は成功した。screenshot helper の初回は SDK の compound macro `PROC_PIDPATHINFO_MAXSIZE` が Swift に import されず失敗し、SDK の定義 `4 * MAXPATHLEN` と `MAXPATHLEN = PATH_MAX` に従って buffer サイズを修正した。helper の PNG-backed `--self-test` は exit0：不変・単色・透明・寸法不一致・窓端だけの変化を拒否し、内部64 pixelの変化は計測して通した。これは比較器の境界検査で、実 Ambien の画像を取得した証拠ではない。capture CLI は実際の preflight=false で JSON `blocked`／exit77を返し、取得 API／権限要求を行っていない。
+
+```sh
+/usr/bin/swift scripts/native-e2e.swift "$PWD/target/debug/ambien" \
+  --case all --artifacts "$PWD/target/native-e2e"
+```
+
+この実行は8.04秒・exit77、総合 `blocked`。今回のローカル証拠は `target/native-e2e/run-E64D3B07-7B21-49F9-8C05-681A50A64ED3/report.json`（実行14:23:02〜14:23:09 UTC）。directory0700／report0600も `stat` で確認した。
+
+| check | 実観測 |
+|---|---|
+| binary／session | SHA256一致、実行前と入力前の安全前提を確認、PASS |
+| lifecycle | 実menu、設定singleton、両窓minimize／AX復元／zoom無効、close／⌘,再生成、zero-window生存、menu Quitと両窓⌘Q、PASS。PID39837／39986／39992が実消失・正常exit0 |
+| controls | metadata、選択済みSpace／Enter／mouseで各1回のsettings／manual世代更新と受理3/3、雨35／風13、menu消音・設定一致、消音のままvolume0／10／20%でmanual5維持、実scrollで同じfocused AX sliderと受理9/5を保持、設定で解除後20%／menu未チェック、close／再生成でも最新端点と受理10/5保持、PASS。実menu QuitでPID40130消失・正常exit0 |
+| visual | Screen Recording不足でBLOCKED。画像取得未実施、PNGなし。独立したlifecycle／controlsを停止・偽PASSにしていない |
+
+新しい runner・helper・skill の独立 Spec／Standards reviewer は source の対象範囲に重要指摘なし。実画像取得成功を review から主張しない。実窓 frame の変化、消音／解除の聴感、物理同期・最大サイズ／高DPI・下限OS・配布は、この自動チェックで合格にしていない。P03 の normal merge・completed・P04開始は実窓画像の前提と残る受け入れが揃うまで行わない。
+
+選択ケースと失敗優先も実行確認した。`--case controls` は実アプリの同じチェックとmenu Quit（PID53813消失・正常exit0）を通し、総合pass／exit0、証拠は `target/native-e2e/run-52EC9D50-053A-492D-BA75-02441C9BF566/report.json`。visualを選ばなかった結果であり、画像取得の合格ではない。存在しない `/tmp/ambien-missing-candidate/ambien` を指定した実行はbinary.identity fail、全nativeケース未実行blocked、総合fail／exit1、証拠は `target/native-e2e/run-766B7680-AA03-4680-8DDE-B583E692165F/report.json`。失敗が前提不足より優先し、候補を起動していない。両commandをまとめた確認は5.30秒、期待する0／1を確認して終了した。
+
+検証スキルは成功履歴や追加規律の正本ではなく、現存ケース／CLI／report の参照手順として作成した。未提供のCLI仕様を尋ねた変更前の5つの新規AI回答は、全て未実施の画像を合格・mergeにはしなかったが、ケース別の正確なコマンド／report契約は得られなかった。これは判定規律の失敗ではなく、参照手順の不足として扱う。スキル掲載のCLI／case／reportは上記の実行と独立source reviewで照合し、AGENTS・README・文書索引・Latから入口を設けた。スキルを渡した追加の新規AI回答確認は応答待ちでtimeout／interruptとなり、完了した結果を取得できていない。新規AIへの適用成功率・pressure耐性は未測定であり、推測で成功件数を記録しない。この未測定は実アプリのPASSや画像BLOCKEDとは別の検証制約である。
+
+関連文書・スキル入口を揃えた後の `npm run check:docs` は All checks passed／exit0（0.48秒）。既存の No init version recorded 警告は保持し、init／hook／全体設定の追加はしていない。これは Lat の構造検査であり、新規AI回答・実画像・製品全体の受け入れの成功を意味しない。
+
+## macOS 共通検証スキルへの分離
+
+ユーザーが他のデスクトップアプリへの再利用を依頼し、macOS専用としたため、[共通手順](../.agents/skills/verifying-macos-apps/SKILL.md) と [Ambien固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) に分離した。共通directoryはAmbienや隣接文書に依存せず、別プロジェクトへ持ち出せる。アプリの要件文書・言語・初期窓・CLI・report format・exit code・画像の期待関係は固有レシピから確認し、共通の決め打ちにしない。汎用runner、グローバル登録、他OS対応、新たな画像取得権限は追加していない。
+
+変更前の2つの独立したレシピ適用確認は、READMEを正本とする文書エディタと、初期窓を持たず静止画像を要求するstatus-barアプリを対象とした。旧スキルのSPEC／Cargo前提、Ambien固定case／report契約、動く画面に偏った画像判定が再利用の不足として報告された。これは想定プロジェクトのcatalogを使う手順適用確認であり、別製品の実行結果ではない。
+
+共通手順を渡した両agentの再適用では、各projectの既存commandを選び、保存内容とeditor focus、menu状態と時刻付きack、OSのcapture権限と撮影範囲の許可を区別できた。静的な画面の一致、対象ROIと事前mask、正当な単色canvasを扱い、exit0でも保存内容の不一致／期待するbadgeの停止はfailとした。残る要件値・時刻・selector・実format・実行証拠を捏造していない。別途Ambienレシピからcontrolsの選択・現存all command・77の意味を取得できた。これは記録済みの2ケースと反例への手順適用であり、任意のアプリへの成功率や実UIの受け入れを保証しない。
+
+実経路を確かめるため、Ambienとは別名の小さなAppKitアプリと外部AX observerを隔離して作成した。Swift sourceの初回typecheckはthrowing式を `&&` で結合した箇所で失敗し、前面PID guardとAX focus照合を分けて修正した。fixture compileとobserver typecheckは成功したが、実行はpreflightで起動前にblocked／exit77（0.83秒）。ローカル証拠は `/tmp/macos-skill-smoke.psicXs/report.json`、checksは空で候補PID未作成。別の読取り専用SDK診断（0.44秒）はlock=1、console=1、login=1、consoleUID=processUID=501、display active=0／asleep=1、foreground=loginwindow、AX／event=true、capture=falseを返した。同じ起動失敗は反復せず、OS／TCC／認証変更・入力・画像取得は行っていない。したがって、この別fixtureのcounter／checkbox／Quitは未実施でありPASSではない。使い捨てsourceと生成binaryは残さず、productionのRust／Swift scriptは変更していない。
+
+今回の手順適用資料はsession内の `macos-skill-baseline-editor.json`／`macos-skill-baseline-panel.json`、`macos-skill-guided-editor.json`／`macos-skill-guided-panel.json`、`macos-skill-ambien-retrieval.json` に保持した。前節のAI回答timeoutという過去の未測定を、今回の2ケース確認から全面的な成功へ書き換えない。P03の画像・聴感・通常mergeの残gateも維持する。
+
+独立Spec／Standardsレビューは、共通手順が全体mouse入力にもkeyboard focusを必須としていた点を指摘した。これでは初期窓のないstatus itemを操作できず、frontmost／focused windowが合っていても別の最前面窓への誤clickを防げない。keyboardは従来のforeground／focus確認、mouseは所有AX action優先と実hit target／bounds／倍率／被覆の確認へ分け、確認不能ならblockedとした。両follow-up reviewは重要指摘なし（sourceのみ）。
+
+修正した手順への3反例適用では、所有status itemのAXPressはCGEvent権限や存在しないfocused windowを要求せず選べる一方、他PIDの被覆を検出した座標入力とhit観測unsupportedの座標入力は、どちらも送信せずblockedとした。資料はsession内の `macos-skill-pointer-regressions.json`。これは手順の判定確認であり、ロック中の実mouse操作を行った証拠ではない。
+
+分離・修正・案内を揃えた後の `npm run check:docs` はAll checks passed／exit0（0.41秒）。既存のNo init version recorded警告を保持した。Rust／shipping Swift sourceを変更していないため、この作業でCargo検査の新たな成功は主張しない。構造検査と想定ケースへの手順適用を、別アプリの実窓受け入れやP03の画像成功へ広げない。
+
+## 順次実装の再開前確認
+
+ユーザーの実装続行依頼を受け、P03の残受け入れへ再開する前に、読取り専用SDKで実行前提を確認した（0.43秒）。lock=1、console=1、login=1、consoleUID=processUID=501、display active=0／asleep=1、foreground=loginwindow、AX／event=true、capture=false。実アプリは起動せず、入力・capture API・許可要求・OS／TCC／認証変更は行っていない。同じAX失敗を反復したのではなく、再開可否の前提読取りである。既存controls／lifecycle PASSを維持し、実窓画像と消音解除後の聴感の未確認は残す。ユーザー側で実行先の画面復帰・解除と実行元の画面収録権限を準備してから未完の経路を再開する。P03の受け入れ・通常merge・同期を飛ばしてP04へ進めない。
+
+ユーザーが「準備したので検証を再開」を選択した後、同じ診断なしbinaryの `--case all` を実行した。SHA256一致のみPASS、session preflightはlock=true／console=true／login=true／UID501／display active=0・asleep=1でblocked、全nativeケース未実行、0.86秒・exit77。証拠は `target/native-e2e/run-751FAB50-AF5C-4946-AB1D-D475CA61D3CE/report.json`。候補起動・入力なし。今回は画面のguardで止まったため、準備後のcapture権限を読んだとはしない。ユーザーの準備操作と実行先SDKの観測を別の事実として保持し、同じ操作を再試行しない。
+
+食い違いの切分けとしてhost／実行user／実親processを読んだ。実行先ComputerNameは `takeoのMac mini`、userは `takemo101`、実行経路は `/Applications/Tern.app/Contents/MacOS/tern` → `/bin/zsh` → `omp`、`TERM_PROGRAM=tern`。ユーザーは準備先も同じMac mini・Ternと回答した。`/dev/console` 所有者UID501、実行processのlaunch manager=Aqua／UID501を観測し、別ユーザーの非GUI実行ではなかった。Hitchで参照できる端末は0件。環境設定や認証は変更していない。
+
+`loginwindow` の直近ログには、2026-10-08 07:15:15.135+0900（UTCでは2026-10-07 22:15:15.135）のunlock successと、その後のscreen lock UI teardown completeがある。先のrunner記録の22:14:43Zより後の環境遷移として扱い、ユーザーの準備操作を否定したり、staleなSDK値が原因だったと決めつけたりしない。22:25:02Zの追加SDK snapshot（0.55秒）ではlockフラグなし、console／login=1、UID501、online display2件、両方active=1／asleep=0、foreground=Chrome。AX／event=true、capture=false。この読取りは環境遷移後の前提を識別するためのもので、同じ失敗したnativeケースの再実行ではない。
+
+追加snapshotに対応するTCCログのrequest `27168.4` は、service=kTCCServiceScreenCapture／preflight=yes、subject=`so.stencil.tern`、responsible_path=`/Applications/Tern.app/Contents/MacOS/tern`、requesting binary=swift-frontend、authValue=1／authReason=5／error=null。値の意味や設定UIの状態を未確認のまま断定せず、公開preflight=falseと、この実行経路の許可対象がTernであることを証拠とする。画像取得・許可要求・TCCデータベース変更・アプリ再起動は行わず、既存native成功を保持して画面収録経路の利用可能化を待つ。IOPowerManagementの独立読取りは指定keyを取得できずexit1であり、画面状態の成功証拠には含めない。時刻範囲指定のログ照会は空だったため、直近ログの成功イベントと実行先の+0900を用いて時刻を対応させた。実窓画像と解除後の聴感はなお未確認。
+
+ユーザーから「画面収録の許可入ってなかったです」と報告があり、未許可だったことをユーザー確認の事実として記録した。許可を有効化済み・アプリ再起動済みとは推定しない。未完経路を再開できるかの公開preflight読取りは2026-10-07 22:33:04Zにcapture=false（0.28秒・exit0）。失敗したnativeケースの再実行、画像取得、許可要求、OS設定変更は行っていない。ユーザー側でTernの画面収録を有効化し、OSが再起動を求めた場合はTernを再起動してから残る実窓検証へ戻る。過去のblockedや未確認範囲を合格へ書き換えない。
+
+## 画面収録許可後の実窓撮影
+
+ユーザーの「許可した」という報告後、公開preflightは2026-10-07 22:37:10Zにcapture=true（0.34秒）。既存の `native-e2e.swift` を同じ診断なしbinaryで `--case visual` として実行した（5.34秒・exit1）。binary SHA256 `31582a07b6d7559cd18e6e844b6ff617fd7598bb118f463f6be5cc0e14d997ac` とsession preflightはPASSで、AX／event／capture=true。証拠は `target/native-e2e/run-AB41F89B-C8B1-4564-B742-490B42302BD7/report.json`。
+
+所有候補PID49422／CGWindowID9033のScreenCaptureKit `desktopIndependentWindow` 画像を2枚保存した。両helper結果は、同じ実行ファイル・PID・window ID・window_only=true・1920×1200・screen_recording_authorized=true・status=passを報告した。実statもrun directory0700、reportと両PNG0600、自分所有を確認。画像はローカルのみで、外部送信・他アプリ／desktop全体の撮影を行っていない。
+
+3枚目前に `Scene no longer foreground before capture` で停止した。visualはFAILであり、2枚取得できたことを3枚／2比較／menu Quitを含む全ケースの成功にしない。failure cleanupで候補を終了し、正常Quitの証拠とはしない。保存済み2枚への既存helperのローカルcompareはexit0／status=pass、内部crop1536×840（x192／y180）・比較1,290,240画素中6,109画素変化（0.0047347780）、maximum channel delta72。これは消音中の実窓内部の変化だけであり、粒だけの運動・可聴無音・物理同期・ガラスの質感を証明しない。
+
+読取り専用WindowServerログでは対象の前面化を観測したが、失敗前の追加の前面process切替は得られず、AXFocusedWindowの不一致原因は未特定。比較・既存capture証拠を保持し、focus guardを外したりcapture権限を再要求したりしない。通知観測用の一時Swiftプロセスはready後15秒でexit0。ユーザーのスキル改善依頼を優先したため、観測中の追加native試行は開始しなかった。これは対象のfocus遷移を特定した証拠ではない。
+
+## 権限準備と検証再開の汎用手順
+
+ユーザーが、権限の許可を促す案内とスキル改善を依頼し、汎用化する対象を「権限準備と検証再開」と選択した。既存の `verifying-macos-apps` へ、今回の実行経路の許可主体、設定項目、ユーザー本人の手動準備、条件付き再起動、同経路の公開preflightによる反映確認、未完ケースだけの新規runでの復帰を追加した。アプリ名・言語・CLI・report schema・画像数・消音は共通手順に固定せず、Ambienの公開probeとvisualコマンド・3枚／2比較／正常Quitは固有レシピに置いた。開発手順の参照元も更新し、新しいrunner・OS設定変更・グローバル登録・外部公開は行っていない。
+
+変更前の独立参照適用では、共通5ケース・固有5ケースから、具体的な設定場所、responsible appとrequesting processの区別、再起動条件、反映確認と保留ケースへの復帰の未記載を確認した。変更後は同じ5ケースずつへ独立に適用し、DeskShell／BrightTerm等の非Ambien条件でも、手動案内とtrue／false後の行動を記載から導けた。これは参照手順の欠落を判定する検証であり、別アプリの実機権限や操作の成功ではない。文言の採用率・自然な遵守率の比較実験は行っていない。
+
+追加の5境界反例では、許可拒否後の停止分岐不足が見つかったため、再要求・取得を止め必須ケースをblockedとして保持する規則を修正した。旧候補cleanup後に診断情報を得る反例では、通常再開の前に新情報を要求すると循環することを確認し、仮説・実在する追加読取り観測・有限待ちと停止条件・所有とpreflight・既存guardを持つ1回の診断専用runを通常再開から分けた。両修正の再適用と、2スキル／現存native sourceの独立統合レビューに残る重要な指摘はなかった。診断runの終了自体や部分画像をケース成功としない。
+
+シナリオ資料はsession内の `macos-permission-guidance-cases.json`、`ambien-permission-focus-cases.json`、`macos-permission-boundary-cases.json`、追加診断反例はレビュー対話に保持した。純粋な参照・適用評価であり、permanentの転記試験や汎用driverを追加していない。固有レシピに記載した `/usr/bin/swift -e 'import CoreGraphics; print(CGPreflightScreenCaptureAccess())'` の実行はtrue／exit0（0.48秒）。これはその公開probeが動き、取得前提が利用可能だった証拠だけである。先の実窓2枚後のvisual FAILと解除後聴感の未確認は、そのまま保持する。Rust／shipping Swiftを変更しておらず、新しいビルドや全Rust試験の成功は主張しない。
+
+## 汎用手順に従った限定診断と新規visual成功
+
+スキル整備後、前面process切替・所有候補のAX focused window変更を追加観測し、1回の診断専用runで区別する仮説と停止条件を定めた。23:18:36Zの前提読取り（0.42秒）はconsole／login=1、UID=processUID=501、main display active=1／asleep=0、foreground=Chrome、AX／event／capture=true、lockフラグなし。他の成立条件と合わせて実操作可能と判断し、許可要求・OS設定変更は行っていない。
+
+通知observerのready後に、既存ガード付きの `--case visual` を同じbinary SHA256で1回実行した（8.51秒・exit0）。今回の `target/native-e2e/run-62C30ABE-951F-4160-BC1C-2F33B0BC3AA7/report.json` はbinary／session／visualすべてPASS。所有PID98952／CGWindowID9522・1920×1200の実窓PNG3枚、cropped interior1536×840（x192／y180）の隣接2組に7,728／13,715画素の変化（0.0059895833／0.0106298053）、maximum channel delta78／212を報告した。実menu消音・所有／bounds／focus／mark・実menu Quit正常exit0まで現存runnerの全必須assertionが成立した。実statでrun0700、reportとPNG3枚0600、自分所有も確認。画像はローカルのみ。
+
+observerは15.8秒・exit0、対象exeに一致したPID98952へAXFocusedWindowChanged／AXWindowCreatedをstatus0で登録し、設定窓への変更と元のシーンidentityへの復帰を観測した。撮影区間のfocus喪失は再現せず、正常終了後の前面変更を記録した。NSRunningApplicationのlaunchDateはnilであり、開始日時が取得できたとはしない。以前のvisual FAILを上書きせず、最初の喪失原因を特定・修正したとも主張しない。今回のPASSは診断プロセスの終了からではなく、実runnerの3枚／2比較／正常Quitまでの観測から判定した。
+
+既存controls／lifecycle成功と今回visual成功は同一binary identityの独立証拠として保持し、別の `--case all` を成功実行したとはしない。描画frame変化を、粒だけの運動、可聴無音、解除後の最新音量、物理同期、主観的な音質・ガラス、最大負荷、製品全体の受け入れへ拡張しない。P03のユーザー聴感確認、通常mergeと同期は残る。
+
+## P03 消音中の音量変更と解除後のユーザー聴感
+
+ユーザーへ `/Users/takemo101/Desktop/workspace/ambien/target/debug/ambien` を起動し、設定窓で「音量20% → 消音 → 消音中80% → 消音中20% → 消音解除」を行うよう案内した。期待する結果は、消音中の音量変更で音が戻らず、解除後は最後に設定した20%程度へ戻ること。OSや他アプリの音量変更は手順に含めていない。
+
+ユーザーは「期待どおり確認できた」を選択し、消音中に音量を変えても無音のまま、解除後は最後の20%程度で鳴ったことを受け入れた。これはユーザーの聴感観測であり、AIによる物理音圧測定や画像比較からの推定ではない。同じ成功を確認するための再試行はしない。候補のbinary SHA256は、上記native証拠と同じ `31582a07b6d7559cd18e6e844b6ff617fd7598bb118f463f6be5cc0e14d997ac`。
+
+P03のこの聴感条件は受け入れ済み。初回visualのfocus喪失原因は未特定のまま保持する。音質の10分試聴・初期ノブ値確定、粒だけの運動、物理同期、最大負荷、下限OSと署名・配布の受け入れへ拡張しない。通常PR mergeとGitButler同期は、この記録時点では未完了。
+
+## P03 最終レビュー：座標入力の実受け手と所有
+
+独立したSpec／Standardsレビューは、native runnerのclick／scrollが前面・focus・矩形だけから受け手を推測する点を重要指摘とした。別processの非activating panelに被覆されても候補のfocusは維持できるため、送信先の所有確認が必要である。ほかの重要なP03指摘はなかった。
+
+実runnerの宣言を使う一時probeで、自分の検証processが作成した空の非activating panelだけを候補へ重ねた。ユーザーの既存app／文書を操作・撮影していない。最初はprobe側のAppKit起動完了が欠けてhit lookupが-25208となり、2.73秒で停止・候補cleanupした。`finishLaunching`後のRED（3.60秒・exit1）では、前面・focusが候補PID84200のまま、hit PID84058の隔離panelへclick1回・scroll1回が実際に届いた。候補は実menu Quit正常0。模擬の許可判定やソース文言比較ではなく、実イベント配送で欠落を再現した。
+
+`requirePointerTarget`は送信前に公開AX hit lookup（messaging timeout1秒）とPIDを確認し、実受け手と指定controlの両方が現在の所有AX windowに属すること、最新bounds・前面・focus・sessionを再確認する。確認不能・被覆・別windowなら入力せずblocked。最初に「論理controlの子だけ」を要求した版は、実GPUIのhitが所有NSWindowであるためcontrolsがblockedになった（1.98秒・exit77、`run-93FA439D-CA1B-408B-9A63-ED3783E23BB6/report.json`）。別の読取り診断は、被覆なしではhit role=AXWindowかつ期待windowとのCFEqual=true、論理selectorとのCFEqual=falseを観測した。個別のGPUI leafを取得できたとはせず、実際のnative受け手window identityを契約にした。PIDだけや前面だけで許可する回避ではない。
+
+最終版の被覆GREENは2.90秒・exit0。候補PID97173のfocusを維持しつつ、隔離panelのhit PID97163を検出してclick／scrollともblocked、実配送は両方0回、実menu Quit正常0。private証拠先は `target/native-e2e/pointer-regression-2448AFCB-2F83-42F8-A0D3-1870CC1DC561`。probeはこの実SDK/UI境界を確認する一時コードで、既存の単一scriptを重複した恒久runnerとして残さない。
+
+通常controlsも最終scriptで再実行し、4.40秒・exit0。`target/native-e2e/run-4771E5FF-6062-4EE1-B72E-EBF174F81875/report.json` はbinary／session／controlsすべてPASS、同じbinary SHA256を報告した。実selected Space／Enter／mouseの各1世代、雨と風の各1stepと受理、menu／設定消音一致、消音中volume0／10／20、実scrollでfocus／identity／revision維持、解除後20%、close／recreate保持、PID96869の実menu Quit正常0を観測した。未確定の雨34%／風12%を試験で固定する検査は削除し、実開始値から1stepの変化・受理・再生成後の保持を確認する。
+
+Rust実装・binary・lifecycle／visual経路はこの修正で変更していない。既存の独立証拠とユーザー聴感を保持し、初回visual失敗原因や未実施の品質・物理同期・配布を合格へ変更しない。
+
+## P03 最終版のレビュー・検査と限定focus診断
+
+pointer確認はAX treeの準備後に最新session／前面／focus／boundsを照合し、hit lookupを送信直前の最後のAX操作にした。hit後はPIDとCF identityの比較だけを行い、確認不能の例外もblockedとして入力を止める。Spec／Standardsの独立follow-upは、重要指摘の解消と残る重要指摘なしをソース上で報告した。レビュー担当は実行検証を行っていない。
+
+parentの最終 `cargo fmt --all -- --check`、`cargo test --locked --offline`、`cargo clippy --all-targets --locked --offline -- -D warnings`、`cargo build --locked --offline` は計4.10秒・exit0、82試験成功（1.66秒）。当該コマンドだけ既存 `~/.cargo/bin` をPATHへ渡した。build後の実SHA256も `31582a07b6d7559cd18e6e844b6ff617fd7598bb118f463f6be5cc0e14d997ac` のまま。
+
+最終版の被覆probeではhit PID10856／候補PID11007、前面・focusを保持しつつclick／scrollともblocked、実配送0回、実menu Quit正常0（`target/native-e2e/pointer-regression-A7C66EDB-49EC-426B-B7C8-5649B133B179`）。続けた通常controlsは途中で「Foreground changed; no key posted」によりFAIL、候補PID11057をcleanupした。連続コマンド計7.75秒・exit1、失敗reportは `target/native-e2e/run-47AB72D8-69C2-41D5-AEC8-0FB7C6CC4903/report.json`。この停止を正常QuitやPASSへ変更しない。
+
+以前の検証用panel終了に伴う前面遷移と別のfocus変更を区別する仮説を立て、1回だけ追加観測を持つ限定診断を行った。実runnerの同じ最終宣言・全controls assertionとCLIを一時copyへ使い、実際に生成・所有する `Candidate` へAXFocusedWindowChanged／AXWindowCreatedとWorkspace activation observer、各key直前の読取りsnapshotだけを追加した。既存guard・値・待ち・必須条件を変更していない。4.68秒・exit0、`target/native-e2e/run-9E7AC785-D446-4AB7-9F2E-A5C7E9D3F96D/report.json` はbinary／session／controlsすべてPASS、PID21148の実menu Quit正常0まで成立した。8回のkey前で前面PID21148・期待AX focused windowとの一致を観測し、設定窓生成／再生成のidentity変更、正常Quit後のloginwindowへのactivationを記録した。
+
+この診断では喪失が再現せず、先のFAILの原因を特定・修正したとはしない。診断copyの成功を、未計測の通常run成功や全case同時実行へ書き換えない。最新guardの実成功と実runnerの既存controls／lifecycle／visual成功、同binaryのユーザー聴感は、それぞれの条件と限界を保持してP03の独立証拠とする。一時probeと診断copyは削除し、永久の重複runnerや新しいdiagnostic flagを追加しない。

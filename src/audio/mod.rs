@@ -21,9 +21,11 @@ use crate::{controls::ControlState, situations::Registry};
 use lease::EngineLease;
 use render::PreparedEngine;
 use timing::{MachClock, StreamEpoch, WorldSeconds};
-use transport::{ControlMailbox, EVENT_CAPACITY, ErrorCell, ErrorCode, VisualRing};
+use transport::{
+    ControlMailbox, ControlReceipt, EVENT_CAPACITY, ErrorCell, ErrorCode, StatusMailbox, VisualRing,
+};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum OutputStatus {
     Starting,
     Running {
@@ -81,6 +83,7 @@ pub(crate) struct AudioSource {
     pub(crate) registry: Arc<Registry>,
     pub(crate) visuals: Arc<VisualRing>,
     pub(crate) controls: Arc<ControlMailbox>,
+    pub(crate) receipts: Arc<StatusMailbox>,
     pub(crate) epoch: StreamEpoch,
     pub(crate) clock: MachClock,
     pub(crate) errors: Arc<ErrorCell>,
@@ -88,7 +91,11 @@ pub(crate) struct AudioSource {
 }
 
 pub(crate) struct AudioShared {
-    state: Mutex<(OutputStatus, Option<Arc<AudioSource>>)>,
+    state: Mutex<(
+        OutputStatus,
+        Option<Arc<AudioSource>>,
+        Option<ControlReceipt>,
+    )>,
 }
 
 impl AudioShared {
@@ -97,8 +104,47 @@ impl AudioShared {
         (state.0.clone(), state.1.clone())
     }
 
+    pub(crate) fn control_receipt(&self) -> Option<ControlReceipt> {
+        self.state.lock().2
+    }
+
+    fn accept_receipt(&self, source: &AudioSource, notify: &Sender<()>) {
+        let Some(receipt) = source.receipts.try_read() else {
+            return;
+        };
+        if receipt.epoch != source.epoch {
+            return;
+        }
+        let mut state = self.state.lock();
+        if state
+            .1
+            .as_ref()
+            .is_none_or(|current| current.epoch != receipt.epoch)
+        {
+            return;
+        }
+        let discrete_changed = state.2.is_none_or(|old| {
+            old.epoch != receipt.epoch
+                || old.ack_revision != receipt.ack_revision
+                || old.ack_manual_revision != receipt.ack_manual_revision
+                || old.display_dominant != receipt.display_dominant
+        });
+        // Retain the freshest coherent world value, but never wake main merely
+        // because samples, gains, particles, or breath progressed.
+        state.2 = Some(receipt);
+        drop(state);
+        if discrete_changed {
+            let _ = notify.try_send(());
+        }
+    }
+
     fn set_status(&self, status: OutputStatus, notify: &Sender<()>) {
-        self.state.lock().0 = status;
+        let mut state = self.state.lock();
+        if state.0 == status {
+            return;
+        }
+        state.0 = status;
+        drop(state);
         // Non-RT worker only. Capacity-one wakeups coalesce; latest state is authoritative.
         let _ = notify.try_send(());
     }
@@ -114,7 +160,7 @@ pub(crate) struct AudioController {
 impl AudioController {
     pub(crate) fn start() -> (Self, Receiver<()>) {
         let shared = Arc::new(AudioShared {
-            state: Mutex::new((OutputStatus::Starting, None)),
+            state: Mutex::new((OutputStatus::Starting, None, None)),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let (notify, updates) = async_channel::bounded(1);
@@ -228,6 +274,7 @@ fn prepare_output() -> Result<PreparedOutput, String> {
     )
     .map_err(|error| error.to_string())?;
     let mailbox = engine.control_mailbox().clone();
+    let receipts = engine.status_mailbox().clone();
     let epoch = StreamEpoch::new(1).expect("initial stream generation is nonzero");
     let lease = Arc::new(EngineLease::new(engine, epoch));
     let epoch = lease.gate().epoch();
@@ -282,6 +329,7 @@ fn prepare_output() -> Result<PreparedOutput, String> {
             registry,
             visuals,
             controls: mailbox,
+            receipts,
             epoch,
             clock,
             errors: errors.clone(),
@@ -327,10 +375,11 @@ fn run_worker(shared: Arc<AudioShared>, stop: Arc<AtomicBool>, notify: Sender<()
         format: output.format,
         notices: 0,
     };
-    *shared.state.lock() = (status.clone(), Some(output.source.clone()));
+    *shared.state.lock() = (status.clone(), Some(output.source.clone()), None);
     let _ = notify.try_send(());
     let mut frozen_engine = None;
     while !stop.load(Ordering::SeqCst) {
+        shared.accept_receipt(&output.source, &notify);
         let bits = output.errors.take_bits();
         if bits & (ErrorCode::FATAL | ErrorCode::DEVICE_CHANGED) != 0 {
             let engine = output.take_engine();
@@ -374,8 +423,148 @@ fn run_worker(shared: Arc<AudioShared>, stop: Arc<AtomicBool>, notify: Sender<()
     }
     // Keep the frozen world/DSP owned by this worker, even while both windows are closed.
     while !stop.load(Ordering::SeqCst) {
+        if let Some(engine) = &mut frozen_engine {
+            if !engine.sync_frozen_controls(output.source.epoch) {
+                shared.set_status(
+                    OutputStatus::Failed {
+                        reason: "制御受領の公開に失敗しました。世界時刻を保持しています".into(),
+                        world: Some(engine.world()),
+                    },
+                    &notify,
+                );
+            }
+            shared.accept_receipt(&output.source, &notify);
+        }
         thread::sleep(Duration::from_millis(20));
     }
     drop(output);
     drop(frozen_engine);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{controls::Revision, situations::SituationIndex};
+
+    fn source(epoch: StreamEpoch) -> Arc<AudioSource> {
+        let registry = Arc::new(Registry::new().unwrap());
+        let controls = ControlState::new(&registry);
+        Arc::new(AudioSource {
+            visuals: Arc::new(VisualRing::new(
+                EVENT_CAPACITY,
+                registry.definitions().len(),
+            )),
+            controls: Arc::new(ControlMailbox::new(&controls)),
+            receipts: Arc::new(StatusMailbox::new(registry.definitions().len())),
+            registry,
+            epoch,
+            clock: MachClock::new().unwrap(),
+            errors: Arc::new(ErrorCell::new(epoch)),
+            freeze_time: AtomicU64::new(0),
+        })
+    }
+
+    fn receipt(epoch: StreamEpoch, revision: u64, world: f64) -> ControlReceipt {
+        ControlReceipt {
+            epoch,
+            ack_revision: Revision::from_raw(revision),
+            ack_manual_revision: Revision::INITIAL,
+            display_dominant: SituationIndex::from_index(0, 1).unwrap(),
+            world: WorldSeconds::new(world).unwrap(),
+        }
+    }
+
+    #[test]
+    fn worker_receipts_notify_only_discrete_changes_and_never_invent_a_receipt() {
+        let epoch = StreamEpoch::new(21).unwrap();
+        let source = source(epoch);
+        let shared = AudioShared {
+            state: Mutex::new((OutputStatus::Starting, Some(source.clone()), None)),
+        };
+        let (notify, updates) = async_channel::bounded(1);
+        shared.accept_receipt(&source, &notify);
+        assert_eq!(shared.control_receipt(), None);
+        assert!(updates.try_recv().is_err());
+        let first = receipt(epoch, 0, 0.25);
+        assert!(source.receipts.publish(first));
+        shared.accept_receipt(&source, &notify);
+        assert_eq!(updates.try_recv(), Ok(()));
+        assert_eq!(shared.control_receipt(), Some(first));
+        let progressing = receipt(epoch, 0, 0.5);
+        assert!(source.receipts.publish(progressing));
+        shared.accept_receipt(&source, &notify);
+        assert!(updates.try_recv().is_err());
+        assert_eq!(shared.control_receipt(), Some(progressing));
+        let edited = receipt(epoch, 1, 0.75);
+        assert!(source.receipts.publish(edited));
+        shared.accept_receipt(&source, &notify);
+        assert_eq!(updates.try_recv(), Ok(()));
+        let mut manual = edited;
+        manual.ack_manual_revision = Revision::from_raw(1);
+        assert!(source.receipts.publish(manual));
+        shared.accept_receipt(&source, &notify);
+        assert_eq!(updates.try_recv(), Ok(()));
+        shared.accept_receipt(&source, &notify);
+        assert!(updates.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_rejects_old_source_epoch_without_overwriting_current_receipt() {
+        let old_epoch = StreamEpoch::new(22).unwrap();
+        let current_epoch = StreamEpoch::new(23).unwrap();
+        let old = source(old_epoch);
+        let current = source(current_epoch);
+        let latest = receipt(current_epoch, 3, 2.0);
+        let shared = AudioShared {
+            state: Mutex::new((OutputStatus::Starting, Some(current.clone()), Some(latest))),
+        };
+        let (notify, updates) = async_channel::bounded(1);
+        assert!(old.receipts.publish(receipt(old_epoch, 99, 9.0)));
+        shared.accept_receipt(&old, &notify);
+        assert_eq!(shared.control_receipt(), Some(latest));
+        assert!(updates.try_recv().is_err());
+        assert!(current.receipts.publish(receipt(old_epoch, 99, 9.0)));
+        shared.accept_receipt(&current, &notify);
+        assert_eq!(shared.control_receipt(), Some(latest));
+        assert!(updates.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_output_notifications_coalesce_and_ignore_identical_status() {
+        let shared = AudioShared {
+            state: Mutex::new((OutputStatus::Starting, None, None)),
+        };
+        let (notify, updates) = async_channel::bounded(1);
+        shared.set_status(OutputStatus::Starting, &notify);
+        assert!(updates.try_recv().is_err());
+        let running = OutputStatus::Running {
+            sample_rate: 48_000,
+            channels: 2,
+            format: cpal::SampleFormat::F32,
+            notices: 0,
+        };
+        shared.set_status(running.clone(), &notify);
+        assert_eq!(updates.try_recv(), Ok(()));
+        shared.set_status(running, &notify);
+        assert!(updates.try_recv().is_err());
+        shared.set_status(
+            OutputStatus::Failed {
+                reason: "actual DSP fault".into(),
+                world: None,
+            },
+            &notify,
+        );
+        shared.set_status(
+            OutputStatus::Failed {
+                reason: "output paused".into(),
+                world: None,
+            },
+            &notify,
+        );
+        assert_eq!(updates.try_recv(), Ok(()));
+        assert!(updates.try_recv().is_err());
+        assert!(
+            matches!(shared.snapshot().0, OutputStatus::Failed { reason, .. } if reason == "output paused")
+        );
+    }
 }
