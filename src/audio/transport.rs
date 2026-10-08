@@ -553,6 +553,9 @@ impl ControlMailbox {
         assert!(initial.registry_count() > 0);
         assert!(initial.manual_target.get() < initial.registry_count());
         assert!(initial.dwell_min_minutes <= initial.dwell_max_minutes);
+        assert!((1..=180).contains(&initial.dwell_min_minutes));
+        assert!((1..=180).contains(&initial.dwell_max_minutes));
+        assert!((1..=120).contains(&initial.transition_seconds));
         Self {
             sequence: AtomicU64::new(0),
             registry_count: initial.registry_count(),
@@ -579,6 +582,9 @@ impl ControlMailbox {
         assert_eq!(state.knobs.len(), self.knobs.len());
         assert!(state.manual_target.get() < self.registry_count);
         assert!(state.dwell_min_minutes <= state.dwell_max_minutes);
+        assert!((1..=180).contains(&state.dwell_min_minutes));
+        assert!((1..=180).contains(&state.dwell_max_minutes));
+        assert!((1..=120).contains(&state.transition_seconds));
         let sequence = begin_publication(&self.sequence)
             .expect("control mailbox requires one publisher and nonexhausted sequence");
         self.volume
@@ -628,7 +634,11 @@ impl ControlMailbox {
         dst.dwell_min_minutes = self.dwell_min_minutes.load(Ordering::SeqCst);
         dst.dwell_max_minutes = self.dwell_max_minutes.load(Ordering::SeqCst);
         dst.transition_seconds = self.transition_seconds.load(Ordering::SeqCst);
-        if dst.dwell_min_minutes > dst.dwell_max_minutes {
+        if dst.dwell_min_minutes > dst.dwell_max_minutes
+            || !(1..=180).contains(&dst.dwell_min_minutes)
+            || !(1..=180).contains(&dst.dwell_max_minutes)
+            || !(1..=120).contains(&dst.transition_seconds)
+        {
             return false;
         }
         for (dst, value) in dst.knobs.iter_mut().zip(self.knobs.iter()) {
@@ -657,6 +667,7 @@ pub(crate) struct ControlReceipt {
     pub(crate) ack_revision: Revision,
     pub(crate) ack_manual_revision: Revision,
     pub(crate) display_dominant: SituationIndex,
+    pub(crate) resume_target: SituationIndex,
     pub(crate) world: WorldSeconds,
 }
 
@@ -670,6 +681,7 @@ pub(crate) struct StatusMailbox {
     ack_revision: AtomicU64,
     ack_manual_revision: AtomicU64,
     display_dominant: AtomicU64,
+    resume_target: AtomicU64,
     world: AtomicU64,
 }
 
@@ -683,12 +695,15 @@ impl StatusMailbox {
             ack_revision: AtomicU64::new(0),
             ack_manual_revision: AtomicU64::new(0),
             display_dominant: AtomicU64::new(0),
+            resume_target: AtomicU64::new(0),
             world: AtomicU64::new(0),
         }
     }
 
     pub(crate) fn publish(&self, receipt: ControlReceipt) -> bool {
-        if receipt.display_dominant.get() >= self.registry_count {
+        if receipt.display_dominant.get() >= self.registry_count
+            || receipt.resume_target.get() >= self.registry_count
+        {
             return false;
         }
         let Some(sequence) = begin_publication(&self.sequence) else {
@@ -701,6 +716,8 @@ impl StatusMailbox {
             .store(receipt.ack_manual_revision.get(), Ordering::SeqCst);
         self.display_dominant
             .store(receipt.display_dominant.get() as u64, Ordering::SeqCst);
+        self.resume_target
+            .store(receipt.resume_target.get() as u64, Ordering::SeqCst);
         self.world
             .store(receipt.world.get().to_bits(), Ordering::SeqCst);
         self.sequence.store(sequence, Ordering::SeqCst);
@@ -721,6 +738,10 @@ impl StatusMailbox {
             ),
             display_dominant: SituationIndex::from_index(
                 usize::try_from(self.display_dominant.load(Ordering::SeqCst)).ok()?,
+                self.registry_count,
+            )?,
+            resume_target: SituationIndex::from_index(
+                usize::try_from(self.resume_target.load(Ordering::SeqCst)).ok()?,
                 self.registry_count,
             )?,
             world: WorldSeconds::new(f64::from_bits(self.world.load(Ordering::SeqCst)))?,
@@ -1399,6 +1420,7 @@ mod tests {
             ack_revision: Revision::from_raw(value * 2),
             ack_manual_revision: Revision::from_raw(value * 3),
             display_dominant: SituationIndex::from_index((value % 2) as usize, 2).unwrap(),
+            resume_target: SituationIndex::from_index((value % 2) as usize, 2).unwrap(),
             world: WorldSeconds::new(value as f64).unwrap(),
         }
     }
@@ -1424,6 +1446,7 @@ mod tests {
                 &mailbox.display_dominant,
                 latest.display_dominant.get() as u64,
             ),
+            (&mailbox.resume_target, latest.resume_target.get() as u64),
             (&mailbox.world, latest.world.get().to_bits()),
         ];
         for (word, value) in words {

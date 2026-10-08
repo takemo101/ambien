@@ -25,7 +25,7 @@
 | `src/audio/mod.rs` | `AudioController` worker、標準出力、config、build/play/pause、停止・復旧 |
 | `src/audio/render.rs` | `PreparedEngine`、型付き CPAL render、合成・混合・出力形式変換 |
 | `src/audio/world.rs` | `WorldClock`、`Movement`、滞在・PRNG・停止再開・表示と保存用の選択 |
-| `src/audio/mix.rs` | 現存 `GainRamp` のN声slerp。手動durationはrender側が選ぶ。現存volume／muteの `OutputRamp` はrender私有。自動duration・復旧・終了は対応作業で実装 |
+| `src/audio/mix.rs` | 現存 `GainRamp` のN声slerp。手動／自動durationはrender側が選び、進行中の秒はrampが保持。現存volume／muteの `OutputRamp` はrender私有。復旧・終了は対応作業で実装 |
 | `src/audio/transport.rs` | `ControlMailbox`、`StatusMailbox`、`VisualRing` と固定容量の数値転送 |
 | `src/audio/lease.rs` | `EngineLease` の排他所有だけ。unsafe とその安全証明を閉じる |
 | `src/audio/timing.rs` | `StreamEpoch`、Mach 時刻、CPAL 再生予定時刻、DSP 因果遅延 |
@@ -124,7 +124,7 @@ rate 再準備では worker が engine を move して保有し、`PreparedEngin
 
 ### UI の正本と intent
 
-現存 [`ControlState`](../src/controls.rs) の数値部分を代表断片として示す。登録から準備する private な knob owner 配列は断片に含めない。main が設定端点の唯一の writer、audio が実行状態の所有者である。時間・自動移動の操作 UI は後続の成果である。
+現存 [`ControlState`](../src/controls.rs) の数値部分を代表断片として示す。登録から準備する private な knob owner 配列は断片に含めない。main が設定端点の唯一の writer、audio が実行状態の所有者である。時間・自動移動も同じ部分操作reducerから公開し、menu／設定は受理済みの表示対象を読み、pending manual intentを直ちに優先する。
 
 ```rust
 pub struct ControlState {
@@ -155,7 +155,7 @@ pub struct ControlState {
 | 時間変更 | settings revision だけ。進行中の予定を変更しない |
 | 窓表示、設定閲覧、移動／fit、focus | 音声 intent を発行しない。矩形変更だけ保存世代へ |
 
-現存 `ControlEdit` はvolume／mute／手動選択／ノブの部分操作で、`AppModel` が最新端点へ適用してから全snapshotを公開する。invalid indexとrevision exhaustionは変更前に失敗させ、途中のfieldを残さない。同じ対象の明示選択・ノブ操作も新しいmanual intentとする。Elyのstable idはmetadataとfieldの意味から固定し、設定窓の制御cacheは生成時だけ確保、離散更新時に既存storageへ値を写す。Slider／Switchはprocessor、現存Radio choiceのmouseとclean Enter／Spaceのkey pairは個別wrapper listenerで配送する。選択済みの再選択も含め、そのchoiceが捕捉したtyped targetへ一度だけ発行する。pending keyのtarget・実focus handle・blur subscriptionは設定窓が短く所有する。blurはdraw時の観測であり、同一frame内の任意のfocus ABAを保証したとはしない。Radioの実role／label／選択値と、metadata・現在端点・受理文の意味付きnodeを使い、別のtesting routeは設けない。
+現存 `ControlEdit` はvolume／mute／wander／最小・最大滞在分／自動交差秒／手動選択／ノブの部分操作で、`AppModel` が最新端点へ適用してから全snapshotを公開する。invalid index・時間範囲外・revision exhaustionは変更前に失敗させ、途中のfieldを残さない。対の時間補正も一操作であり、manual／wander世代を進めない。同じ対象の明示選択・ノブ操作は新しいmanual intentとする。Elyのstable idはmetadataとfieldの意味から固定し、設定窓の制御cacheは生成時だけ確保、離散更新時に既存storageへ値を写す。Slider／Switchはprocessor、現存Radio choiceのmouseとclean Enter／Spaceのkey pairは個別wrapper listenerで配送する。選択済みの再選択も含め、そのchoiceが捕捉したtyped targetへ一度だけ発行する。pending keyのtarget・実focus handle・blur subscriptionは設定窓が短く所有する。blurはdraw時の観測であり、同一frame内の任意のfocus ABAを保証したとはしない。Radioの実role／label／選択値と、metadata・現在端点・受理文・実Caption付き時間説明の意味付きnodeを使い、別のtesting routeは設けない。
 
 ### ControlMailbox
 
@@ -189,7 +189,7 @@ scratch と committed state は事前確保した二組。失敗 snapshot を co
 
 `StatusMailbox` は同じ全numeric SeqCst snapshot方式の逆方向である。全体の **計画payload** は `ack_revision`、`ack_manual_revision`、`epoch`、`world`、`display_dominant`、`resume_target`、移動phase、出力状態、終了fadeのattempt／deadline。文字列やgains全体は入れず、gainsは時刻付き `WorldVisualState` に入れる。writerはengine所有中のcallback、または凍結中のworkerのどちらか一人だけ。mainは一回読み、失敗時は直前状態を保持する。
 
-現存 `ControlReceipt` payloadは `epoch`、`ack_revision`、`ack_manual_revision`、`display_dominant`、`world` のみ。P04手動時の `display_dominant` は受領した最新targetであり、実混合のg²最大や聴感を表さない。`resume_target`／移動phase／終了fadeは後続consumerが必要となるときに追加する。未受理mailboxは `None`、一回の整合読取だけを採用する。callbackが新しい制御を採用すると、その世代をまだ公開していない印を立てる。以降のcallback途中失敗でも、排他移譲後の凍結workerが当該世代を一度公開でき、旧受理を最新の受理に見せない。settingsは現在epochの受理を離散更新時に表示するだけで、受理の世界時刻を常時進む表示にはしない。
+現存 `ControlReceipt` payloadは `epoch`、`ack_revision`、`ack_manual_revision`、`display_dominant`、`resume_target`、`world`。手動の表示／再開対象は受領した最新target、自動の表示はg²最大で同率は以前の表示、自動resumeの同率はdepartureとする。移動phaseは `WorldVisualState` にあり、終了fadeはまだない。未受理mailboxは `None`、一回の整合読取だけを採用する。callbackが新しい制御を採用すると、その世代をまだ公開していない印を立てる。以降のcallback途中失敗でも、排他移譲後の凍結workerが当該世代を一度公開でき、旧受理を最新の受理に見せない。settings／menuは現在epochかつmanual ackの一致した表示対象を読む。ack前のmanualはmainの最新targetを即表示し、受理の世界時刻を常時進む表示にはしない。
 
 CPAL error callback は engine を借りず、**その stream epoch 専用の別 cell** にある固定 `ErrorCode` の atomic bitset を更新するだけ。複数の呼出元があり得るので snapshot writer と共用しない。worker は現在採用中の epoch の cell だけを消費し、旧 cell を新 stream に再使用しない。旧 monitor が遅れて DeviceChanged 等を発行しても、新出力の状態を変えない。worker が bitset と OS の現在状態を読んで出力状態を決める。`DeviceChanged`、`DeviceNotAvailable`、`StreamInvalidated`、`UnsupportedConfig`、`Xrun`、その他を固定分類し、RT で `format!`・ログ・UI・rebuild を行わない。エラーメッセージの生成は worker／main。確認済み：[CPAL ErrorKind](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/error.rs)、[error delivery](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/error_emit.rs)、[旧monitorの配送と寿命](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/coreaudio/macos/mod.rs#L274-L365)。依存内の try_lock を「依存も完全 lock 無し」と説明しない。
 
@@ -197,18 +197,16 @@ main への status 通知は非RT worker が mailbox を読み、output／domina
 
 ## 世界と移動の状態遷移
 
-現存 `WorldClock` は生成した sample についてだけ `1 / actual_fs` 秒進む。stream の frame counter、Mach、UI Task の経過時間とは別である。秒は f64、長時間加算は補償加算を使う。P04の現存 `Movement` は `Staying { current }`／`ManualCrossing { target }` だけを持ち、`GainRamp` が出発vectorと交差の論理秒を所有する。`target()` は受領直後の手動表示・再開対象、`phase()` は滞在0／手動交差1。保存consumerはまだ実装していない。以下はP07以後の自動滞在・自動交差を含む **計画Interface** であり、現存型の転載ではない。
+現存 `WorldClock` は生成した sample についてだけ `1 / actual_fs` 秒進む。streamのframe counter、Mach、UI Taskの経過時間とは別である。秒はf64、長時間加算は補償加算を使う。現存 `Movement` は下記の3状態を持ち、`GainRamp` が出発vectorと交差の論理秒を所有する。`target()` は到着先、`display_target()` と `resume_target(gains)` は異なる同率規則、`phase()` は滞在0／手動1／自動2。滞在deadline／到着後の抽選待ちは `WanderTimer` がprivateに持ち、保存consumerはP09以後である。
 
 ```rust
-pub enum CrossingKind { Manual, Automatic }
 pub enum Movement {
-    Staying { current: SituationIndex, dwell_deadline: Option<WorldSeconds> },
-    Crossing {
-        kind: CrossingKind,
+    Staying { current: SituationIndex },
+    ManualCrossing { target: SituationIndex },
+    AutomaticCrossing {
         departure: SituationIndex,
         target: SituationIndex,
-        start: WorldSeconds,
-        duration: Duration,
+        display: SituationIndex,
     },
 }
 ```
@@ -229,7 +227,7 @@ pub enum Movement {
 | 出力不能／sleep | lease を凍結し、世界・PRNG・残り時間は進めない |
 | 新 rate／wake | checkpoint の秒と残りを維持し、新 rate で以後の sample を進める |
 
-一様な index 抽選は偏りを避ける rejection sampling で `[0,N-1)` を選び、現在 index を飛ばして写す。試行は **CPAL callback 全体で最大8回**という実装上限を持つ。拒否が続いたら `Staying` の private pending draw を保持し、現在の one-hot を鳴らしたまま次 callback へ継続する。同じ callback の sample／scratch chunk ごとに上限を再開せず、偏った modulo／固定相手で代替しない。wander off・最新 manual intent は pending を取消し、採用した callback の論理時刻から Automatic Crossing を始める。滞在は min=max なら乱数なし、異なる場合は `[min,max)` 秒の一様値。PRNG は worker で seed、callback の OS entropy 呼出しなし。寝ていた壁時計時間は世界へ加算しない。停止中の UI 操作は最新 control を保持し、worker 所有下で整合適用してから再開する。
+一様なindex抽選はrejection samplingで `[0,N-1)` を選び、現在indexを飛ばす。`DrawBudget` は `render_samples` のframe loopより外で一回だけ作り、dwellを含めCPAL callback全体のraw drawを最大8回に制限する。拒否が続くと `WanderTimer` の期限到達済みprivate状態を保ち、現在のone-hotを鳴らしたまま次callbackへ継続する。sample／scratch chunkごとのbudget再開始、偏ったmodulo／固定相手のfallbackはない。wander off／最新manual intentはpendingを取消す。min=maxは乱数なし、それ以外のdwellはraw drawの53bitから `[min,max)` 秒を作り、丸めによる上端到達を `next_down` で除く。既存SplitMix64のraw primitiveを共有し、声のopen-interval `unit()` の系列を変えず、移動は別instanceを所有する。seedはworkerで与え、callbackのOS entropy呼出しはない。交差完了sampleの世界時計を進めた後に到着起点を記録し、次の抽選で最新時間端点を使う。進行中のdeadlineと `GainRamp` durationは時間編集で書き換えない。睡眠・出力復旧のengine checkpoint／rate再準備はP10の別経路である。
 
 表示と保存用の選択は別の出力である。Automatic の `display_dominant` は g² 最大、同率なら直前の表示 index を保持する。Manual は受領直後に target を表示し、交差中その表示を維持する。`resume_target` は Manual なら最新 target、Automatic なら g² 最大、同率なら departure。終了の snapshot はこの保存用値を使う。再起動はその声の one-hot から始め、滞在を新しく抽選し、途中割合・瞬間天候を JSON に保存しない。
 

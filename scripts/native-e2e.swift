@@ -374,6 +374,23 @@ func ownNodes(_ node: AXUIElement) throws -> [AXUIElement] {
     return result
 }
 
+// Reveal the actual owned control, retaining all pointer/session guards.
+// Scroll geometry is not fixed: settings gain rows as required controls appear.
+func visible(_ candidate: Candidate, _ window: AXUIElement, _ node: AXUIElement) throws {
+    try foreground(candidate, window)
+    for attempt in 0..<16 {
+        let rect = try bounds(node), viewport = try bounds(window).insetBy(dx: 24, dy: 48)
+        let point = CGPoint(x: rect.midX, y: rect.midY)
+        if viewport.contains(point) {
+            try requirePointerTarget(candidate, window, target: node, point: point)
+            return
+        }
+        try require(attempt < 15, "Cannot bring production control into owned viewport")
+        try scroll(candidate, window, amount: point.y < viewport.minY ? 160 : -160)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.08))
+    }
+}
+
 func named(_ window: AXUIElement, role: String, name: String) throws -> AXUIElement? {
     for node in try ownNodes(window) where try text(node, "AXRole") == role {
         for key in ["AXTitle", "AXDescription", "AXValue"] {
@@ -666,7 +683,10 @@ func controls(_ executable: URL, artifacts: URL) throws -> String {
         try require(CFEqual(volume, try slider(window, label: "アプリの音量")), "Viewport rebuilt control identity")
         try expectReceipt(candidate, window, settings: 9, manual: 5)
         evidence.append("rain \(rainBefore)→\(rainAfter)/wind \(windBefore)→\(windAfter); menu mute switch+mark; muted volume0/10/20 manual5; real viewport scroll preserves focus/AX identity and receipt9/5")
-        let toggle = try mute(window), toggleBounds = try bounds(toggle)
+        let toggle = try mute(window)
+        try visible(candidate, window, toggle)
+        try expectReceipt(candidate, window, settings: 9, manual: 5)
+        let toggleBounds = try bounds(toggle)
         try require((try bounds(window)).contains(CGPoint(x: toggleBounds.midX, y: toggleBounds.midY)),
                     "Mute switch outside viewport")
         try press(toggle)
@@ -719,7 +739,7 @@ func situations(_ executable: URL, helper: URL, artifacts: URL) throws -> String
                 let rockMarked = try menuMarked(candidate, title: "岩")
                 let rainMarked = try menuMarked(candidate, title: "雨")
                 return main?.hasPrefix("現在の設定: 岩 /") == true &&
-                    receipt?.contains("手動の表示対象 岩") == true && rockMarked && !rainMarked
+                    receipt?.contains("表示対象 岩") == true && rockMarked && !rainMarked
             }
             stage = "rock metadata sliders and initial values"
             let amount = try slider(window, label: "岩の量")
@@ -865,7 +885,7 @@ func deep(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
             }
             func selection(_ window: AXUIElement, label: String) throws {
                 try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: \(label) /") == true &&
-                            (try line(window, prefix: "音声側の受理:"))?.contains("手動の表示対象 \(label)") == true,
+                            (try line(window, prefix: "音声側の受理:"))?.contains("表示対象 \(label)") == true,
                             "Deep case main/audio accepted target disagrees with \(label)")
                 for choice in ["雨", "岩", "深海"] {
                     let selected = choice == label
@@ -969,7 +989,7 @@ func mixing(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
             }
             func selection(_ window: AXUIElement, label: String, muted: Bool = true) throws {
                 try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: \(label) /") == true &&
-                            (try line(window, prefix: "音声側の受理:"))?.contains("手動の表示対象 \(label)") == true,
+                            (try line(window, prefix: "音声側の受理:"))?.contains("表示対象 \(label)") == true,
                             "Mixing main/audio accepted target disagrees with \(label)")
                 for choice in ["雨", "岩", "深海"] {
                     let selected = choice == label
@@ -1047,10 +1067,13 @@ func mixing(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
             try receipt(window, settings: 17, manual: 11)
             try selection(window, label: "深海")
             stage = "settings pointer unmute latest target at18"
+            try visible(candidate, window, try mute(window))
+            try receipt(window, settings: 17, manual: 11)
             try click(candidate, window, try mute(window))
             try receipt(window, settings: 18, manual: 11)
             try selection(window, label: "深海", muted: false)
             try require(abs(try number(volume) - 18) < 0.001, "Unmute lost latest18% volume")
+            try visible(candidate, window, volume)
             try focus(volume)
             for (index, expected) in [19.0, 20.0].enumerated() {
                 stage = "unmuted volume \(expected)"
@@ -1091,6 +1114,305 @@ func mixing(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
         throw Blocked("mixing stage=\(stage); \(blocked)")
     } catch {
         throw Failure("mixing stage=\(stage); \(error)")
+    }
+    return evidence.joined(separator: "\n")
+}
+
+func wandering(_ executable: URL, artifacts: URL) throws -> String {
+    var evidence: [String] = []
+    var stage = "candidate launch"
+    do {
+        try withCandidate(executable, artifacts: artifacts) { candidate in
+            let began = DispatchTime.now().uptimeNanoseconds
+            func seconds(_ since: UInt64) -> Double {
+                Double(DispatchTime.now().uptimeNanoseconds - since) / 1_000_000_000
+            }
+            func record(_ value: String) {
+                let entry = "t+\(String(format: "%.3f", seconds(began)))s \(value)"
+                evidence.append(entry)
+                print("WANDERING \(entry)")
+            }
+            stage = "open owned settings"
+            try candidate.menu("設定…"); try candidate.expectWindows(2)
+            let window = try candidate.settings()
+            try foreground(candidate, window)
+            try expectReceipt(candidate, window, settings: 0, manual: 0)
+            var revisions = (0, 0)
+            let choices = ["雨", "岩", "深海"]
+
+            // AccessKit can retire virtual descendants during a non-atomic read.
+            // Retry only owned invalid descendants, never mismatching stable data.
+            func observation<T>(_ read: () throws -> T) throws -> T? {
+                try require(CFEqual(try candidate.settings(), window), "Wandering settings window changed")
+                do { return try read() }
+                catch let failure as AXReadFailure
+                    where failure.status == .invalidUIElement && !CFEqual(failure.element, window) {
+                    var pid: pid_t = 0
+                    try require(AXUIElementGetPid(failure.element, &pid) == .success && pid == candidate.pid,
+                                "Invalidated wandering descendant is not owned")
+                    try require(CFEqual(try candidate.settings(), window), "Wandering window invalidated")
+                    print("OBSERVE invalidated owned wandering descendant (\(failure.name)); discard snapshot")
+                    return nil
+                }
+            }
+            func wanderingSwitch() throws -> AXUIElement {
+                guard let node = try named(window, role: "AXCheckBox", name: "ひとりで移る") else {
+                    throw Failure("Production wandering checkbox missing")
+                }
+                return node
+            }
+            func wanderState(_ enabled: Bool) throws -> Bool {
+                guard let main = try line(window, prefix: "現在の設定:") else { return false }
+                return try number(wanderingSwitch()) == (enabled ? 1 : 0) &&
+                    menuMarked(candidate, title: "ひとりで移る") == enabled &&
+                    main.contains("/ ひとりで移る \(enabled ? "オン" : "オフ")")
+            }
+            func timeValues(_ minimum: Double, _ maximum: Double, _ transition: Double) throws -> Bool {
+                guard let main = try line(window, prefix: "現在の設定:") else { return false }
+                return try abs(number(slider(window, label: "最小滞在時間")) - minimum) < 0.001 &&
+                    abs(number(slider(window, label: "最大滞在時間")) - maximum) < 0.001 &&
+                    abs(number(slider(window, label: "自動切り替え時間")) - transition) < 0.001 &&
+                    main.contains("/ 最小滞在時間 \(Int(minimum))分") &&
+                    main.contains("/ 最大滞在時間 \(Int(maximum))分") &&
+                    main.contains("/ 自動切り替え時間 \(Int(transition))秒")
+            }
+            func markedChoice() throws -> String {
+                var selected: String?
+                var reportedChangingSnapshot = false
+                // Each menuMarked call obtains a fresh AX tree. A menu rebuild
+                // between the three reads is not one multi-selection snapshot.
+                try waitFor("coherent main/audio/exclusive registered menu display") {
+                    try observation {
+                        guard let main = try line(window, prefix: "現在の設定:"),
+                              let receipt = try line(window, prefix: "音声側の受理:") else { return false }
+                        var marked: [String] = []
+                        for choice in choices where try menuMarked(candidate, title: choice) {
+                            marked.append(choice)
+                        }
+                        let afterMain = try line(window, prefix: "現在の設定:")
+                        let afterReceipt = try line(window, prefix: "音声側の受理:")
+                        let mainRevisions = try generations(main), receiptRevisions = try generations(receipt)
+                        let coherent = main == afterMain && receipt == afterReceipt &&
+                            marked.count == 1 && main.hasPrefix("現在の設定: \(marked.first ?? "") /") &&
+                            receipt.contains("表示対象 \(marked.first ?? "")") &&
+                            mainRevisions == receiptRevisions && !receipt.contains("受理待ち")
+                        if !coherent {
+                            if !reportedChangingSnapshot {
+                                record("AX snapshot not yet coherent; marks=\(marked); main=\(main); receipt=\(receipt); after-main=\(afterMain ?? "not exported"); after-receipt=\(afterReceipt ?? "not exported")")
+                                reportedChangingSnapshot = true
+                            }
+                            return false
+                        }
+                        selected = marked[0]
+                        return true
+                    } == true
+                }
+                guard let selected else { throw Failure("No coherent exclusive registered menu display") }
+                return selected
+            }
+            func consistentDisplay(_ label: String, enabled: Bool) throws -> Bool {
+                guard let main = try line(window, prefix: "現在の設定:"),
+                      let receipt = try line(window, prefix: "音声側の受理:") else { return false }
+                let m = try generations(main), r = try generations(receipt)
+                try require(m.0 == revisions.0 && m.1 == revisions.1 &&
+                            r.0 == revisions.0 && r.1 == revisions.1 && !receipt.contains("受理待ち"),
+                            "Uncommanded or stale wandering revision: main=\(main); receipt=\(receipt)")
+                guard main.hasPrefix("現在の設定: \(label) /"),
+                      receipt.contains("表示対象 \(label)"), try markedChoice() == label,
+                      try wanderState(enabled) else { return false }
+                for choice in choices {
+                    if try number(segment(window, label: choice)) != (choice == label ? 1 : 0) { return false }
+                }
+                try require(try number(mute(window)) == 1 && menuMarked(candidate),
+                            "Wandering unexpectedly lost mute")
+                return true
+            }
+            func expectDisplay(_ label: String, enabled: Bool) throws {
+                try waitFor("wandering main/audio/radio/menu display \(label), enabled=\(enabled)") {
+                    try observation { try consistentDisplay(label, enabled: enabled) } == true
+                }
+            }
+            func command(_ name: String, manualDelta: Int = 0,
+                         _ action: () throws -> Void, accepted: () throws -> Bool) throws -> UInt64 {
+                stage = name
+                let before = revisions, at = DispatchTime.now().uptimeNanoseconds
+                record("COMMAND \(name), from \(before.0)/\(before.1), UTC \(ISO8601DateFormatter().string(from: Date()))")
+                try action()
+                var actual = before
+                try waitFor("observed accepted wandering operation: \(name)") {
+                    try observation {
+                        guard let main = try line(window, prefix: "現在の設定:") else { return false }
+                        let next = try generations(main)
+                        try require(next.0 >= before.0 && next.1 >= before.1 &&
+                                    next.1 <= before.1 + manualDelta,
+                                    "Unexpected revision during \(name): \(main)")
+                        guard next.0 > before.0 && next.1 == before.1 + manualDelta,
+                              try accepted() else { return false }
+                        actual = next
+                        return true
+                    } == true
+                }
+                // Derive the real accepted settings generation rather than guess
+                // whether paired min/max correction coalesces one or two edits.
+                try expectReceipt(candidate, window, settings: actual.0, manual: actual.1)
+                revisions = actual
+                record("ACCEPTED \(name), exact \(actual.0)/\(actual.1), main=\(try line(window, prefix: "現在の設定:") ?? "missing"), receipt=\(try line(window, prefix: "音声側の受理:") ?? "missing")")
+                return at
+            }
+            func menuWander(_ enabled: Bool) throws {
+                _ = try command("menu wander \(enabled)", { try candidate.menu("ひとりで移る") },
+                                accepted: { try wanderState(enabled) })
+            }
+            func settingsWander(_ enabled: Bool) throws {
+                _ = try command("settings pointer wander \(enabled)", {
+                    let node = try wanderingSwitch()
+                    try visible(candidate, window, node); try click(candidate, window, node)
+                }, accepted: { try wanderState(enabled) })
+            }
+            func timeKey(_ label: String, code: CGKeyCode, minimum: Double,
+                         maximum: Double, transition: Double) throws {
+                _ = try command("visible focused \(label) key\(code)", {
+                    let node = try slider(window, label: label)
+                    try visible(candidate, window, node); try focus(node); try key(candidate, window, code: code)
+                }, accepted: { try timeValues(minimum, maximum, transition) && wanderState(true) })
+            }
+
+            try require(try wanderState(true), "Fresh candidate did not start with wander on")
+            for choice in choices { _ = try segment(window, label: choice); _ = try menuMarked(candidate, title: choice) }
+            record("Fresh owned PID \(candidate.pid), exact0/0, wander on; registered production menu/radio choices \(choices)")
+            _ = try command("actual menu mute", { try candidate.menu("消音") },
+                            accepted: { try number(mute(window)) == 1 && menuMarked(candidate) && wanderState(true) })
+            try menuWander(false); try menuWander(true)
+            try settingsWander(false); try settingsWander(true)
+            _ = try command("explicit menu rock disables wander", manualDelta: 1, { try candidate.menu("岩") },
+                            accepted: { try wanderState(false) && markedChoice() == "岩" })
+            try expectDisplay("岩", enabled: false)
+            try menuWander(true)
+            _ = try command("explicit settings pointer rain disables wander", manualDelta: 1, {
+                let node = try segment(window, label: "雨")
+                try visible(candidate, window, node); try click(candidate, window, node)
+            }, accepted: { try wanderState(false) && markedChoice() == "雨" })
+            try expectDisplay("雨", enabled: false)
+            try menuWander(true)
+            let rain = try slider(window, label: "雨の量"), rainBefore = try number(rain)
+            let rainAfter = rainBefore < 100 ? rainBefore + 1 : rainBefore - 1
+            _ = try command("visible focused rain knob \(rainBefore)→\(rainAfter) disables wander", manualDelta: 1, {
+                try visible(candidate, window, rain); try focus(rain)
+                try key(candidate, window, code: rainBefore < 100 ? 124 : 123)
+            }, accepted: { try abs(number(rain) - rainAfter) < 0.001 && wanderState(false) })
+            try expectDisplay("雨", enabled: false)
+            try menuWander(true)
+            let volume = try slider(window, label: "アプリの音量"), volumeBefore = try number(volume)
+            let volumeAfter = volumeBefore < 100 ? volumeBefore + 1 : volumeBefore - 1
+            _ = try command("visible focused muted volume \(volumeBefore)→\(volumeAfter) retains wander", {
+                try visible(candidate, window, volume); try focus(volume)
+                try key(candidate, window, code: volumeBefore < 100 ? 124 : 123)
+            }, accepted: {
+                try abs(number(volume) - volumeAfter) < 0.001 && wanderState(true) &&
+                    number(mute(window)) == 1 && menuMarked(candidate)
+            })
+
+            let initialMax = try number(slider(window, label: "最大滞在時間"))
+            let initialTransition = try number(slider(window, label: "自動切り替え時間"))
+            try timeKey("最小滞在時間", code: 115, minimum: 1, maximum: initialMax, transition: initialTransition)
+            try timeKey("最大滞在時間", code: 115, minimum: 1, maximum: 1, transition: initialTransition)
+            try timeKey("最小滞在時間", code: 124, minimum: 2, maximum: 2, transition: initialTransition)
+            record("Paired upward correction: min Right1→2 raises max1→2, wander on, manual unchanged")
+            try timeKey("最大滞在時間", code: 123, minimum: 1, maximum: 1, transition: initialTransition)
+            record("Paired downward correction: max Left2→1 lowers min2→1, wander on, manual unchanged")
+            try timeKey("自動切り替え時間", code: 115, minimum: 1, maximum: 1, transition: 1)
+            try require(try named(window, role: "AXStaticText", name: "次の滞在から適用") != nil &&
+                        named(window, role: "AXStaticText", name: "次の自動切り替えから適用") != nil,
+                        "Exact production next-application time explanations missing")
+            record("Production descriptions 次の滞在から適用 / 次の自動切り替えから適用; final named times1/1min and1sec")
+
+            try menuWander(false)
+            _ = try command("final explicit rain while off after time edits", manualDelta: 1, { try candidate.menu("雨") },
+                            accepted: { try wanderState(false) && markedChoice() == "雨" })
+            try expectDisplay("雨", enabled: false)
+            let separated = DispatchTime.now().uptimeNanoseconds
+            while seconds(separated) < 2.3 {
+                try requireSession()
+                try require(candidate.alive(), "Candidate exited before automatic dwell")
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            }
+            record("2.3s wall separation from final manual receipt; not actual DSP arrival proof")
+            let enabledAt = try command("final staying menu off→on starts fresh dwell", { try candidate.menu("ひとりで移る") },
+                                        accepted: { try wanderState(true) && timeValues(1, 1, 1) })
+            try expectDisplay("雨", enabled: true)
+            stage = "bounded real automatic display observation, maximum95s"
+            var automatic: String?
+            var firstDisplayAt: UInt64?
+            while seconds(enabledAt) <= 95 {
+                try requireSession()
+                try require(candidate.alive(), "Candidate exited during automatic wait")
+                let label = try markedChoice()
+                if label != "雨" {
+                    let at = DispatchTime.now().uptimeNanoseconds, elapsed = seconds(enabledAt)
+                    record("CLOCK_DIAGNOSTIC elapsed=\(elapsed)s; main=\(try line(window, prefix: "現在の設定:") ?? "not exported"); receipt=\(try line(window, prefix: "音声側の受理:") ?? "not exported"); output=\(try line(window, prefix: "標準出力で再生中:") ?? "not exported"); on-command-start=\(enabledAt); current-uptime=\(at)")
+                    try require(elapsed >= 60 && elapsed <= 95, "Automatic display outside60…95 wall seconds: \(elapsed)s to \(label)")
+                    automatic = label; firstDisplayAt = at
+                    try expectDisplay(label, enabled: true)
+                    record("AUTOMATIC rain→\(label) first menu mark at \(String(format: "%.3f", elapsed))s after on command; coherent menu/radio/main/receipt \(revisions.0)/\(revisions.1), muted; no manual/time edits during wait")
+                    break
+                }
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            }
+            guard let arrived = automatic, let firstDisplayAt else {
+                throw Failure("No genuine different registered automatic display within95 real wall seconds; last=\(try markedChoice()), exact\(revisions.0)/\(revisions.1)")
+            }
+            func retainDisplay(_ label: String, enabled: Bool, since: UInt64, duration: Double) throws {
+                var checkedAt = DispatchTime.now().uptimeNanoseconds
+                while seconds(since) < duration {
+                    try requireSession()
+                    try require(candidate.alive(), "Candidate exited while retaining wandering display")
+                    try require(try markedChoice() == label, "Display did not stay \(label) for \(duration)s, enabled=\(enabled)")
+                    if seconds(checkedAt) >= 5 {
+                        try expectDisplay(label, enabled: enabled)
+                        checkedAt = DispatchTime.now().uptimeNanoseconds
+                    }
+                    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+                }
+                try expectDisplay(label, enabled: enabled)
+                record("Retained actual \(label) display \(String(format: "%.3f", seconds(since))) wall seconds, wander=\(enabled), muted, exact\(revisions.0)/\(revisions.1)")
+            }
+            stage = "another real minute at automatic display with wander on"
+            try retainDisplay(arrived, enabled: true, since: firstDisplayAt, duration: 60)
+            stage = "second bounded real automatic display after arrival dwell"
+            var nextArrival: String?
+            while seconds(firstDisplayAt) <= 95 {
+                try requireSession()
+                try require(candidate.alive(), "Candidate exited during next automatic dwell")
+                let label = try markedChoice()
+                if label != arrived {
+                    let elapsed = seconds(firstDisplayAt)
+                    try require(elapsed >= 60 && elapsed <= 95, "Next automatic display outside another60…95 wall seconds: \(elapsed)s")
+                    try expectDisplay(label, enabled: true)
+                    nextArrival = label
+                    record("AUTOMATIC \(arrived)→\(label) at \(String(format: "%.3f", elapsed))s after first automatic mark; second real timer-driven display, unchanged exact\(revisions.0)/\(revisions.1)")
+                    break
+                }
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            }
+            guard let staying = nextArrival else {
+                throw Failure("No second different automatic display within95 wall seconds after first automatic display")
+            }
+            let offAt = try command("menu off preserves latest automatic destination \(staying)", { try candidate.menu("ひとりで移る") },
+                                    accepted: { try wanderState(false) })
+            try expectDisplay(staying, enabled: false)
+            stage = "off state retains automatic destination beyond a real minute"
+            try retainDisplay(staying, enabled: false, since: offAt, duration: 65)
+            try require(try timeValues(1, 1, 1) && abs(number(slider(window, label: "アプリの音量")) - volumeAfter) < 0.001,
+                        "Automatic/off observations lost final time or volume settings")
+            record("UI receipt/display and wall cadence only: no generated-sample counter, actual gain/arrival, PRNG uniformity, audible silence or physical-audio synchronization claim; no captures or virtual-time hooks")
+            stage = "normal menu Quit"
+            try candidate.menu("終了"); try candidate.expectExit()
+            record("Real menu Quit; owned PID \(candidate.pid) disappeared normal exit0")
+        }
+    } catch let blocked as Blocked {
+        throw Blocked("wandering stage=\(stage); \(blocked)")
+    } catch {
+        throw Failure("wandering stage=\(stage); \(error)")
     }
     return evidence.joined(separator: "\n")
 }
@@ -1324,7 +1646,7 @@ final class Checks {
 }
 
 let usage = """
-Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|mixing|visual|all] [--artifacts PARENT_DIR]
+Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|mixing|wandering|visual|all] [--artifacts PARENT_DIR]
        /usr/bin/swift scripts/native-e2e.swift --help
 
 Default case: all. Each run creates a unique private directory (0700) under
@@ -1334,11 +1656,17 @@ desktop captures, image uploads, or production test hooks.
 
 Exit: 0 every selected case passed; 1 any failure; 77 prerequisites blocked
 when no failure. Missing capture permission blocks visual/situations/deep/mixing image stages;
-independent lifecycle/controls still run. Null lock metadata alone is not unlocked proof.
+independent lifecycle/controls/wandering still run. Null lock metadata alone is not unlocked proof.
 Visual evidence is rendered-frame change while muted, not audible silence,
 particle identity, physical synchronization, or subjective glass/music.
 Mixing verifies rapid real commands and exact accepted-control revisions, not
 actual gains, maximum-three RT work, re-entry audio tails, waveform bounds or clicks.
+Wandering uses production UI only, muted, dwell1/1min and transition1sec; it
+allows at most95s for each of two real automatic display changes, observing
+another60s with wander on after the first, then65s staying off at the latest
+destination. These are case-local wall-clock bounds, not generated-sample
+timing, gain, PRNG uniformity or physical-sync proof.
+No capture permission is needed for wandering; retain an awake active output.
 """
 
 struct Options {
@@ -1362,7 +1690,7 @@ struct Options {
                         "Unknown, duplicate, or incomplete argument: \(option)\n\(usage)")
             let value = arguments[index + 1]
             if option == "--case" {
-                try require(["lifecycle", "controls", "situations", "deep", "mixing", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
+                try require(["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
                 selected = value
             } else {
                 try require(!value.isEmpty && !value.hasPrefix("--"), "Invalid artifacts parent\n\(usage)")
@@ -1418,7 +1746,7 @@ do {
     let nativeReady = checks.checks.last?.status == "pass" && binaryReady
     let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
         .deletingLastPathComponent().appendingPathComponent("native-screenshot.swift")
-    for selected in ["lifecycle", "controls", "situations", "deep", "mixing", "visual"] where options.selected == "all" || options.selected == selected {
+    for selected in ["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "visual"] where options.selected == "all" || options.selected == selected {
         let expected: String
         switch selected {
         case "lifecycle":
@@ -1431,6 +1759,8 @@ do {
             expected = "Registered deep and all three actual menu/settings radio choices; main/audio accepted targets and exclusive menu/radio marks while muted; menu mute1/0, deep2/1; depth Home0 exactly3/2 and air Home0 exactly4/3; air End100 exactly5/4 and depth End100 exactly6/5; menu rain7/6 then rock8/7; settings rain9/8, rock10/9, deep11/10 retaining depth100/air100; three owned muted deep PNGs/two cropped-interior-change pairs; menu Quit normal0. Candidate initials unpinned; receipts not actual-gain, audible continuity, bubble-frequency, darkness, speed or physical-sync proof."
         case "mixing":
             expected = "Fresh owned candidate; all three actual menu/radio choices; mute1/0; rapid menu rain2/1, rock3/2, deep4/3, rock5/4, deep6/5, selected deep7/6 with command-start intervals <2s (input cadence only); settings pointer rain8/7, rock9/8, deep10/9, selected deep11/10; observed depth one-step12/11; muted volume0 13/11,10 14/11,20 15/11,19 16/11,18 17/11; settings unmute18/11, volume19 19/11,20 20/11; menu remute21/11 and selected deep22/12; three owned mixing-muted PNGs/two cropped-interior-change pairs with crossing-or-live-frame limits; reopened latest deep/depth/20%/mute exact22/12; menu Quit normal0. Not actual gains, maximum-three RT work, audio re-entry, waveform bounds, no-click or physical-sync proof."
+        case "wandering":
+            expected = "Fresh owned candidate; actual menu mute; visible focused production time sliders and exact next-application descriptions; paired min/max correction both directions; time/volume/mute preserve wander/manual revision; menu/settings on/off, explicit menu/settings selection and knob turn disable wander; final dwell1/1min/transition1sec and staying off→on starts fresh; within95 wall seconds observe a different registered automatic menu/settings/audio-receipt display, not before60 wall seconds; retain that display another60s on and require a second actual automatic change within95s of the first, then65s off at latest destination while muted; observed monotonic main revisions and exact accepted receipts recorded per real command; menu Quit normal0. No capture prerequisite; not generated-sample count, actual gains, uniform PRNG, physical-audio synchronization or audible proof."
         default:
             expected = "Authorized actual owned scene-window PNGs; real menu mute; stable CG owner/bounds; three spaced captures; two cropped-interior nonblank/nontransparent pixel-change comparisons; retained PNGs and measurements; menu Quit normal0"
         }
@@ -1442,6 +1772,7 @@ do {
             case "situations": return try situations(options.executable, helper: helper, artifacts: artifacts)
             case "deep": return try deep(options.executable, helper: helper, artifacts: artifacts)
             case "mixing": return try mixing(options.executable, helper: helper, artifacts: artifacts)
+            case "wandering": return try wandering(options.executable, artifacts: artifacts)
             default: return try visual(options.executable, helper: helper, artifacts: artifacts)
             }
         }

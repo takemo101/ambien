@@ -52,7 +52,7 @@ P03 受け入れ後の現存 consumer 確認に基づき、ユーザーは P04 �
 | I03 操作 | `Revision(u64)`、`ControlState` は volume/mute/wander/dwell_min_minutes/dwell_max_minutes/transition_seconds、平坦 knob 配列、manual_target、manual_revision、wander_revision、settings_revision。`edit_knob(index, value)` は `KnobIndex` と `Normalized` の端点編集で手動 target を発行する reducer 操作。viewport を含まない。 |
 | I04 制御配送 | `ControlMailbox::publish(&self, state: &ControlState)`; `try_read_into(&self, dst: &mut ControlState) -> bool`。全 field と sequence が atomic SeqCst。main 単一 writer/audio 単一 reader。一回読取失敗は旧整合 state 維持、spin なし。`StatusMailbox` は所有中の audio／凍結中の worker が単一 writer、main が読む。error bitset は stream epoch ごとの別 cell、worker は現在 cell だけを消費し、旧 monitor の遅延通知で新出力を止めない。 |
 | I05 交差 | `GainRamp::retarget(&mut self, target: SituationIndex, duration: Duration)`; `advance_frames(&mut self, frames: usize, rate: u32)`; `gains(&self) -> &[f64]`。N 次元非負 unit vector、終端 one-hot。 |
-| I06 世界 | `WorldClock` が生成sampleだけで `WorldSeconds(f64)` を進める。現存P04は `Movement = Staying { current } \| ManualCrossing { target }` と `target()` による手動表示・再開対象、出発混合／残り秒はI05が保持。g²最大の表示や保存consumerとは区別する。自動kind/departure/start/duration・display dominant／`resume_target` の分離はP07の計画Interfaceであり、保存接続はP09以後。 |
+| I06 世界 | `WorldClock` が生成sampleだけで `WorldSeconds(f64)` を進める。現存 `Movement = Staying { current } \| ManualCrossing { target } \| AutomaticCrossing { departure, target, display }`。private `WanderTimer` が到着基準deadline／pendingを、I05が出発混合／交差の残り秒を保持する。`display_target()` は自動g²最大／同率は以前、`resume_target(gains)` は自動同率departure、manualはともに最新target。`ControlReceipt` が両indexをcoherentに公開する。保存接続はP09以後。 |
 | I07 視覚 | `VisualEvent` は `StreamEpoch`、world 秒、CPAL 予定再生 Mach ns、`SituationIndex`、normalized x/y、strength、`radius: LogicalPixels`、shape、`lifetime: Duration`、event serial。`WorldVisualState` は同じ予定時刻と N 声の gains/breath intensity。`VisualRing::new(event_capacity, registry_count)`、`push_event(event)`、`push_state(WorldVisualState)`、`read_live_into(epoch, now, &mut preallocated_cache)`。全 slot payload atomic、sequence を再検査。 |
 | I08 所有・時刻 | `EngineLease` は `UnsafeCell<Option<PreparedEngine>>` と `Owner = Idle \| Callback \| Worker` の atomic CAS、epoch ごとの別 cell と再 enable しない gate。旧 gate=false→worker 排他→engine.take 後は旧 Owner を Worker に固定し、新 cell へ engine を move→Idle→enable。旧 callback は新 cell にアクセスしない。`StreamEpoch` 内だけ CPAL と Mach 時刻を対応づけ、worker が engine を回収・準備・破棄。 |
 | I09 保存 | `StateDocument` は `serde_json::Value` の unknown 保持。`LoadedState`、`LoadOutcome = Loaded { settings, document, write_policy } \| Defaults { reason, document, write_policy }`。`SaveWorker` の pending 最新1＋in-flight1、`SaveReceipt = { revision, result }`。flush は最新 revision の置換成功 receipt を待つ。 |
@@ -244,8 +244,7 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 ## P07 自動移動と時間設定の次回適用を実装する
 
 **DependsOn:** P06。**SPEC:** [体験](../SPEC.md#体験)、[時間設定](../SPEC.md#時間設定)、[設定窓](../SPEC.md#設定窓)、[保存](../SPEC.md#保存)。
-
-**Files:** Modify `src/audio/world.rs`, `src/controls.rs`, `src/ui/settings.rs`, `src/app.rs`。Tests: `world.rs`, `controls.rs` 内。保存 consumer は I06 出力を使う予定であり、空 `persistence.rs` は作らない。
+**Files:** Modify `src/audio/world.rs`, `src/audio/render.rs`, `src/audio/transport.rs`, `src/audio/mod.rs`, `src/controls.rs`, `src/ui/settings.rs`, `src/app.rs`, `src/situations/mod.rs`, `src/situations/synthesis.rs`, `scripts/native-e2e.swift`。Tests: `world.rs`, `controls.rs`, `render.rs` 内。現存の音声 consumer・coherent receipt・menu/settings 選択表示まで接続し、既存 SplitMix64 の raw draw を共有する。保存 consumer は I06 出力を使う予定であり、空 `persistence.rs` は作らない。
 
 **Consumes:** I05 gains、I03 wander/time revisions、I01 registered N。**Produces:** I06 Staying/Automatic Crossing、arrival 基準 dwell、display dominant と `resume_target`、I07 world state。
 

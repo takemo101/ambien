@@ -15,7 +15,10 @@ use crate::{
     ui::{scene::SceneView, settings::SettingsView},
 };
 
-actions!(ambien, [ShowScene, ShowSettings, ToggleMute, Quit]);
+actions!(
+    ambien,
+    [ShowScene, ShowSettings, ToggleWander, ToggleMute, Quit]
+);
 
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = ambien, no_json)]
@@ -34,6 +37,7 @@ pub(crate) struct AppModel {
     settings: Option<WindowHandle<SettingsView>>,
     audio: AudioController,
     controls: Option<ControlState>,
+    menu_selection: Option<SituationIndex>,
     audio_updates: Option<Task<()>>,
     control_error: Option<SharedString>,
     audio_quit: Option<Subscription>,
@@ -54,6 +58,7 @@ pub(crate) fn start(cx: &mut App) {
         settings_appearance: None,
         audio,
         controls: None,
+        menu_selection: None,
         audio_updates: None,
         control_error: None,
         audio_quit: None,
@@ -117,6 +122,16 @@ pub(crate) fn start(cx: &mut App) {
         });
     });
     cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &ToggleWander, cx| {
+        cx.defer(|cx| {
+            let owner = cx.global::<AppRoot>().0.clone();
+            owner.update(cx, |model, cx| {
+                if let Some(state) = &model.controls {
+                    model.apply_control_edit(ControlEdit::Wander(!state.wander), cx);
+                }
+            });
+        });
+    });
     cx.on_action(|_: &ToggleMute, cx| {
         cx.defer(|cx| {
             let owner = cx.global::<AppRoot>().0.clone();
@@ -209,31 +224,46 @@ impl AppModel {
         Ok(())
     }
 
-    fn update_menu(&self, cx: &mut Context<Self>) {
+    fn update_menu(&mut self, cx: &mut Context<Self>) {
         let mut items = vec![
             MenuItem::action("シーンを表示", ShowScene),
-            MenuItem::action("設定…", ShowSettings),
             MenuItem::separator(),
         ];
-        if let (Some(controls), (_, Some(source))) =
-            (&self.controls, self.audio.shared().snapshot())
-        {
+        let shared = self.audio.shared();
+        let (_, source) = shared.snapshot();
+        self.menu_selection = self.controls.as_ref().map(|controls| {
+            shared
+                .control_receipt()
+                .filter(|receipt| {
+                    source
+                        .as_ref()
+                        .is_some_and(|source| source.epoch == receipt.epoch)
+                })
+                .map_or(controls.manual_target, |receipt| {
+                    controls.display_target(receipt.ack_manual_revision, receipt.display_dominant)
+                })
+        });
+        if let (Some(_), Some(source)) = (&self.controls, source) {
             let definitions = source.registry.definitions();
             for (position, definition) in definitions.iter().enumerate() {
                 let target = SituationIndex::from_index(position, definitions.len())
                     .expect("registered menu position is valid");
                 items.push(
                     MenuItem::action(definition.label, SelectSituation { target })
-                        .checked(controls.manual_target == target),
+                        .checked(self.menu_selection == Some(target)),
                 );
             }
             items.push(MenuItem::separator());
         }
         items.extend([
+            MenuItem::action("ひとりで移る", ToggleWander)
+                .checked(self.controls.as_ref().is_some_and(|state| state.wander))
+                .disabled(self.controls.is_none()),
             MenuItem::action("消音", ToggleMute)
                 .checked(self.controls.as_ref().is_some_and(|state| state.mute))
                 .disabled(self.controls.is_none()),
             MenuItem::separator(),
+            MenuItem::action("設定…", ShowSettings),
             MenuItem::action("終了", Quit),
         ]);
         cx.set_menus([Menu::new("Ambien").items(items)]);
@@ -244,7 +274,8 @@ impl AppModel {
             return;
         };
         let old_mute = state.mute;
-        let old_target = state.manual_target;
+        let old_wander = state.wander;
+        let old_manual_revision = state.manual_revision;
         match state.apply(edit) {
             Ok(changed) => {
                 self.control_error = None;
@@ -259,7 +290,10 @@ impl AppModel {
                 self.control_error = Some(error.to_string().into());
             }
         }
-        if old_mute != state.mute || old_target != state.manual_target {
+        if old_mute != state.mute
+            || old_wander != state.wander
+            || old_manual_revision != state.manual_revision
+        {
             self.update_menu(cx);
         }
         self.update_settings(cx);
@@ -299,6 +333,21 @@ impl AppModel {
             // Main now owns the full control state and its sole publication authority.
             source.controls.publish(&state);
             self.controls = Some(state);
+        }
+        let shared = self.audio.shared();
+        let selection = self.controls.as_ref().map(|controls| {
+            shared
+                .control_receipt()
+                .filter(|receipt| {
+                    source
+                        .as_ref()
+                        .is_some_and(|source| source.epoch == receipt.epoch)
+                })
+                .map_or(controls.manual_target, |receipt| {
+                    controls.display_target(receipt.ack_manual_revision, receipt.display_dominant)
+                })
+        });
+        if self.menu_selection != selection {
             self.update_menu(cx);
         }
         if let Some(handle) = self.scene {

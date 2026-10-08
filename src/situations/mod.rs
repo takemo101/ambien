@@ -1,7 +1,7 @@
 mod deep;
 mod rain;
 mod rock;
-mod synthesis;
+pub(crate) mod synthesis;
 
 use std::{error::Error, fmt, ops::Range};
 

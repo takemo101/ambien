@@ -713,3 +713,43 @@ P06の「短い三環境menu／選択済み対象・settingsノブ・独立mute�
 parentはtemporaryな所有manual-smoke hostで現binary SHA256 `d84bd407f6747a0f63c003f2a697295d6aff36683c095901f9c82bf777edb0c8` を実起動し、同じsession／foreground／AX guardと実menu／focused sliderでapp volume20%・解除、receipt5/0を確認してシーンを前面へ置いた。所有PID2638、private evidence directory `target/native-e2e/human-90E6630B-878F-4B77-94D9-E047283352B4`。OS音量・TCC変更・画像取得はしていない。userへmenu雨→岩→深海の約0.5秒間隔と深海再選択、settings三択で同じ選択、消音中選択→解除の最新deep、操作時のclick／音切れ／不意な増音と消音中の光、最後の実menu Quitを具体的に依頼した。
 
 ユーザーは「異常なし」（音の切替と最新対象、消音中の光を確認できた）を選択した。これは今回の短い耳／光の受け入れ報告で、個々の操作時刻／物理delay／全波形／P13の音色とinitialを計測・確定したとはしない。hostは4分52秒の所有process lifetime後、`P06_HUMAN_EXIT owned_pid=2638 normal_exit=0`／service exit0を返し、timeout cleanupではない正常Quitを確認した。temporary hostは終了後に除去し、shippingの観測hookや通常testsへの依存を残していない。これで今回の耳／光gateは解消した。通常PR merge／but同期／mikan completionの実結果はIssue Reportへ記録し、未実施の統合をこの行で済んだとはしない。
+
+## P07 自動移動・時間設定・実時計の表示観測
+
+対象はP06統合base `e25170249af6ab4727086ed82045cacd208803e5` からのP07候補。環境はDarwin27／arm64、Rust1.95、Swift6.4、現存GPUI／Ely／CPALと登録された雨・岩・深海。製品条件は [体験](../SPEC.md#体験)、[時間設定](../SPEC.md#時間設定)、[切り替えと途中操作](../SPEC.md#切り替えと途中操作)。保存・sleep／出力復旧・音質・物理同期はこの作業の証拠へ含めない。
+
+### 独立規則と実render consumer
+
+変更前のcontrols／world regressionは追加API未実装によるcompile RED（44 errors、exit101、2.40秒）であり、実行されたassertion失敗とは区別する。追加前のnative `--case wandering` はUnknown case／exit1、候補は起動しなかった。実装後の `cargo test --locked` は全129件PASS（39.65秒）、同じchainのfmt／fmt check／Clippy all-targets `-D warnings`／locked buildもPASS（全体48.02秒）。
+
+- currentを除くindex写像、N=1の無交差、固定dwellの無draw、min-inclusive／max-exclusive、raw上端の丸めを独立規則で確認した。raw0拒否を8回に達した同一budgetで1000回pollしても追加drawせず、次callbackの新budgetから再開する。これは固定有限境界と写像の試験で、実PRNGの統計調査ではない。
+- time変更は進行deadlineを保持、off／manualはpending取消、crossing中onは到着起点、staying中onは今を起点とする。自動g²同率は以前の表示を保持し、resumeはdeparture、manualは最新target。対時間補正、revision exhaustionと不正時間／slider値は変更前に拒否する。
+- 登録3実声を準備した8kHzのactual `output_f32`／lease経路を仮想125秒分実行した。43秒の時間変更後も旧deadline60秒を保持、次自動4秒arcの途中で新しい1秒／off／onを編集しても旧arcは64秒到着まで継続、到着後の新dwellで124秒開始・125秒到着を確認した。manualと区別したphase・g²・表示／resume、mute／volume0中の世界進行、ack／errorも観測し、当該threadのheap trackingはalloc／realloc／dealloc=0/0/0。実deviceのwall cadence、CPAL／framework全体の資源・syscall・可聴品質はこのconsumer試験から主張しない。
+
+### 実nativeの失敗と観測修正
+
+最初の `all` は60.21秒／exit1、binary `cfdb48f694ce55f33a5cf9ef3539d07f5bcd84f4f5b14b96e4e7fe2d290d22ca`、report `target/native-e2e/run-5C4A5C90-D1E3-4705-B87B-5FAAB32D86D3/report.json`。binary／session・lifecycle・situations・deep・visualはPASS、controlsのmuteは追加時間fieldでviewport外、mixingは所有前面bounds外のpointerを送らずBLOCKED、wanderingは時間17/3まで受理したが説明のAX nodeがなくFAIL。failure cleanupを正常Quitとして数えない。
+
+一回の限定診断では所有候補PID6223の設定窓だけをprivateに撮影し、実時間説明の視覚存在を確認して正常Quit0（2.98秒）。AX snapshotはrender準備前の7 nodesのみで、説明不存在の独立証拠ではない。installed Elyの `FormField.description` はCaptionを描画するが意味付きLabelがなく、アプリ側で同じ実CaptionをRole Labelへ載せた。入力helperは既存guardを保ち、最新owned viewportへ有限scrollで実controlを見せる共通経路へ移した。修正後fmt check／Clippy／locked buildはPASS（4.47秒）。
+
+最初の長時間wanderingは単独menu markの変更を44.913秒に観測し、60〜95秒条件でFAIL（report `run-F5A74282-3CEF-4B1C-A529-A9FCD456F58B`）。その瞬間のmain／audio receiptがないため、生成世界時計・実到着・原因は確定していない。次のclock記録追加版も、別々のAX treeから読んだmark列「雨」「岩」を排他違反としてFAILし、clock記録まで達しなかった（`run-05FBD437-60CD-4053-AC61-67E241C701EF`）。これらを成功や製品時計の原因特定へ書き換えない。
+
+sourceの `menuMarked` は各項目でfresh menu treeを取得する。三読取間のmenu更新を一時点のmulti-selectionとして扱わないよう、main／receiptの対象と世代、menuの排他一対象、前後の同じ文を5秒内で照合する観測へ修正した。安定した不一致はtimeout FAIL、inputの再送・guard例外のcatch・wall下限の緩和・production clock変更はない。旧44.913秒の単独観測の原因を、この修正後PASSだけから断定しない。
+
+### 修正後の実native・所有画面
+
+現binary SHA256 `ae16115e962808908daed06d4eed3cee4ed9fba6fb388c8211f2f0f62fe454bd`。controlsとmixingはそれぞれreport `run-9EDF020E-CF75-4B1C-B571-4CC9349C3165`／`run-8AFD4081-5956-40E4-94D2-F14E36B3C4DC` で全選択check PASS（順次chain22.12秒）。controlsはexact10/5・窓再生成後の実雨ノブ／20%解除保持・PID50781正常Quit0。mixingは既存22/12・実短間隔／独立mute・所有PNG契約を保ち、PID51253正常Quit0。
+
+`wandering` は196.52秒／exit0、report `target/native-e2e/run-DB458DF0-0974-4F03-A9F3-FD130AF4A882/report.json`、所有PID44350。実menu／pointer on/off、menu岩・settings雨・ノブによるoff、volume/timeによるon保持、対補正1/1→2/2→1/1、最終自動1秒と実AX説明を確認した。final雨19/4からon20/4、最初のcoherent深海表示はon command開始後60.665秒、receipt文の世界時刻68.627秒（on受理文8.127秒）。深海を60.042秒保持、最初の表示変更から60.976秒後に岩へ二回目の自動表示、off21/4後65.129秒岩を保持した。全期間muteとmanual世代4は維持、実menu Quitで正常exit0。初回と二回目の60〜95秒boundは変更していない。capture・仮想時計hookは使わなかった。これはUI receipt／排他menu-radio表示／wall cadenceの実経路証拠で、生成sample counter・gain到着・抽選統計・可聴無音・物理同期ではない。
+
+同じbinaryの所有PID97949／設定窓11165だけをhelperで撮影したprivate `target/native-e2e/p07-wandering-frame.xWegOC/settings-time.png` は960×784、directory0700／PNG0600。parentが実画像で時間slider3本、1/1分・1秒、実Caption2種とmute onを確認した。画像は上記二回のtimer成功の証拠ではない。診断Swift scaffoldは実測後に除去し、local private画像／失敗reportは保持した。権限・OS音量・認証変更、他アプリ／desktop capture、外部画像送信はない。旧 `all` の部分結果と修正後targeted三caseを区別し、現binaryの新たな `all` PASSは主張しない。
+
+### 固有recipeの同一課題での参照評価
+
+P07の「menu／settings on/off・対時間補正と次回適用説明・volume/timeだけでwanderが外れない・最短実時計で二回の自動表示・off後最新保持・正常Quit・receipt／時間／画像／proof limit」課題を、変更前後の実recipeだけをsystem参照にしたtools／履歴なしのcompletionへ同じ文で渡した。変更前は専用case・操作・時間／receipt契約が不足とし、既存controls／allから推測しなかった。変更後は `wandering`、Home／Right／Leftの1/1→2/2→1/1、自動1秒、説明2種、19/4→on20/4、60〜95秒の二回表示／60秒保持、off21/4後65秒保持、5秒coherent観測／正常Quit0／capture不要を取得した。共通skill／SPEC／実施権限／現存実装の未確認を不足とし、実行結果や合否を作らず、wall／AXをsample数・gain・PRNG・RT・音質・物理同期へ拡張しなかった。これはpure-reference retrievalの観測、5-rep wording microtestはN/A、自然遵守率・実native合格の試験ではない。
+
+### 最終独立レビュー
+
+最終UI semantic説明・owned viewport helper・nativeのcoherent表示観測・文書／recipeの現存Interface cutoverを、同じbaseからworktreeを対象にSpecとStandardsが別々にread-only reviewした。両方correct／findings0、confidence0.90／0.91。pending manual優先、変更のconsumer到達、元のtime bound、persistent incoherence FAIL、所有／hit／session guardと離散menu更新が整合すると判定した。旧44.913秒の原因はなお未確定であり、current PASSからの因果主張やproof limit拡張はない。reviewerによるchecks／launch／編集は行っていない。
+
+parentの最終 `npm run check:docs` はPASS（全体0.42秒／本体67ms、本行追加前）。これはLat参照／graphの検査であり、製品受け入れではない。`No init version recorded` 警告は保持し、init／hooks／設定変更はしていない。

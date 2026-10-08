@@ -49,6 +49,10 @@ impl Revision {
 pub(crate) enum ControlEdit {
     Volume(Normalized),
     Mute(bool),
+    Wander(bool),
+    DwellMinMinutes(u32),
+    DwellMaxMinutes(u32),
+    TransitionSeconds(u32),
     Select(SituationIndex),
     Knob(KnobIndex, Normalized),
 }
@@ -57,6 +61,9 @@ pub(crate) enum ControlEdit {
 pub(crate) enum ControlEditError {
     InvalidSituationIndex(SituationIndex),
     InvalidKnobIndex(KnobIndex),
+    InvalidDwellMinMinutes(u32),
+    InvalidDwellMaxMinutes(u32),
+    InvalidTransitionSeconds(u32),
     RevisionExhausted(&'static str),
 }
 
@@ -69,6 +76,24 @@ impl fmt::Display for ControlEditError {
             Self::InvalidKnobIndex(index) => {
                 write!(formatter, "invalid knob index {}", index.get())
             }
+            Self::InvalidDwellMinMinutes(value) => {
+                write!(
+                    formatter,
+                    "minimum dwell time {value} is outside 1..=180 minutes"
+                )
+            }
+            Self::InvalidDwellMaxMinutes(value) => {
+                write!(
+                    formatter,
+                    "maximum dwell time {value} is outside 1..=180 minutes"
+                )
+            }
+            Self::InvalidTransitionSeconds(value) => {
+                write!(
+                    formatter,
+                    "automatic transition time {value} is outside 1..=120 seconds"
+                )
+            }
             Self::RevisionExhausted(name) => write!(formatter, "{name} revision is exhausted"),
         }
     }
@@ -76,8 +101,6 @@ impl fmt::Display for ControlEditError {
 
 impl Error for ControlEditError {}
 
-// This private setter input reuses the current common fields; it is not a new
-// time/wander UI or a queued intent. Volume and mute use the same revision rule.
 #[derive(Clone, Copy, PartialEq)]
 struct CommonFields {
     volume: Normalized,
@@ -157,6 +180,19 @@ impl ControlState {
         self.registry_count
     }
 
+    /// Pending manual intent takes precedence until the engine acknowledges it.
+    pub(crate) fn display_target(
+        &self,
+        ack_manual_revision: Revision,
+        display_dominant: SituationIndex,
+    ) -> SituationIndex {
+        if ack_manual_revision == self.manual_revision {
+            display_dominant
+        } else {
+            self.manual_target
+        }
+    }
+
     pub(crate) fn apply(&mut self, edit: ControlEdit) -> Result<bool, ControlEditError> {
         match edit {
             ControlEdit::Volume(value) => {
@@ -167,6 +203,37 @@ impl ControlState {
             ControlEdit::Mute(value) => {
                 let mut common = CommonFields::from(&*self);
                 common.mute = value;
+                self.set_common(common)
+            }
+            ControlEdit::Wander(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.wander = value;
+                self.set_common(common)
+            }
+            ControlEdit::DwellMinMinutes(value) => {
+                if !(1..=180).contains(&value) {
+                    return Err(ControlEditError::InvalidDwellMinMinutes(value));
+                }
+                let mut common = CommonFields::from(&*self);
+                common.dwell_min_minutes = value;
+                common.dwell_max_minutes = common.dwell_max_minutes.max(value);
+                self.set_common(common)
+            }
+            ControlEdit::DwellMaxMinutes(value) => {
+                if !(1..=180).contains(&value) {
+                    return Err(ControlEditError::InvalidDwellMaxMinutes(value));
+                }
+                let mut common = CommonFields::from(&*self);
+                common.dwell_max_minutes = value;
+                common.dwell_min_minutes = common.dwell_min_minutes.min(value);
+                self.set_common(common)
+            }
+            ControlEdit::TransitionSeconds(value) => {
+                if !(1..=120).contains(&value) {
+                    return Err(ControlEditError::InvalidTransitionSeconds(value));
+                }
+                let mut common = CommonFields::from(&*self);
+                common.transition_seconds = value;
                 self.set_common(common)
             }
             ControlEdit::Select(target) => {
@@ -261,6 +328,92 @@ impl ControlState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_edits_correct_the_pair_without_issuing_manual_or_wander_intent() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        state.dwell_min_minutes = 10;
+        state.dwell_max_minutes = 20;
+        let target = state.manual_target;
+        assert!(state.apply(ControlEdit::DwellMinMinutes(21)).unwrap());
+        assert_eq!((state.dwell_min_minutes, state.dwell_max_minutes), (21, 21));
+        assert!(state.apply(ControlEdit::DwellMaxMinutes(7)).unwrap());
+        assert_eq!((state.dwell_min_minutes, state.dwell_max_minutes), (7, 7));
+        assert!(state.apply(ControlEdit::TransitionSeconds(1)).unwrap());
+        assert!(state.wander);
+        assert_eq!(state.manual_target, target);
+        assert_eq!(state.manual_revision, Revision::INITIAL);
+        assert_eq!(state.wander_revision, Revision::INITIAL);
+        assert_eq!(state.settings_revision.get(), 3);
+        assert!(!state.apply(ControlEdit::DwellMaxMinutes(7)).unwrap());
+        assert_eq!(state.settings_revision.get(), 3);
+        for edit in [
+            ControlEdit::DwellMinMinutes(0),
+            ControlEdit::DwellMinMinutes(181),
+            ControlEdit::DwellMaxMinutes(0),
+            ControlEdit::DwellMaxMinutes(181),
+            ControlEdit::TransitionSeconds(0),
+            ControlEdit::TransitionSeconds(121),
+        ] {
+            let previous = state.clone();
+            assert!(state.apply(edit).is_err());
+            assert_eq!(state, previous);
+        }
+        state.settings_revision = Revision::from_raw(u64::MAX);
+        let previous = state.clone();
+        assert!(state.apply(ControlEdit::DwellMinMinutes(8)).is_err());
+        assert_eq!(state, previous);
+    }
+
+    #[test]
+    fn wander_toggle_does_not_issue_selection_and_manual_edit_turns_it_off() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        let target = state.manual_target;
+        assert!(state.apply(ControlEdit::Wander(false)).unwrap());
+        assert!(!state.apply(ControlEdit::Wander(false)).unwrap());
+        assert!(state.apply(ControlEdit::Wander(true)).unwrap());
+        assert_eq!(state.manual_revision, Revision::INITIAL);
+        assert_eq!(state.manual_target, target);
+        assert_eq!(state.wander_revision.get(), 2);
+        assert!(state.apply(ControlEdit::Select(target)).unwrap());
+        assert!(!state.wander);
+        assert_eq!(state.wander_revision.get(), 3);
+    }
+
+    #[test]
+    fn displayed_selection_uses_automatic_dominant_only_after_manual_ack() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        let automatic = SituationIndex::from_index(1, registry.definitions().len()).unwrap();
+        assert_eq!(
+            state.display_target(Revision::INITIAL, automatic),
+            automatic
+        );
+        let manual = state.manual_target;
+        state.apply(ControlEdit::Select(manual)).unwrap();
+        assert_eq!(state.display_target(Revision::INITIAL, automatic), manual);
+        assert_eq!(
+            state.display_target(state.manual_revision, automatic),
+            automatic
+        );
+    }
+
+    #[test]
+    fn wander_revision_exhaustion_rejects_toggle_without_mutation() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        state.wander_revision = Revision::from_raw(u64::MAX);
+        let before = state.clone();
+        assert_eq!(
+            state.apply(ControlEdit::Wander(false)),
+            Err(ControlEditError::RevisionExhausted("wander"))
+        );
+        assert_eq!(state, before);
+        assert!(!state.apply(ControlEdit::Wander(true)).unwrap());
+        assert_eq!(state, before);
+    }
 
     #[test]
     fn rejects_nonfinite_and_out_of_range_control_values() {

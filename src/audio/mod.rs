@@ -129,6 +129,7 @@ impl AudioShared {
                 || old.ack_revision != receipt.ack_revision
                 || old.ack_manual_revision != receipt.ack_manual_revision
                 || old.display_dominant != receipt.display_dominant
+                || old.resume_target != receipt.resume_target
         });
         // Retain the freshest coherent world value, but never wake main merely
         // because samples, gains, particles, or breath progressed.
@@ -471,6 +472,7 @@ mod tests {
             ack_revision: Revision::from_raw(revision),
             ack_manual_revision: Revision::INITIAL,
             display_dominant: SituationIndex::from_index(0, 1).unwrap(),
+            resume_target: SituationIndex::from_index(0, 1).unwrap(),
             world: WorldSeconds::new(world).unwrap(),
         }
     }

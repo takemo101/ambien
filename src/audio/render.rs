@@ -6,7 +6,7 @@ use crate::{
     controls::ControlState,
     situations::{
         Registry, SituationIndex, Voice, VoiceFrame, VoiceLatencyFrames, VoicePreparation,
-        VoicePreparationError,
+        VoicePreparationError, synthesis::WorldRandom,
     },
 };
 
@@ -21,7 +21,7 @@ use super::{
         ControlMailbox, ControlReceipt, ErrorCell, StatusMailbox, VisualRing, VisualWriter,
         WorldVisualState,
     },
-    world::{Movement, WorldClock},
+    world::{DrawBudget, Movement, WanderTimer, WorldClock},
 };
 
 pub(crate) fn output_f32(
@@ -147,6 +147,8 @@ pub(crate) struct PreparedEngine {
     mute_gain: OutputRamp,
     world: WorldClock,
     movement: Movement,
+    wander: WanderTimer,
+    wander_random: WorldRandom,
     mix: GainRamp,
     visual_gains: Box<[f32]>,
     breath: Box<[f32]>,
@@ -200,6 +202,7 @@ impl PreparedEngine {
         let mailbox = Arc::new(ControlMailbox::new(&controls));
         let volume_gain = OutputRamp::new(controls.volume.get(), sample_rate);
         let mute_gain = OutputRamp::new(if controls.mute { 0.0 } else { 1.0 }, sample_rate);
+        let wander = WanderTimer::new(controls.wander, WorldSeconds::new(0.0).unwrap());
         Ok(Self {
             voices: voices.into_boxed_slice(),
             controls,
@@ -212,6 +215,8 @@ impl PreparedEngine {
             mute_gain,
             world: WorldClock::new(sample_rate)?,
             movement,
+            wander,
+            wander_random: WorldRandom::new(seed ^ 0x5741_4e44_4552),
             mix,
             visual_gains: vec![0.0; count].into_boxed_slice(),
             breath: vec![0.0; count].into_boxed_slice(),
@@ -238,6 +243,7 @@ impl PreparedEngine {
             return false;
         }
         let manual_changed = self.controls.manual_revision != self.scratch.manual_revision;
+        let wander_changed = self.controls.wander_revision != self.scratch.wander_revision;
         let changed =
             self.controls.settings_revision != self.scratch.settings_revision || manual_changed;
         // A fault after acceptance must not leave the previous revision acknowledged.
@@ -252,18 +258,25 @@ impl PreparedEngine {
             self.movement
                 .select_manual(self.controls.manual_target, self.mix.is_crossing());
         }
+        self.wander.update(
+            self.controls.wander,
+            wander_changed,
+            manual_changed,
+            self.movement,
+            self.world.now(),
+        );
         changed
     }
 
     fn publish_receipt(&mut self, epoch: StreamEpoch) -> bool {
-        // Manual display/resume selection changes at acceptance, even when a
-        // frozen engine has not yet generated any of the newly selected audio.
-        // Audio movement is represented separately by the actual mixer gains.
+        // Manual target is immediate; automatic target follows mixer power.
+        // Resume uses the automatic departure on ties, not the display history.
         let published = self.receipts.publish(ControlReceipt {
             epoch,
             ack_revision: self.controls.settings_revision,
             ack_manual_revision: self.controls.manual_revision,
-            display_dominant: self.movement.target(),
+            display_dominant: self.movement.display_target(),
+            resume_target: self.movement.resume_target(self.mix.gains()),
             world: self.world.now(),
         });
         self.receipt_published |= published;
@@ -321,13 +334,33 @@ impl PreparedEngine {
         let rate = self.world.sample_rate();
         let delta_seconds = 1.0 / f64::from(rate);
         self.mix.prepare_interval(rate);
+        let mut draw_budget = DrawBudget::new();
         for (frame_offset, output) in data.chunks_exact_mut(channels).enumerate() {
+            if let Some(target) = self.wander.poll(
+                self.world.now(),
+                self.movement,
+                self.voices.len(),
+                (
+                    self.controls.dwell_min_minutes,
+                    self.controls.dwell_max_minutes,
+                ),
+                &mut draw_budget,
+                &mut || self.wander_random.next_u64(),
+            ) {
+                self.mix.retarget(
+                    target,
+                    Duration::from_secs(u64::from(self.controls.transition_seconds)),
+                );
+                self.movement.select_automatic(target);
+            }
             let was_crossing = self.mix.is_crossing();
             self.mix.advance_frames(1, rate);
-            if was_crossing && !self.mix.is_crossing() {
+            let arrived = was_crossing && !self.mix.is_crossing();
+            if arrived {
                 self.movement.arrive();
             }
             let gains = self.mix.gains();
+            self.movement.observe_gains(gains);
             let frame = VoiceFrame {
                 world: self.world.now(),
                 delta_seconds,
@@ -410,6 +443,9 @@ impl PreparedEngine {
             }
             self.until_state -= 1;
             self.world.advance_sample();
+            if arrived {
+                self.wander.arrived(self.world.now());
+            }
         }
         if !self.publish_receipt(errors.epoch()) {
             errors.report_timing_fault();
@@ -450,6 +486,125 @@ mod tests {
 
     use super::*;
     use crate::audio::transport::EVENT_CAPACITY;
+
+    #[test]
+    fn automatic_callback_keeps_old_wait_and_arc_then_uses_new_arrival_settings() {
+        use crate::controls::ControlEdit;
+
+        fn consume(lease: &EngineLease, frames: usize, errors: &ErrorCell) {
+            let mut buffer = [0.0; 1_024];
+            let mut remaining = frames;
+            while remaining > 0 {
+                let count = remaining.min(buffer.len() / 2);
+                let nanos = {
+                    let mut guard = lease.try_borrow().unwrap();
+                    (guard.engine().world().get() * 1_000_000_000.0) as u64
+                };
+                output_f32(
+                    lease,
+                    &mut buffer[..count * 2],
+                    2,
+                    &callback_info(nanos),
+                    errors,
+                );
+                assert!(buffer[..count * 2].iter().all(|value| *value == 0.0));
+                remaining -= count;
+            }
+        }
+
+        let registry = Arc::new(Registry::new().unwrap());
+        let mut controls = ControlState::new(&registry);
+        controls.volume = Normalized::ZERO;
+        controls.mute = true;
+        controls.dwell_min_minutes = 1;
+        controls.dwell_max_minutes = 1;
+        controls.transition_seconds = 2;
+        controls.knobs.fill(Normalized::ZERO);
+        let departure = controls.manual_target;
+        let visuals = Arc::new(VisualRing::new(EVENT_CAPACITY, controls.registry_count()));
+        let engine =
+            PreparedEngine::prepare(registry, controls.clone(), visuals, 8_000, 911).unwrap();
+        let mailbox = engine.control_mailbox().clone();
+        let receipts = engine.status_mailbox().clone();
+        let epoch = StreamEpoch::new(91).unwrap();
+        let lease = EngineLease::new(engine, epoch);
+        let errors = ErrorCell::new(epoch);
+        let (_, heap) = crate::rt_alloc::measure(|| {
+            consume(&lease, 43 * 8_000, &errors);
+            controls.apply(ControlEdit::DwellMinMinutes(2)).unwrap();
+            controls.apply(ControlEdit::TransitionSeconds(4)).unwrap();
+            mailbox.publish(&controls);
+            consume(&lease, 17 * 8_000, &errors);
+            assert_eq!(receipts.try_read().unwrap().world.get(), 60.0);
+            assert_eq!(
+                lease.try_borrow().unwrap().engine().movement,
+                Movement::Staying { current: departure }
+            );
+            consume(&lease, 8_000, &errors);
+            let target = {
+                let mut guard = lease.try_borrow().unwrap();
+                let engine = guard.engine();
+                let Movement::AutomaticCrossing { target, .. } = engine.movement else {
+                    panic!("the original dwell must finish despite time edits");
+                };
+                let target_power = engine.mix.gains()[target.get()].powi(2);
+                assert!((target_power - (std::f64::consts::PI / 8.0).sin().powi(2)).abs() < 1e-10);
+                assert_ne!(target, departure);
+                assert_eq!(engine.movement.display_target(), departure);
+                target
+            };
+            controls.apply(ControlEdit::DwellMaxMinutes(1)).unwrap();
+            controls.apply(ControlEdit::TransitionSeconds(1)).unwrap();
+            controls.apply(ControlEdit::Wander(false)).unwrap();
+            mailbox.publish(&controls);
+            consume(&lease, 8_000, &errors);
+            assert_eq!(lease.try_borrow().unwrap().engine().movement.phase(), 2);
+            controls.apply(ControlEdit::Wander(true)).unwrap();
+            mailbox.publish(&controls);
+            consume(&lease, 8_000, &errors);
+            let receipt = receipts.try_read().unwrap();
+            assert_eq!(receipt.display_dominant, target);
+            assert_eq!(receipt.resume_target, target);
+            consume(&lease, 8_000, &errors);
+            assert_eq!(
+                lease.try_borrow().unwrap().engine().movement,
+                Movement::Staying { current: target }
+            );
+            assert_eq!(receipts.try_read().unwrap().world.get(), 64.0);
+            consume(&lease, 59 * 8_000, &errors);
+            assert_eq!(
+                lease.try_borrow().unwrap().engine().movement,
+                Movement::Staying { current: target }
+            );
+            consume(&lease, 8_000, &errors);
+            assert_eq!(
+                lease.try_borrow().unwrap().engine().movement,
+                Movement::Staying { current: target }
+            );
+            consume(&lease, 8_000, &errors);
+            let mut guard = lease.try_borrow().unwrap();
+            let engine = guard.engine();
+            let Movement::Staying { current } = engine.movement else {
+                panic!("the next automatic arc must use the edited one-second duration");
+            };
+            assert_ne!(current, target);
+            assert_eq!(engine.world().get(), 125.0);
+            assert_eq!(engine.mix.gains()[current.get()], 1.0);
+            assert_eq!(
+                engine
+                    .mix
+                    .gains()
+                    .iter()
+                    .filter(|gain| **gain > 0.0)
+                    .count(),
+                1
+            );
+            assert!(controls.wander && controls.mute);
+            assert_eq!(controls.manual_revision, crate::controls::Revision::INITIAL);
+            assert_eq!(errors.take_bits(), 0);
+        });
+        assert_eq!(heap, crate::rt_alloc::Counts::default());
+    }
 
     fn prepared(seed: u64) -> PreparedEngine {
         let registry = Arc::new(Registry::new().unwrap());
