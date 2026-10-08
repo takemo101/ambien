@@ -917,3 +917,19 @@ native property登録失敗を安全な未再生AudioFilePlayer generatorで狭�
 
 private read-only AX observerのCLI `--help` はSwift0.66秒成功。指定したowned PIDとexact executable identity、AX element所有を照合し、owned窓のtextだけを読む。input／capture／OS setter／permission promptを持たない。このCLI成功は実AX snapshot・sleep/wake配送・rate変更の成功ではない。本人操作の後にactual candidateの状態を観測し、未確認を埋める。
 
+### 実出力切替での失敗と無効化された native owner の引退
+
+P10候補はDraft PR12、head `ea4af3a81fbcaf8c24efb1279156d4e9267341e1` まで公開したが、実機受け入れ前のため通常mergeしていない。private候補PID73093（上記 `6edc…`）は2026-10-08T14:38:04Z起動。起動直後のAXはnative headerだけで、14:39:35Zの実controlsは設定／受理51・手動49、world90.500秒、volume81%／mute off／wander off。fixtureのvolume0／mute onを現在値や可聴無音の証拠にしない。独立observerはNSWorkspace willSleep14:44:13Z／didWake14:44:18Zを記録したが、約4.354秒の通知間隔は指定20秒の物理睡眠、アプリ復旧・world保持・消音・シーンの合格を証明しない。
+
+ユーザーは2026-10-08 23:56:19 localの設定画像で、**出力デバイス切替時**の実失敗を報告した。旧device95のalive／nominal rate／stream configuration／streamsと旧stream96のvirtual／physical formatの解除が全6件 `OSStatus 560947818`、世界時刻104.188秒を保持して出力停止している。スリープの失敗と決めつけず、本人の原因操作を正として扱う。old候補の私有logにも同じ95／96の解除失敗が残る。正常menu Quitは2026-10-08T15:11:18Z／exit0だが、old monitorの解除失敗が解消した証拠ではない。
+
+installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` は、IDが有効なAudioObjectに対応しない意味である。sourceは全nonzero removalを失敗にし、もう解除できないguardを保持してdefault切替前の `refresh` を止めていた。new regression `invalidated_audio_objects_do_not_block_device_listener_retirement` は保証されたinvalid object0へ実HAL Removeを呼び、同じ6selector／同statusで引退が阻止されるREDを4.57秒／exit101で観測した。OSの標準出力や機器接続を変えた試験ではない。
+
+最小修正は `ListenerRetirement::Unregistered` と `ObjectInvalidated` の区別。removalの `!obj` だけは旧guardを引退し、現在default／streamの読み直しへ進む。その他の失敗はguard保持と明示失敗、registration／queryの `!obj` はエラーのまま。workerのcleanup gate、同一engine／残り時間、latest mute／controls、別epochのleaseや世界PRNGは変更しない。HAL所有／queued Block copyの全回収をnative解除成功と同一視しない。
+
+是正後fmt／full180テスト39.89秒／strictall-targetClippy2.07秒／locked-offlinebuild1.76秒、chain46.50秒PASS。actual-source native monitor smoke1.45秒PASS：invalid-owner guardの引退後に実default device114／stream115／44100Hz／2ch／実virtual・physical ASBDへ到達、続くfull snapshotは同一、現在listenerのmatching shutdown成功。includeした未使用production module由来のdead-code warningsは抑制せず記録した。これは実CPAL rerouteや物理的な音の証拠ではなく、native consumerの実経路である。throwaway Cargo exampleと終了済みold人手観測helpersは除去した。
+
+新shipping SHA256は `2c2dbd50e647846bf1e6235cb1438f6a99052a5c91a82a961a7658f8bed3cddd`。同SHAの実GPUI `lifecycle` 7.08秒PASS、`target/native-e2e/run-C44CEEA0-8DA6-4B91-A4FB-AAABE3189E36/report.json` に所有menu／minimize／zero-window再生成／3正常Quit40118・40274・40280 exit0を記録。native lifetime read-only review1分17秒findings0／confidence0.95、recovery consumer review1分32秒findings0／confidence0.94。reviewerは検査・起動・編集なし。
+
+是正後の本人による実出力切替／rate変更・再接続・出力不可からの復旧、sleepに関するworld／消音／シーン保持と可聴復帰は依然未確認。過去の実失敗や限定成功を全面成功に書き換えず、修正候補で判別する結果を明示して残る受け入れを再開する。PR12はDraftのまま、受け入れ後の通常merge・but同期・Mikan反映を最後に停止し、P11へ進まない。
+

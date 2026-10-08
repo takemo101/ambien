@@ -12,10 +12,10 @@ use objc2_core_audio::{
     AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
     AudioObjectRemovePropertyListenerBlock, kAudioDevicePropertyDeviceIsAlive,
     kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreamConfiguration,
-    kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultOutputDevice,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioObjectUnknown,
-    kAudioStreamPropertyPhysicalFormat, kAudioStreamPropertyVirtualFormat,
+    kAudioDevicePropertyStreams, kAudioHardwareBadObjectError,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+    kAudioObjectUnknown, kAudioStreamPropertyPhysicalFormat, kAudioStreamPropertyVirtualFormat,
 };
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioStreamBasicDescription};
 use objc2_foundation::{
@@ -181,6 +181,12 @@ struct OutputListener {
     block: OutputChangeBlock,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ListenerRetirement {
+    Unregistered,
+    ObjectInvalidated,
+}
+
 impl OutputListener {
     fn new(
         object: u32,
@@ -211,7 +217,7 @@ impl OutputListener {
         })
     }
 
-    fn remove(&self) -> Result<(), AudioMonitorError> {
+    fn remove(&self) -> Result<ListenerRetirement, AudioMonitorError> {
         let status = unsafe {
             AudioObjectRemovePropertyListenerBlock(
                 self.object,
@@ -220,12 +226,21 @@ impl OutputListener {
                 RcBlock::as_ptr(&self.block),
             )
         };
-        native_status(
-            "remove listener",
-            self.object,
-            self.address.mSelector,
-            status,
-        )
+        if status == kAudioHardwareBadObjectError {
+            // HAL says this ID no longer names an object, so retaining its guard
+            // can never make a later removal succeed. Retire our reference, not
+            // the new output. HAL-owned/queued Block copies may still survive;
+            // their Arc-only callback never borrows this guard or the engine.
+            Ok(ListenerRetirement::ObjectInvalidated)
+        } else {
+            native_status(
+                "remove listener",
+                self.object,
+                self.address.mSelector,
+                status,
+            )
+            .map(|()| ListenerRetirement::Unregistered)
+        }
     }
 }
 
@@ -381,7 +396,9 @@ impl OutputDeviceMonitor {
                 return true;
             }
             match entry.remove() {
-                Ok(()) => false,
+                Ok(ListenerRetirement::Unregistered | ListenerRetirement::ObjectInvalidated) => {
+                    false
+                }
                 Err(error) => {
                     errors.push(error);
                     true
@@ -418,7 +435,7 @@ impl OutputDeviceMonitor {
     fn remove_device_listeners(&mut self) -> Result<(), AudioMonitorError> {
         let mut errors = Vec::new();
         self.device_listeners.retain(|entry| match entry.remove() {
-            Ok(()) => false,
+            Ok(ListenerRetirement::Unregistered | ListenerRetirement::ObjectInvalidated) => false,
             Err(error) => {
                 errors.push(error);
                 true
@@ -439,7 +456,9 @@ impl OutputDeviceMonitor {
         }
         if let Some(global) = &self.global {
             match global.remove() {
-                Ok(()) => self.global = None,
+                Ok(ListenerRetirement::Unregistered | ListenerRetirement::ObjectInvalidated) => {
+                    self.global = None
+                }
                 Err(error) => errors.push(error),
             }
         }
@@ -1181,6 +1200,63 @@ pub(crate) fn constrain_window(
 mod tests {
     use super::*;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    #[test]
+    fn invalidated_audio_objects_do_not_block_device_listener_retirement() {
+        let signals = Arc::new(RecoverySignals::new());
+        let mut monitor = OutputDeviceMonitor {
+            thread: std::thread::current().id(),
+            _worker_local: PhantomData,
+            signals: Arc::clone(&signals),
+            global: None,
+            device: Some(kAudioObjectUnknown),
+            device_listeners: Vec::new(),
+        };
+        // Unknown is guaranteed not to name a live HAL object. Calling the real
+        // removal API recreates the destroyed-device/stream status without
+        // changing the default output or disconnecting physical hardware.
+        for (selector, scope) in [
+            (
+                kAudioDevicePropertyDeviceIsAlive,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            (
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            (
+                kAudioDevicePropertyStreamConfiguration,
+                kAudioObjectPropertyScopeOutput,
+            ),
+            (kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput),
+            (
+                kAudioStreamPropertyVirtualFormat,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            (
+                kAudioStreamPropertyPhysicalFormat,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+        ] {
+            let captured = Arc::clone(&signals);
+            monitor.device_listeners.push(OutputListener {
+                object: kAudioObjectUnknown,
+                address: property_address(selector, scope),
+                block: RcBlock::new(move |_: u32, _: NonNull<AudioObjectPropertyAddress>| {
+                    captured.output_changed();
+                }),
+            });
+        }
+        let retired = monitor.remove_device_listeners();
+        assert!(
+            retired.is_ok(),
+            "Invalidated objects blocked retirement: {retired:?}"
+        );
+        assert!(
+            monitor.device_listeners.is_empty(),
+            "Dead handles still prevent replacement"
+        );
+    }
 
     fn output_configuration(channels: &[u32]) -> Vec<u8> {
         let offset = std::mem::offset_of!(AudioBufferList, mBuffers);

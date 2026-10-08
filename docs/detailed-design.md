@@ -437,6 +437,8 @@ worker は stream とは独立の CoreAudio property listener を所有し、def
 
 復旧 listener の設置と出力 availability／config 検査は分ける。constructor は独立 global listener だけを保持し、最初の query が失敗しても worker／登録済み listener を破棄しない。native fingerprint は現在 device ID・nominal rate・実 buffer layout・stream ID列・各 stream の virtual／physical AudioStreamBasicDescription を含み、CPAL の rate／channel／sample型が同じでも stream／format が変われば新 epoch を作る。初期 engine は起動時の整合済み ControlState から準備し、失敗すると途中まで書き換わり得る mailbox 読取をその committed state へ直接適用しない。最新操作は engine が既存 scratch へ読み、成功した snapshot だけを受理する。
 
+`OutputListener::remove` は native 解除成功の `ListenerRetirement::Unregistered` と、解除先の AudioObjectID がもう存在しない `ObjectInvalidated` を区別する。CoreAudio の `kAudioHardwareBadObjectError`（`!obj`）だけは、再解除不能な旧 guard を引退させて現在 default／stream の再読へ進む。実 device／stream の変更時も shutdown 時も同じ扱いにし、それ以外の解除失敗は guard を保持して明示失敗を返す。登録・property query の `!obj` を成功にはしない。引退はアプリ所有の RcBlock 参照を解放する意味であり、HAL 所有／queued Block copy の全解放を保証しない。遅延 callback は所有 Arc の固定 signal だけへ届き、worker が現在状態を再検査する。監視の失敗を worker gate の無条件解除・timer retry・world 再生成・user mute 解除で隠さない。
+
 
 ## 三つの時計と再生予定時刻
 
