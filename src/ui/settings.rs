@@ -4,7 +4,7 @@ use ely::{
     forms::{FormField, Radio, Slider, Switch},
     primitives::FocusScope,
     theme::ActiveTheme,
-    typography::{Heading, Paragraph},
+    typography::{Caption, Heading, Paragraph},
 };
 use gpui::{
     Context, ElementId, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render, Role,
@@ -162,7 +162,10 @@ impl Render for SettingsView {
             .child(Heading::h2("設定"));
 
         if let (Some(registry), Some(controls)) = (&self.registry, &self.controls) {
-            let selected = &registry.definitions()[controls.manual_target.get()];
+            let display_target = self.receipt.map_or(controls.manual_target, |receipt| {
+                controls.display_target(receipt.ack_manual_revision, receipt.display_dominant)
+            });
+            let selected = &registry.definitions()[display_target.get()];
             let mut selector = div()
                 .id("situation-selector")
                 .role(Role::Group)
@@ -221,17 +224,17 @@ impl Render for SettingsView {
                             }
                         }))
                         .child(
-                            Radio::new(radio_id, target == controls.manual_target)
-                                .label(definition.label),
+                            Radio::new(radio_id, target == display_target).label(definition.label),
                         ),
                 );
             }
             content = content
-                .child(FormField::new("situation-field", "シチュエーション").child(selector));
+                .child(FormField::new("situation-field", "シチュエーション").child(selector))
+                .child(Heading::h3(format!("選択中: {}", selected.label)));
             for knob in self
                 .knobs
                 .iter()
-                .filter(|knob| knob.owner == controls.manual_target)
+                .filter(|knob| knob.owner == display_target)
             {
                 let index = knob.index;
                 let value = controls.knobs[index.get()].get();
@@ -263,12 +266,16 @@ impl Render for SettingsView {
                 );
             }
             let summary: SharedString = format!(
-                "現在の設定: {} / 音量 {:.0}% / 消音 {} / 設定世代 {}・手動世代 {}",
+                "現在の設定: {} / 音量 {:.0}% / 消音 {} / 設定世代 {}・手動世代 {} / ひとりで移る {} / 最小滞在時間 {}分 / 最大滞在時間 {}分 / 自動切り替え時間 {}秒",
                 selected.label,
                 controls.volume.get() * 100.0,
                 if controls.mute { "オン" } else { "オフ" },
                 controls.settings_revision.get(),
                 controls.manual_revision.get(),
+                if controls.wander { "オン" } else { "オフ" },
+                controls.dwell_min_minutes,
+                controls.dwell_max_minutes,
+                controls.transition_seconds,
             )
             .into();
             content = content
@@ -303,6 +310,112 @@ impl Render for SettingsView {
                         ),
                 )
                 .child(
+                    Switch::new("wander", controls.wander)
+                        .label("ひとりで移る")
+                        .on_change(cx.processor(|_, wander, _, cx| {
+                            dispatch_control_edit(ControlEdit::Wander(wander), cx);
+                        })),
+                )
+                .child(
+                    FormField::new("dwell-min-field", "最小滞在時間")
+                        .child(
+                            div()
+                                .id("dwell-min-description")
+                                .role(Role::Label)
+                                .aria_label("次の滞在から適用")
+                                .child(Caption::new("次の滞在から適用")),
+                        )
+                        .child(
+                            div()
+                                .id("dwell-min-a11y")
+                                .role(Role::Group)
+                                .w_full()
+                                .aria_label("最小滞在時間")
+                                .child(
+                                    Slider::new("dwell-min", f64::from(controls.dwell_min_minutes))
+                                        .range(1.0, 180.0)
+                                        .step(1.0)
+                                        .on_change(cx.processor(|_, value: f64, _, cx| {
+                                            if let Some(value) = time_slider_value(value, 180) {
+                                                dispatch_control_edit(
+                                                    ControlEdit::DwellMinMinutes(value),
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                )
+                                .child(Paragraph::new(format!("{}分", controls.dwell_min_minutes))),
+                        ),
+                )
+                .child(
+                    FormField::new("dwell-max-field", "最大滞在時間")
+                        .child(
+                            div()
+                                .id("dwell-max-description")
+                                .role(Role::Label)
+                                .aria_label("次の滞在から適用")
+                                .child(Caption::new("次の滞在から適用")),
+                        )
+                        .child(
+                            div()
+                                .id("dwell-max-a11y")
+                                .role(Role::Group)
+                                .w_full()
+                                .aria_label("最大滞在時間")
+                                .child(
+                                    Slider::new("dwell-max", f64::from(controls.dwell_max_minutes))
+                                        .range(1.0, 180.0)
+                                        .step(1.0)
+                                        .on_change(cx.processor(|_, value: f64, _, cx| {
+                                            if let Some(value) = time_slider_value(value, 180) {
+                                                dispatch_control_edit(
+                                                    ControlEdit::DwellMaxMinutes(value),
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                )
+                                .child(Paragraph::new(format!("{}分", controls.dwell_max_minutes))),
+                        ),
+                )
+                .child(
+                    FormField::new("transition-field", "自動切り替え時間")
+                        .child(
+                            div()
+                                .id("transition-description")
+                                .role(Role::Label)
+                                .aria_label("次の自動切り替えから適用")
+                                .child(Caption::new("次の自動切り替えから適用")),
+                        )
+                        .child(
+                            div()
+                                .id("transition-a11y")
+                                .role(Role::Group)
+                                .w_full()
+                                .aria_label("自動切り替え時間")
+                                .child(
+                                    Slider::new(
+                                        "transition",
+                                        f64::from(controls.transition_seconds),
+                                    )
+                                    .range(1.0, 120.0)
+                                    .step(1.0)
+                                    .on_change(cx.processor(|_, value: f64, _, cx| {
+                                        if let Some(value) = time_slider_value(value, 120) {
+                                            dispatch_control_edit(
+                                                ControlEdit::TransitionSeconds(value),
+                                                cx,
+                                            );
+                                        }
+                                    })),
+                                )
+                                .child(Paragraph::new(format!(
+                                    "{}秒",
+                                    controls.transition_seconds
+                                ))),
+                        ),
+                )
+                .child(
                     Switch::new("mute", controls.mute)
                         .label("消音")
                         .on_change(cx.processor(|_, mute, _, cx| {
@@ -320,7 +433,7 @@ impl Render for SettingsView {
                 Some(receipt) => {
                     let dominant = &registry.definitions()[receipt.display_dominant.get()];
                     format!(
-                        "音声側の受理: 設定世代 {}・手動世代 {} / 手動の表示対象 {} / 受理通知時点の世界時刻 {:.3} 秒{}",
+                        "音声側の受理: 設定世代 {}・手動世代 {} / 表示対象 {} / 受理通知時点の世界時刻 {:.3} 秒{}",
                         receipt.ack_revision.get(), receipt.ack_manual_revision.get(),
                         dominant.label, receipt.world.get(),
                         if receipt.ack_revision == controls.settings_revision { "" } else { "（最新設定の受理待ち）" },
@@ -360,5 +473,37 @@ impl Render for SettingsView {
                     .overflow_y_scroll()
                     .child(content),
             )
+    }
+}
+
+fn time_slider_value(value: f64, maximum: u32) -> Option<u32> {
+    if value.is_finite() && value.fract() == 0.0 && value >= 1.0 && value <= f64::from(maximum) {
+        Some(value as u32)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::time_slider_value;
+
+    #[test]
+    fn time_slider_boundary_requires_finite_integer_in_spec_range() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            1.5,
+            181.0,
+        ] {
+            assert_eq!(time_slider_value(value, 180), None);
+        }
+        assert_eq!(time_slider_value(1.0, 180), Some(1));
+        assert_eq!(time_slider_value(180.0, 180), Some(180));
+        assert_eq!(time_slider_value(120.0, 120), Some(120));
+        assert_eq!(time_slider_value(121.0, 120), None);
     }
 }

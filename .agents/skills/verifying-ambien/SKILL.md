@@ -1,6 +1,6 @@
 ---
 name: verifying-ambien
-description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・三環境の短い連続選択と最新対象保持・音量・消音の受理、または固有の検証コマンドと受け入れ条件を確認するとき。
+description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・短い連続選択・ひとりで移ると時間設定・音量・消音の受理、または固有の検証コマンドと受け入れ条件を確認するとき。
 ---
 
 # Ambien 固有の検証レシピ
@@ -24,6 +24,7 @@ description: Use when Ambien の native E2E、実行元の権限不足・許可�
 | 岩の3ノブ・menu／設定選択・消音中frame | `situations` | 「シチュエーション」「切り替えと途中操作」／登録された岩、岩の量・大きさ・硬さの端点受理、雨→岩の最新手動対象とmenu mark、消音中volume0／10／20・解除20%後再消音、focused-other雨Space→岩Return、capture前の実size100／hardness0受理、端点の所有シーンPNG3枚／隣接2比較に加え、実scene雨選択から2.3秒後に岩へ再選択した直後の`rock-crossing-muted` PNG3枚／隣接2比較、実menu Quit正常0。受理対象は実gainや可聴出力の証拠ではなく、captureノブは品質採用値ではない。画像契約と実gain／物理同期は別証拠 |
 | 深海の2ノブ・三環境選択・消音中frame | `deep` | 「シチュエーション」「切り替えと途中操作」／深さ0・空気0→空気100・深さ100、三環境のmenu／settings choiceと独立mute保持、深海へ戻った両端点の保持、exact receipt0/0→11/10。設定close後2.3秒のsetup分離、所有シーンの`deep-muted` PNG3枚／隣接2比較、実menu Quit正常0。receipt・待ち時間・画像は実gain／低い可聴音／気泡頻度／物理的な暗さ・速度／同期を証明せず、端点を品質採用値にしない |
 | 三環境の短い連続選択・既に鳴る対象・独立mute／volume | `mixing` | 「切り替えと途中操作」「設定窓」／実menu雨→岩→深海→岩→深海→選択済み深海の開始間隔を各2秒未満で観測（入力cadenceのみ）。実settings pointerで雨→岩→深海→選択済み深海、観測depthの1段編集、消音中volume0→10→20→19→18、実viewport scroll後もfocused volume identity／receipt17/11不変、settings pointer解除18%→19→20とmenu再消音、最新深海22/12。各操作のexact main/audio receipt・排他radio／menu mark・独立mute、所有`mixing-muted` PNG3枚／2比較、設定再生成後の最新値、実menu Quit正常0。DSP settle待ちを置かず、captureが交差中か到着後かは保証しない。receipt・入力間隔・画像は実gain／最大三声RT／再入場tail／波形peak・RMS・click／物理同期を証明しない |
+| 自動移動・時間の対補正・手動介入 | `wandering` | 「体験」「時間設定」「切り替えと途中操作」／実menuと設定pointerのon/off、menu岩・settings雨・雨ノブ1段がoff、消音volume1段と時間だけの編集はon保持、main/audio世代・排他menu/radio。focused Home／Right／Leftからmin1→2でmax1→2、max2→1でmin2→1、最終1/1分・自動1秒、実説明「次の滞在から適用」「次の自動切り替えから適用」。最終雨19/4・2.3秒setup分離・on20/4、wall60〜95秒内の別表示と60秒保持、最初の変更からwall60〜95秒内の二回目の別表示、off21/4後65秒最新対象保持、正常Quit0。capture不要、時間短縮hook・仮想時計なし。main／receipt／menuを前後照合し、5秒内にcoherentな排他表示が得られなければFAIL。wall・AX・receiptを生成sample数、gain／到着、PRNG一様性、RT、可聴無音・品質、物理同期の証拠にしない |
 | 消音中の実シーン窓 frame 変化 | `visual` | 「音と絵」「検証条件」／所有窓 PNG と内部 pixel 比較。背景透過の変化も含み得る |
 | 上記すべて | `all`（省略時） | 選択した全ケースの証拠 |
 | 値・時間・状態・容量・callback 境界 | `cargo test --locked` | 現存 `src/controls.rs`、`src/audio/`、`src/platform/` の対応試験。native smoke の代わりにしない |
@@ -54,7 +55,7 @@ falseなら取得APIや未完の`visual`／`situations`／`deep`／`mixing`画�
 
 stdout の今回の report path を読む。一意の run directory0700、`report.json`0600。`schema_version:1`、`executable`、`binary_sha256`、`selected_case`、`started_at/finished_at`、`status`、`checks[].id/status/expected/observed/artifacts` を照合する。
 
-退出は fail=1、blocked=77、選択全ケースpass=0、優先順は fail > blocked > pass。capture不足は`visual`／`situations`／`deep`／`mixing`の画像段階をblockedにし、独立したlifecycle／controlsは続ける。situations／deep／mixingの途中controls受理を全ケースPASSにせず、controls単独passを画像や製品全体の合格にしない。雨・岩・深海の初期ノブ値はP13の品質判断前の候補で、public採用値として固定しない。
+退出は fail=1、blocked=77、選択全ケースpass=0、優先順は fail > blocked > pass。capture不足は`visual`／`situations`／`deep`／`mixing`の画像段階をblockedにし、独立したlifecycle／controls／wanderingは続ける。situations／deep／mixingの途中controls受理を全ケースPASSにせず、controls単独passを画像や製品全体の合格にしない。雨・岩・深海の初期ノブ値はP13の品質判断前の候補で、public採用値として固定しない。
 
 画像 helper は通常 runner が呼ぶ。直接使う場合の現存 CLI：
 

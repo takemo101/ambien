@@ -47,21 +47,26 @@ impl KnobRamp {
 }
 
 /// World-only SplitMix64; audio noise nodes have separate seeds and phase.
-pub(super) struct WorldRandom {
+pub(crate) struct WorldRandom {
     pub(super) state: u64,
 }
 
 impl WorldRandom {
-    pub(super) fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
-    pub(super) fn unit(&mut self) -> f64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9e3779b97f4a7c15);
         let mut value = self.state;
         value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
         value ^= value >> 31;
+        value
+    }
+
+    pub(super) fn unit(&mut self) -> f64 {
+        let value = self.next_u64();
         // Midpoints exclude 0 and 1: exponential thresholds are finite > 0.
         ((value >> 12) as f64 + 0.5) * (1.0 / 4_503_599_627_370_496.0)
     }
