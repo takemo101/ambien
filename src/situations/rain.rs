@@ -63,6 +63,7 @@ struct Grain {
     resonator: Resonator<f32, U3>,
     age: f64,
     lifetime: f64,
+    audio_eligible: bool,
     attack: f64,
     strength: f32,
     center: f32,
@@ -81,6 +82,7 @@ impl Grain {
             age: 0.0,
             lifetime: 0.0,
             attack: 0.002,
+            audio_eligible: false,
             strength: 0.0,
             center: 900.0,
             bandwidth: 90.0,
@@ -105,6 +107,7 @@ impl Grain {
         self.age = 0.0;
         self.attack = attack;
         self.lifetime = lifetime;
+        self.audio_eligible = true;
         self.center = center.min(rate as f32 * 0.42);
         self.bandwidth = bandwidth;
         // FunDSP 0.23 Resonator::new/tick use Q despite prelude32's bandwidth
@@ -126,7 +129,7 @@ impl Grain {
     }
 
     fn render(&mut self) -> [f32; 2] {
-        if !self.alive() {
+        if !self.audio_eligible || !self.alive() {
             return [0.0; 2];
         }
         let attack = (self.age / self.attack).min(1.0) as f32;
@@ -258,6 +261,7 @@ impl RainVoice {
             dc.reset();
         }
         for grain in &mut self.grains {
+            grain.audio_eligible = false;
             grain.resonator.reset();
         }
         self.reverb.invalidate();
@@ -302,6 +306,11 @@ impl Voice for RainVoice {
             self.wet_level = 0.10 + amount * 0.10;
             let angle = (0.5 + breath * wind * 0.12) * std::f32::consts::FRAC_PI_2;
             self.wind_pan = [angle.cos(), angle.sin()];
+        }
+        // Inactive voices keep ages, controls and world modulation moving, but
+        // admit no new audio grains and do not consume the Poisson clock.
+        if !self.contributing {
+            return;
         }
         let births = self.poisson.births(
             46.0 * rain_amount as f64,
@@ -709,6 +718,75 @@ mod tests {
                     .all(|sample| sample.is_finite())
             );
         }
+    }
+
+    #[test]
+    fn short_reentry_cannot_reexcite_a_still_alive_old_grain() {
+        let mut voice = voice(Normalized::ZERO, Normalized::ZERO);
+        voice.grains[0].start(0.0015, 0.2, 900.0, 150.0, 0.7, 48_000);
+        voice.grains[0].strength = 0.8;
+        voice.grains[0].advance(0.001);
+        assert!(voice.render_sample().iter().any(|sample| *sample != 0.0));
+        let random = voice.random.state;
+        let age = voice.grains[0].age;
+        let lifetime = voice.grains[0].lifetime;
+        let mut noise = voice.grains[0].noise.clone();
+        let next_noise = noise.tick(&Default::default())[0];
+        let (_, heap) = crate::rt_alloc::measure(|| {
+            voice.set_contributing(false);
+            voice.set_contributing(true);
+            assert_eq!(voice.render_sample(), [0.0; 2]);
+        });
+        assert_eq!(heap, crate::rt_alloc::Counts::default());
+        assert_eq!(voice.random.state, random);
+        assert_eq!(voice.grains[0].age, age);
+        assert_eq!(voice.grains[0].lifetime, lifetime);
+        assert_eq!(
+            voice.grains[0].noise.tick(&Default::default())[0],
+            next_noise
+        );
+        voice.grains[0].start(0.0015, 0.2, 900.0, 150.0, 0.7, 48_000);
+        voice.grains[0].advance(0.001);
+        assert!(voice.render_sample().iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn inactive_voice_ages_existing_grains_but_admits_no_new_grains() {
+        let ring = VisualRing::new(8, 1);
+        let mut voice = voice(Normalized::ONE, Normalized::ZERO);
+        voice.grains[0].start(0.0015, 1.0, 900.0, 150.0, 0.7, 48_000);
+        voice.grains[0].strength = 0.8;
+        voice.set_contributing(false);
+        let initial_random = voice.random.state;
+        for sample in 0..4_800 {
+            assert_eq!(
+                step(
+                    &mut voice,
+                    &[Normalized::ONE, Normalized::ZERO],
+                    &ring,
+                    sample
+                ),
+                [0.0; 2]
+            );
+        }
+        assert!(voice.grains[0].age > 0.09 && voice.grains[0].alive());
+        assert!(voice.grains[1..].iter().all(|grain| grain.lifetime == 0.0));
+        assert_ne!(voice.random.state, initial_random);
+        let ages: Vec<_> = voice.grains.iter().map(|grain| grain.age).collect();
+        voice.rain_level = 0.0;
+        voice.wind_level = 0.0;
+        voice.set_contributing(true);
+        for grain in &mut voice.grains {
+            grain.advance(0.001);
+        }
+        assert_eq!(voice.render_sample(), [0.0; 2]);
+        assert!(
+            voice
+                .grains
+                .iter()
+                .zip(ages)
+                .all(|(grain, age)| { grain.age == (age + 0.001).min(grain.lifetime) })
+        );
     }
 
     #[test]

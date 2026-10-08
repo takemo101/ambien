@@ -11,10 +11,17 @@ use crate::{
     audio::{AudioController, OutputStatus},
     controls::{ControlEdit, ControlState},
     platform::macos::{WindowGeometryError, WindowRole, constrain_window, prepare_window},
+    situations::SituationIndex,
     ui::{scene::SceneView, settings::SettingsView},
 };
 
 actions!(ambien, [ShowScene, ShowSettings, ToggleMute, Quit]);
+
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ambien, no_json)]
+struct SelectSituation {
+    target: SituationIndex,
+}
 
 type WindowResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -120,6 +127,15 @@ pub(crate) fn start(cx: &mut App) {
             });
         });
     });
+    cx.on_action(|action: &SelectSituation, cx| {
+        let target = action.target;
+        cx.defer(move |cx| {
+            let owner = cx.global::<AppRoot>().0.clone();
+            owner.update(cx, |model, cx| {
+                model.apply_control_edit(ControlEdit::Select(target), cx);
+            });
+        });
+    });
     owner.update(cx, |model, cx| model.update_menu(cx));
 
     owner.update(cx, |model, cx| {
@@ -194,16 +210,33 @@ impl AppModel {
     }
 
     fn update_menu(&self, cx: &mut Context<Self>) {
-        cx.set_menus([Menu::new("Ambien").items([
+        let mut items = vec![
             MenuItem::action("シーンを表示", ShowScene),
             MenuItem::action("設定…", ShowSettings),
             MenuItem::separator(),
+        ];
+        if let (Some(controls), (_, Some(source))) =
+            (&self.controls, self.audio.shared().snapshot())
+        {
+            let definitions = source.registry.definitions();
+            for (position, definition) in definitions.iter().enumerate() {
+                let target = SituationIndex::from_index(position, definitions.len())
+                    .expect("registered menu position is valid");
+                items.push(
+                    MenuItem::action(definition.label, SelectSituation { target })
+                        .checked(controls.manual_target == target),
+                );
+            }
+            items.push(MenuItem::separator());
+        }
+        items.extend([
             MenuItem::action("消音", ToggleMute)
                 .checked(self.controls.as_ref().is_some_and(|state| state.mute))
                 .disabled(self.controls.is_none()),
             MenuItem::separator(),
             MenuItem::action("終了", Quit),
-        ])]);
+        ]);
+        cx.set_menus([Menu::new("Ambien").items(items)]);
     }
 
     fn apply_control_edit(&mut self, edit: ControlEdit, cx: &mut Context<Self>) {
@@ -211,6 +244,7 @@ impl AppModel {
             return;
         };
         let old_mute = state.mute;
+        let old_target = state.manual_target;
         match state.apply(edit) {
             Ok(changed) => {
                 self.control_error = None;
@@ -225,7 +259,7 @@ impl AppModel {
                 self.control_error = Some(error.to_string().into());
             }
         }
-        if old_mute != state.mute {
+        if old_mute != state.mute || old_target != state.manual_target {
             self.update_menu(cx);
         }
         self.update_settings(cx);

@@ -69,6 +69,18 @@ impl VisibleParticles {
         }
     }
 
+    fn particle_frame(&self, event: &VisualEvent) -> Option<(f32, f32)> {
+        let contribution = self.gains[event.situation.get()];
+        if contribution == 0.0 {
+            return None;
+        }
+        let elapsed = self.present.get().saturating_sub(event.present.get());
+        let age = (elapsed as f64 / event.lifetime.as_nanos() as f64) as f32;
+        let fade = (1.0 - age).clamp(0.0, 1.0).powi(2);
+        let opacity = event.strength.get() * fade * contribution;
+        (opacity > 0.0).then_some((age, opacity))
+    }
+
     fn reset_registry(&mut self, count: usize) {
         if self.initialized {
             self.events.fill(None);
@@ -232,13 +244,9 @@ impl SceneView {
                 }
             }
             for event in self.particles.events.iter().flatten() {
-                let elapsed = self
-                    .particles
-                    .present
-                    .get()
-                    .saturating_sub(event.present.get());
-                let age = (elapsed as f64 / event.lifetime.as_nanos() as f64) as f32;
-                let fade = (1.0 - age).clamp(0.0, 1.0).powi(2);
+                let Some((age, opacity)) = self.particles.particle_frame(event) else {
+                    continue;
+                };
                 let radius = event.radius.get()
                     * match event.shape {
                         VisualShape::Point => 1.0,
@@ -252,7 +260,7 @@ impl SceneView {
                 let color = source.registry.definitions()[event.situation.get()]
                     .visual
                     .color;
-                paint_glow(window, center, radius, color, event.strength.get() * fade);
+                paint_glow(window, center, radius, color, opacity);
             }
         });
     }
@@ -342,14 +350,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn particle_brightness_uses_presented_crossover_gains_and_hides_departed_voice() {
+        let mut source = source();
+        let count = source.registry.definitions().len();
+        source.visuals = Arc::new(VisualRing::new(4, count));
+        let departure = source.registry.first_index();
+        let target = source.registry.resolve("rock").unwrap();
+        let event = |situation, serial| VisualEvent {
+            epoch: source.epoch,
+            world: WorldSeconds::new(1.0).unwrap(),
+            present: MachNanos::new(100),
+            situation,
+            x: Normalized::new(0.5).unwrap(),
+            y: Normalized::new(0.5).unwrap(),
+            strength: Normalized::new(0.8).unwrap(),
+            radius: LogicalPixels::new(5.0).unwrap(),
+            shape: VisualShape::Impact,
+            lifetime: Duration::from_nanos(100),
+            serial,
+        };
+        let departing = event(departure, 1);
+        let arriving = event(target, 2);
+        assert!(source.visuals.push_event(departing));
+        assert!(source.visuals.push_event(arriving));
+        let mut gains = vec![0.0; count];
+        let breath = vec![0.0; count];
+        let publish = |present, gains: &[f32]| {
+            assert!(source.visuals.push_state(WorldVisualState {
+                epoch: source.epoch,
+                world: WorldSeconds::new(1.0).unwrap(),
+                present: MachNanos::new(present),
+                phase: 1,
+                gains,
+                breath_intensity: &breath,
+            }));
+        };
+        gains[departure.get()] = 1.0;
+        publish(100, &gains);
+        gains[departure.get()] = 0.6;
+        gains[target.get()] = 0.8;
+        publish(150, &gains);
+        let mut cache = VisibleParticles::new(count);
+        cache.refresh_at(&source, MachNanos::new(125));
+        assert!((cache.particle_frame(&departing).unwrap().1 - 0.45).abs() < 1e-7);
+        // The future mixed state is not yet the presented contribution.
+        assert!(cache.particle_frame(&arriving).is_none());
+        cache.refresh_at(&source, MachNanos::new(150));
+        assert!((cache.particle_frame(&departing).unwrap().1 - 0.12).abs() < 1e-7);
+        assert!((cache.particle_frame(&arriving).unwrap().1 - 0.16).abs() < 1e-7);
+        gains[departure.get()] = 0.0;
+        gains[target.get()] = 1.0;
+        publish(170, &gains);
+        cache.refresh_at(&source, MachNanos::new(170));
+        assert!(
+            cache
+                .events
+                .iter()
+                .flatten()
+                .any(|event| event.situation == departure)
+        );
+        // Its particle is still alive, but the owning voice has fully departed.
+        assert!(cache.particle_frame(&departing).is_none());
+        assert!((cache.particle_frame(&arriving).unwrap().1 - 0.072).abs() < 1e-7);
+    }
+
     fn publish(source: &AudioSource, world: f64, present: u64, gain: f32, breath: f32) {
+        let count = source.registry.definitions().len();
+        let gains = vec![gain; count];
+        let breaths = vec![breath; count];
         assert!(source.visuals.push_state(WorldVisualState {
             epoch: source.epoch,
             world: WorldSeconds::new(world).unwrap(),
             present: MachNanos::new(present),
             phase: 0,
-            gains: &[gain],
-            breath_intensity: &[breath],
+            gains: &gains,
+            breath_intensity: &breaths,
         }));
         assert!(source.visuals.push_event(VisualEvent {
             epoch: source.epoch,
@@ -370,24 +446,26 @@ mod tests {
     fn output_failure_preserves_the_already_accepted_frame_not_a_newer_ring_snapshot() {
         let source = source();
         publish(&source, 1.0, 10, 1.0, 0.25);
-        let mut cache = VisibleParticles::new(1);
+        let mut cache = VisibleParticles::new(source.registry.definitions().len());
         cache.refresh_at(&source, MachNanos::new(40));
         let header = cache.state;
         let particle = cache.events[0].unwrap().serial;
+        let accepted_gains = cache.gains.clone();
+        let accepted_breath = cache.breath.clone();
         publish(&source, 2.0, 41, 0.5, 0.75);
         cache.freeze_at(&source, MachNanos::new(99));
         assert_eq!(cache.present, MachNanos::new(40));
         assert_eq!(cache.state, header);
         assert_eq!(cache.events[0].map(|event| event.serial), Some(particle));
-        assert_eq!(cache.gains.as_ref(), &[1.0]);
-        assert_eq!(cache.breath.as_ref(), &[0.25]);
+        assert_eq!(cache.gains, accepted_gains);
+        assert_eq!(cache.breath, accepted_breath);
     }
 
     #[test]
     fn a_new_frozen_scene_initializes_once_at_the_worker_checkpoint() {
         let source = source();
         publish(&source, 2.0, 41, 0.5, 0.75);
-        let mut cache = VisibleParticles::new(1);
+        let mut cache = VisibleParticles::new(source.registry.definitions().len());
         cache.freeze_at(&source, MachNanos::new(60));
         assert_eq!(cache.present, MachNanos::new(60));
         assert_eq!(
@@ -400,7 +478,7 @@ mod tests {
             })
         );
         assert_eq!(cache.events[0].unwrap().serial, 1);
-        assert_eq!(cache.gains.as_ref(), &[0.5]);
-        assert_eq!(cache.breath.as_ref(), &[0.75]);
+        assert!(cache.gains.iter().all(|gain| *gain == 0.5));
+        assert!(cache.breath.iter().all(|breath| *breath == 0.75));
     }
 }

@@ -1,12 +1,14 @@
 # Ambien Implementation Plan
 
-> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界、雨ノブ・音量・独立消音・受理通知のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
+> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界、雨ノブ・音量・独立消音・受理通知、岩と共通手動交差のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
 >
 > **実装 AI 向け:** writing-plans の成果単位・checkbox・境界試験の考え方を使う。未導入の superpowers 実行器や worktree は必須にしない。実行フローは [AGENTS](../AGENTS.md)、[開発手順](development.md)、[Lat 運用](../lat.md/workflow.md) に従う。P01〜P18 は計画の安定参照であり、mikan ID や Status ではない。checkbox は成果の受け入れ項目であって進捗台帳ではなく、進捗は mikan のみで管理する。
 
 **Goal:** 固定した二つの GPUI 窓から、登録された三環境の合成音・同じ世界の光・途中選択・保存・安全な更新を操作できる製品を、観測可能な成果ごとに実装する。
 
 **Architecture:** GPUI がホスト、Ely が設定 UI、CPAL callback が世界と音を進める。声は開始前に準備し、制御・視覚の固定容量境界、非 RT worker の資源回収、保存後の終了調停を分離する。実現方法・所有・不変条件は [詳細設計](detailed-design.md)、全体の概念は [構成説明](architecture.md) を読む。
+
+P03 受け入れ後の現存 consumer 確認に基づき、ユーザーは P04 に最終形の共通手動交差を含めると選択した。岩の登録だけでは設定・menu からの音と光に到達しないため、I05 と共通手動 consumer を P04 の必要経路へ含める。P06 は深海追加後の三環境・再入場・最大三声 RT・実機統合を受け入れる。P04/P05/P06 の依存順と Issue ごとの通常マージは維持し、瞬間切替・名前分岐・未接続 UI を中間成果にしない。
 
 **Tech Stack:** 選定・固定改訂・最低環境は [SPEC の依存の選定](../SPEC.md#依存の選定) と [配布前提](../SPEC.md#配布前提) が唯一の正本。ソース調査はビルド・実機成功ではない。
 
@@ -32,7 +34,7 @@
 | `src/platform/mod.rs`, `src/platform/macos.rs` | 借用 AppKit と OS 通知、host 置換なし／P01 |
 | `src/controls.rs` | 型付き端点・revision・操作 reducer／P02 |
 | `src/situations/mod.rs`, `rain.rs`, `rock.rs`, `deep.rs`, `synthesis.rs`（すべて `src/situations/` 配下） | Registry と声、固有曲線、共通固定 pool／P02・P04・P05 |
-| `src/audio/mod.rs`, `render.rs`, `world.rs`, `transport.rs`, `lease.rs`, `timing.rs`, `mix.rs`（すべて `src/audio/` 配下） | worker／typed callback／論理時計／atomic 境界／所有回収／予定時刻／slerp／P02・P06 |
+| `src/audio/mod.rs`, `render.rs`, `world.rs`, `transport.rs`, `lease.rs`, `timing.rs`, `mix.rs`（すべて `src/audio/` 配下） | worker／typed callback／論理時計／atomic 境界／所有回収／予定時刻／slerp／P02・P04（三環境統合受け入れは P06） |
 | `src/persistence.rs`, `src/lifecycle.rs`, `src/ui/appearance.rs` | 正規化・atomic 保存／保存後終了／OS 外観／P09・P12・P11 |
 | `src/platform/updates.rs`, `native/ambien_bridge.h`, `native/ambien_bridge.m`, `build.rs` | Sparkle、protocol・block・不足終了 selector／P12・P15 |
 | `resources/Info.plist`, `scripts/package-app.sh` | 実 bundle metadata と署名・公証 packaging／P15・P17 |
@@ -50,7 +52,7 @@
 | I03 操作 | `Revision(u64)`、`ControlState` は volume/mute/wander/dwell_min_minutes/dwell_max_minutes/transition_seconds、平坦 knob 配列、manual_target、manual_revision、wander_revision、settings_revision。`edit_knob(index, value)` は `KnobIndex` と `Normalized` の端点編集で手動 target を発行する reducer 操作。viewport を含まない。 |
 | I04 制御配送 | `ControlMailbox::publish(&self, state: &ControlState)`; `try_read_into(&self, dst: &mut ControlState) -> bool`。全 field と sequence が atomic SeqCst。main 単一 writer/audio 単一 reader。一回読取失敗は旧整合 state 維持、spin なし。`StatusMailbox` は所有中の audio／凍結中の worker が単一 writer、main が読む。error bitset は stream epoch ごとの別 cell、worker は現在 cell だけを消費し、旧 monitor の遅延通知で新出力を止めない。 |
 | I05 交差 | `GainRamp::retarget(&mut self, target: SituationIndex, duration: Duration)`; `advance_frames(&mut self, frames: usize, rate: u32)`; `gains(&self) -> &[f64]`。N 次元非負 unit vector、終端 one-hot。 |
-| I06 世界 | `WorldClock` が生成 sample だけで `WorldSeconds(f64)` を進める。`Movement = Staying \| Crossing { kind: Manual \| Automatic, departure, target, start, duration }`。表示 dominant と保存 `resume_target` を別の意味で出す。 |
+| I06 世界 | `WorldClock` が生成sampleだけで `WorldSeconds(f64)` を進める。現存P04は `Movement = Staying { current } \| ManualCrossing { target }` と `target()` による手動表示・再開対象、出発混合／残り秒はI05が保持。g²最大の表示や保存consumerとは区別する。自動kind/departure/start/duration・display dominant／`resume_target` の分離はP07の計画Interfaceであり、保存接続はP09以後。 |
 | I07 視覚 | `VisualEvent` は `StreamEpoch`、world 秒、CPAL 予定再生 Mach ns、`SituationIndex`、normalized x/y、strength、`radius: LogicalPixels`、shape、`lifetime: Duration`、event serial。`WorldVisualState` は同じ予定時刻と N 声の gains/breath intensity。`VisualRing::new(event_capacity, registry_count)`、`push_event(event)`、`push_state(WorldVisualState)`、`read_live_into(epoch, now, &mut preallocated_cache)`。全 slot payload atomic、sequence を再検査。 |
 | I08 所有・時刻 | `EngineLease` は `UnsafeCell<Option<PreparedEngine>>` と `Owner = Idle \| Callback \| Worker` の atomic CAS、epoch ごとの別 cell と再 enable しない gate。旧 gate=false→worker 排他→engine.take 後は旧 Owner を Worker に固定し、新 cell へ engine を move→Idle→enable。旧 callback は新 cell にアクセスしない。`StreamEpoch` 内だけ CPAL と Mach 時刻を対応づけ、worker が engine を回収・準備・破棄。 |
 | I09 保存 | `StateDocument` は `serde_json::Value` の unknown 保持。`LoadedState`、`LoadOutcome = Loaded { settings, document, write_policy } \| Defaults { reason, document, write_policy }`。`SaveWorker` の pending 最新1＋in-flight1、`SaveReceipt = { revision, result }`。flush は最新 revision の置換成功 receipt を待つ。 |
@@ -65,13 +67,13 @@
 // P03: callback 境界。read は一回だけ。読取失敗で音を止めない。
 if mailbox.try_read_into(&mut read_scratch) {
     std::mem::swap(&mut controls, &mut read_scratch); // 両方開始前に確保
-    // manual_revision が前回と異なる時だけ P06 の retarget を実施。
+    // manual_revision が前回と異なる時だけ P04 の retarget を実施。
     // volume/mute は controls の最新端点を独立して適用する。
 }
 ```
 
 ```rust
-// P06 の利用者規則を固定する test 例（test helper は同ファイル内）。
+// P04 の数学規則／P06 の三環境 consumer を固定する test 例。
 let before = ramp.gains().to_vec(); // test の確保。callback 内で行わない。
 let target = fixture_registry.resolve("deep").expect("registered fixture");
 ramp.retarget(target, manual_duration_from_spec);
@@ -190,19 +192,22 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 ## P04 岩の音・ノブ・衝突光を登録する
 
-**DependsOn:** P03。**SPEC:** [シチュエーション](../SPEC.md#シチュエーション)、[初期のシチュエーションとノブ](../SPEC.md#初期のシチュエーションとノブ)。
+**DependsOn:** P03。**SPEC:** [シチュエーション](../SPEC.md#シチュエーション)、[初期のシチュエーションとノブ](../SPEC.md#初期のシチュエーションとノブ)、[切り替えと途中操作](../SPEC.md#切り替えと途中操作)、[体験](../SPEC.md#体験)、[設定窓](../SPEC.md#設定窓)。
 
-**Files:** Create `src/situations/rock.rs`; Modify `src/situations/mod.rs`, `src/situations/synthesis.rs`（同じ理由で共用できる合成だけ）。Tests: `rock.rs`/`synthesis.rs` 内。
+**Files:** Create `src/situations/rock.rs`, `src/audio/mix.rs`; Modify `src/situations/mod.rs`, `src/audio/mod.rs`, `src/audio/render.rs`, `src/audio/world.rs`、必要な現存の `src/controls.rs`, `src/ui/settings.rs`, `src/app.rs`、寄与の境界を満たす `src/situations/rain.rs`。`src/situations/synthesis.rs` は同じ理由で共用できる合成だけ。実経路の native 検証は現存 `scripts/native-e2e.swift` に加える。Tests: `rock.rs`/`synthesis.rs`/`mix.rs`/`world.rs`/`render.rs` と既存 registry consumer 内。
 
-**Consumes:** I01 registry、I02 `Voice`/`VoiceFrame`/`Normalized`/`VisualWriter`、I07 event metadata。**Produces:** 同じ I01/I02 の rock 定義と声。UI/audio/保存に rock 名分岐を追加しない。
+**Consumes:** I01 registry、I02 `Voice`/`VoiceFrame`/`Normalized`/`VisualWriter`、I03 manual_target/revision、I04 配送、I07 event metadata。**Produces:** 同じ I01/I02 の rock 定義と声、I05 `GainRamp` 全署名、共通手動選択と I06 manual の表示・保存対象、I07 実 gains、I11 手動対象の即時表示。UI/audio/保存に rock 名分岐を追加しない。
 
 - [ ] module と登録一行で knob 順序・曲線・衝突 shape を提供する。
 - [ ] 固定衝突 pool、低い共鳴、転がりを準備する。`resonator_hz` 第二引数は bandwidth ではなく実装 Q として center/bandwidth から変換、dcblock と残響を準備する。
 - [ ] amount zero の新規停止と既存余韻、size/hardness 独立、hardness 上端の peak を有限性と wave 統計で調整する。
+- [ ] 登録 N の vector を開始前確保し、現在の混合から手動対象へ SPEC の固定 duration で retarget する。同じ revision は再適用せず、volume/mute を交差から分離する。世界・交差は消音中も進み、出力凍結中は進めない。
+- [ ] `s=hypot(non-target成分)`、`theta=atan2(s,g0[target])` と安定な接平面を使う。`s==0` だけを不要交差とし、正の微小寄与を捨てない。retarget/rate 準備時に cosΔ/sinΔ を作り、sample は rotation recurrence、区間境界で誤差補正、終端は正確な one-hot とする。二声専用の暫定実装にしない。
+- [ ] 正↔0 だけで声の寄与と固定 DSP 履歴を更新し、非寄与の旧粒を再入場で鳴らさない。世界 PRNG・粒寿命・息・天候は保持し、新規音生成を止める。設定/menu/ノブ編集を同じ最新 intent に接続する。
 
-**Behavior tests:** amount 1→0→smoother endpoint 後に新規 collision count 不増、既存 envelope は減衰；size=0→最小の岩で無音にしない；hardness 0/1 と rate 変更→finite samples/Q、固定 pool 上限維持。registry resolve("rock")→登録 index、unknown→None。
+**Behavior tests:** amount 1→0→smoother endpoint 後に新規 collision count 不増、既存 envelope は減衰；size=0→最小の岩で無音にしない；hardness 0/1 と rate 変更→finite samples/Q、固定 pool 上限維持。実声を使う registry consumer で、選択後に設定受理だけでなく実 gains と寄与が対象へ到達する。純粋な N 声数学では、途中で第三成分へ retarget→直前直後同一／指定 duration 後 one-hot、1000 retarget→非負／Σg²≈1／最後だけ one-hot、[1,1e-20,0] の微小正寄与→途中で捨てず終端で正確に0、既に target one-hot→不要交差なし、rate 変更→残り秒保持。同じ intent は交差を再開せず、mute 中の選択と volume 編集後も無音、解除で最新対象・最後の音量となる。許容誤差は数値検査値であり聴感保証ではない。
 
-**Smoke/失敗:** 設定/menu に metadata から岩が現れ、柔らかさ・大きさ・衝突光が変わる。極端 knob の不意な peak は停止して記録し、安全な範囲へ規則を修正する。試聴未確定値は candidate のまま。
+**Smoke/失敗:** 設定/menu に metadata から岩が現れ、実 callback の rain↔rock 選択・途中上書き・ノブ編集で実 gains、岩の波形、衝突 event を観測する。実窓から柔らかさ・大きさ・衝突光の変化、mute 中選択→解除後の最新対象を確認する。二声経路の allocation/drop と peak/RMS を診断し、不意な peak は停止して記録する。unit norm を波形 peak の保証にせず、安全な規則へ修正する。試聴未確定値は candidate のまま。実第三声・最大三声 RT の受け入れは P05 後の P06 へ残す。
 
 ## P05 深海の低い響き・気泡・遅い光を登録する
 
@@ -224,13 +229,13 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **DependsOn:** P05。**SPEC:** [切り替えと途中操作](../SPEC.md#切り替えと途中操作)、[体験](../SPEC.md#体験)、[設定窓](../SPEC.md#設定窓)。
 
-**Files:** Create `src/audio/mix.rs`; Modify `src/audio/world.rs`, `src/audio/render.rs`, `src/controls.rs`, `src/ui/settings.rs`, `src/app.rs`。Tests: `mix.rs`, `world.rs`, `render.rs` 内。
+**Files:** P04 作成の `src/audio/mix.rs` と手動 consumer、P05 後の実 registry/三声を使う。Modify `src/audio/world.rs`, `src/audio/render.rs`, `src/controls.rs`, `src/ui/settings.rs`, `src/app.rs` は三環境・再入場の実統合で必要な修正だけ。Tests: `mix.rs`, `world.rs`, `render.rs` と実声 Module 内。
 
-**Consumes:** I03 manual_target/revision、I01 registered N、I02 prepared voices。**Produces:** I05 `GainRamp` 全署名、I06 manual `Movement` と `resume_target`、I07 gains、I11 手動対象の即時表示。
+**Consumes:** P04 の I05 全署名・共通手動経路・I06 manual 出力、I03 manual_target/revision、P05 後の I01 registered N、I02 prepared voices。**Produces:** 三環境の I06 manual `Movement`/`resume_target`、I07 実 gains、I11 手動表示と実 callback を接続した統合受け入れ証拠。交差を別実装へ置き換えず、未解決の実統合不具合は同じ規則で修正する。
 
-- [ ] g0/current arrays を N で開始前確保し、現在 vector→target の非負 unit slerp を retarget する。同じ revision を再適用しない。
-- [ ] 数学式の `theta=acos(g0[target])` は詳細設計の安定な同値計算 `s=hypot(non-target成分)`、`theta=atan2(s,g0[target])` と接平面で実装する。`s==0` だけを不要交差とし、近い target の正の微小寄与を先に捨てない。retarget 時に cosΔ/sinΔ を準備して sample ごとは rotation recurrence、区間境界で誤差補正、終端 one-hot とする。
-- [ ] 第三声も現在 vector から直ちに加え、最新選択で上書きする。volume/mute と shutdown gain を交差から分離する。
+- [ ] P04 の現在 vector→target、revision の一回適用、微小正寄与・終端 one-hot・rate 残り秒の規則を、三つの実声を使う consumer で確認する。数学試験を実音・最大三声 RT の証拠へ読み替えない。
+- [ ] 二声途中に実第三声を直ちに加え、最新選択で上書きする。mute/volume と保存対象・手動表示の意味が三環境でも保たれ、未実装 shutdown gain を交差の代用品にしない。
+- [ ] 各実 DSP の離脱／再入場と最大三声 callback を診断し、旧 tail・PRNG/粒寿命・新 impulse・音と光の整合を区別して受け入れる。
 
 **Behavior tests:** [1,0,0]→rock 途中で deep→retarget 直前直後 vector 同一、指定 duration 後 [0,0,1]；連続1000 retarget→nonnegative/Σg²≈1/最後だけ one-hot；[1,1e-20,0] のように target が1へ丸められても非targetが正→不要交差にせず duration 後に正確な one-hot；[0,1,0]→rock→不要交差なし；already-playing rock→現在 mix から rock 単独；rate 変更→残り秒保持。実 DSP に impulse→離脱→長い非寄与→zero inputで再選択→旧 tail なし、その後の新 impulse→規定 delay のみ。世界 PRNG／粒年齢は保持、同じ active 値の反復は不変、mute は履歴を無効化しない。誤差 tolerance は数値演算の検査値として test に明示し聴感保証にしない。
 
@@ -447,20 +452,20 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 | [文書の状態](../SPEC.md#文書の状態) | 文書/実装/公開権限の境界 | Issue 化 gate・全 P | 明示依頼と実在 paths。未実装の明記 |
 | [成功条件](../SPEC.md#成功条件) | 全体 E2E | P01〜P18 | 三環境ユーザー試聴、実窓、保存、同期、signed DMG |
 | [対象にしないもの](../SPEC.md#対象にしないもの) | host、合成、登録、更新 scope | P01/P02/P05/P08/P15/P18 | source/review と実 UI。FFT/録音/plugin/OS音量/auto update/自由resize等を追加しない |
-| [体験](../SPEC.md#体験) | ControlState、WorldClock、Movement | P02/P03/P06/P07/P09 | virtual-time 境界と実操作、初回/復元 |
-| [切り替えと途中操作](../SPEC.md#切り替えと途中操作) | GainRamp、PreparedEngine | P06/P18 | slerp/連続 retarget tests、実三声音と光、RT診断 |
+| [体験](../SPEC.md#体験) | ControlState、WorldClock、Movement | P02/P03/P04/P06/P07/P09 | virtual-time 境界と実操作、初回/復元 |
+| [切り替えと途中操作](../SPEC.md#切り替えと途中操作) | GainRamp、PreparedEngine | P04/P06/P18 | slerp/連続 retarget tests、二声の実選択、実三声音と光、RT診断 |
 | [窓](../SPEC.md#窓) | GPUI root、SceneView/SettingsView | P01/P08/P11 | 二窓 close/reopen/visibility、blur 実観測 |
 | [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) | fixed Adapter、normalized placement | P01/P08/P11/P18 | fit/zero/finite geometry tests、focus/円/世界不変の実操作 |
 | [高DPIと描画負荷](../SPEC.md#高dpiと描画負荷) | 直接 paint、固定 cache | P08/P11/P18 | supported screen/DPI の物理寸法/負荷/資源寿命測定 |
 | [基盤のサイズ制約と既知のコスト](../SPEC.md#基盤のサイズ制約と既知のコスト) | 借用 NSWindow、Metal既知コスト | P01/P11/P18 | fixed flags の実挙動、依存 surface 実測。GPUI サイズ patch は対象外 |
 | [復元](../SPEC.md#復元) | window serialization、UUID/workarea変換 | P09/P11 | missing/oversize/offscreen tests、実再起動/画面移動 |
-| [メニュー](../SPEC.md#メニュー) | AppModel actions | P01/P03/P06/P07/P12/P15 | 実 menu と設定同挙動、close後再表示/quit/update |
+| [メニュー](../SPEC.md#メニュー) | AppModel actions | P01/P03/P04/P06/P07/P12/P15 | 実 menu と設定同挙動、close後再表示/quit/update |
 | [音と絵](../SPEC.md#音と絵) | Voice、synthesis、WorldClock | P02/P04/P05/P13/P18 | finite/zero/pool tests、三段揺らぎの波形と試聴 |
 | [視覚イベント](../SPEC.md#視覚イベント) | VisualRing、VisibleParticles | P02/P04/P05/P08 | 同じ event pan/shape、overflow/hidden/live tests と実光 |
 | [再生予定時刻](../SPEC.md#再生予定時刻) | StreamEpoch、Mach対応、dry遅延 | P02/P08/P10/P18 | frame-offset/epoch tests、実出力の物理同期/BT残差 |
 | [シチュエーション](../SPEC.md#シチュエーション) | Registry、moduleごとの定義 | P02/P04/P05 | 新規 module＋登録で表示/音声に到達、名前分岐なし review |
 | [初期のシチュエーションとノブ](../SPEC.md#初期のシチュエーションとノブ) | voice curves/KnobDefinition | P02/P04/P05/P13 | zero独立/finite/余韻 tests、ユーザー初期値承認とSPEC更新 |
-| [設定窓](../SPEC.md#設定窓) | controlled Ely、stable id | P01/P03/P06/P07/P11 | 実フォーム順序/前面/focus、dominant/manual表示 tests |
+| [設定窓](../SPEC.md#設定窓) | controlled Ely、stable id | P01/P03/P04/P06/P07/P11 | 実フォーム順序/前面/focus、dominant/manual表示 tests |
 | [ボリューム設定](../SPEC.md#ボリューム設定) | mix後 volume/mute | P03/P09/P18 | mute独立/zero world/復元 tests、実耳/OS音量不変 |
 | [時間設定](../SPEC.md#時間設定) | reducer、Movementの次回適用 | P07/P09 | clamp/round/対slider/進行中不変 tests、実説明と操作 |
 | [消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止) | EngineLease、AudioController recovery | P03/P08/P10/P18 | freeze/lease/rate tests、実sleep/device/mute/hidden |
@@ -471,7 +476,7 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 | [配布前提](../SPEC.md#配布前提) | 外部準備 gate | P14/P17/P18 | 実認証/鍵/URL/公開権限/下限OS・画面。secret非公開 |
 | [構成と Interface](../SPEC.md#構成と-interface) | I01〜I11、単一GPUI host | P01〜P12/P15/P16 | consumer型一致/所有 review とE2E、別hostなし |
 | [依存の選定](../SPEC.md#依存の選定) | fixed lockと実API境界 | P01/P02/P15/P18 | 実lockfile/build、使用ノード/ABI/依存寿命診断 |
-| [スレッドと資源](../SPEC.md#スレッドと資源) | atomic mailbox/ring、lease、worker | P02/P03/P06/P08/P10/P12/P18 | interleavings と実RT alloc/drop/wait/I/O/容量/資源回収 |
+| [スレッドと資源](../SPEC.md#スレッドと資源) | atomic mailbox/ring、lease、worker | P02/P03/P04/P06/P08/P10/P12/P18 | interleavings と実RT alloc/drop/wait/I/O/容量/資源回収 |
 | [検証条件](../SPEC.md#検証条件) | 証拠分類/最終gate | 全 P/P18 | 各子節をversion/環境付きで照合、未確認を隠さない |
 | [音と操作](../SPEC.md#音と操作) | synth/mix/control/world | P02〜P07/P13/P18 | 境界・連続性・時間tests、各ユーザー試聴とRT測定 |
 | [窓・高DPI・同期](../SPEC.md#窓高dpi同期) | scene/timing/platform/recovery | P01/P08/P10/P11/P18 | 実窓/screen/DPI/sync/sleep/appearance と対応範囲 |

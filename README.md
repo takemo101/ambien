@@ -9,7 +9,7 @@
 
 UI は GPUI＋Ely、DSP は FunDSP、音声 I/O は CPAL、アプリ内更新は Sparkle を使う設計です。対象は Apple Silicon の macOS 15以降です。
 
-承認済み仕様に沿って、Cargo と固定した GPUI シーン・Ely 設定窓、雨の合成・CPAL 標準出力・同じ粒の canvas 描画を実装しています。現在の環境で雨と左右の光・シーン閉鎖中の音継続・再表示についてユーザーの確認を得ました。雨ノブ・音量・独立消音と受理通知も実装し、実標準出力で消音中の世界進行を確認しました。実窓の設定操作・受理・menu一致・focus保持・再生成と終了の自動チェックは通過していますが、消音中の実窓スクリーンショットは画面収録権限不足で未確認です。他の声、切り替え、保存・更新は後続の成果です。三環境の音質・初期値確定、物理同期、高DPI負荷、配布の受け入れとは区別します。[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)は予定する製品全体、[検証記録](docs/verification.md)は実際の確認と残る制約を示します。Issue の状態は mikan で管理します。
+承認済み仕様に沿って、固定したGPUIシーン・Ely設定窓、雨／岩の合成、CPAL標準出力、共通の手動多声交差、同じ粒のcanvas描画、音量・独立消音・受理通知を実装しています。ノブ初期値と音色は試聴未確定のcandidateです。深海・自動移動・保存・更新は後続の成果で、三環境の音質・初期値確定、物理同期、高DPI負荷、配布の受け入れは別に必要です。[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)は現存部分と製品全体の予定を区別し、[検証記録](docs/verification.md)は実際の確認・過去の失敗・残る制約を示します。Issueの状態はmikanで管理します。
 
 詳細な要件と進行条件は [SPEC.md](SPEC.md)、開発時の作業規約は [AGENTS.md](AGENTS.md)、文書の役割と読む順序は [docs/README.md](docs/README.md) を参照してください。
 

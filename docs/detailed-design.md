@@ -2,13 +2,13 @@
 
 ## 文書の位置づけ
 
-2026-10-07 時点の、承認済み [SPEC](../SPEC.md) を実装へ落とす設計である。製品要件・既定値・依存改訂の唯一の正本は SPEC。本書は実現方法、Interface の意味、所有、失敗、時計を定め、[実装計画](implementation-plan.md) は P01〜P18 の順序・作業・受け入れを定める。作業 Status は複製しない。[概念構成](architecture.md) と [検証手順](verification.md) はそれぞれ関係の説明と観測方法を扱う。
+2026-10-08 時点の、承認済み [SPEC](../SPEC.md) を実装へ落とす設計である。製品要件・既定値・依存改訂の唯一の正本は SPEC。本書は実現方法、Interface の意味、所有、失敗、時計を定め、[実装計画](implementation-plan.md) は P01〜P18 の順序・作業・受け入れを定める。作業 Status は複製しない。[概念構成](architecture.md) と [検証手順](verification.md) はそれぞれ関係の説明と観測方法を扱う。
 
 - **確認済みソース**：固定改訂の一次資料で確認したライブラリの Interface・Implementation。節内の URL が根拠である。
 - **計画 Interface／設計**：製品全体の型・関数・規則を示す代表断片。実際に作成した部分は以下の現存ソースへの参照と区別し、断片をコンパイル済みコードの転載として扱わない。
 - **限定検証**：固定二窓は build・幾何試験・実 GPUI/NSWindow の状態観測を実施し、2x主画面でガラス・シーン／設定操作・最小化と復帰・system appearance・全OSタイリングの成功回答を得た。診断を除去した shipping source に外部 AX／foreground CGEvent の E2E runner を実行し、設定・窓の lifecycle と、両窓からの ⌘Q による実 PID 消失・exit0 を確認した。過去の physical 終了報告と host 生存の不一致の原因特定とは区別する。別1x画面・倍率切替・負荷、音質、RT、物理同期、署名・公証・更新へ一般化しない。証拠は [検証記録](verification.md) に置く。
 
-ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界、P03 の雨ノブ・音量・独立消音・受理通知を作成した。P02 は外部 native 操作と雨・左右の光・シーン閉鎖中の音継続・再表示にユーザーの確認を得た。P03 は実標準出力で消音中の世界進行を観測したが、新しいフォーム操作の native smoke は画面ロックにより未完である。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
+ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界、P03 の雨ノブ・音量・独立消音・受理通知、P04 の岩と最終形の共通手動交差を作成した。P02 の雨・左右の光・シーン閉鎖中の音継続・再表示、P03 のフォーム操作・独立消音にはユーザーの確認を得た。P04 は実標準出力の寄与gains・途中再選択・消音中の世界とImpactを観測した。新しい選択フォームのnative観測とその限界は検証記録で区別する。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
 
 ## 予定ファイル構成
 
@@ -25,7 +25,7 @@
 | `src/audio/mod.rs` | `AudioController` worker、標準出力、config、build/play/pause、停止・復旧 |
 | `src/audio/render.rs` | `PreparedEngine`、型付き CPAL render、合成・混合・出力形式変換 |
 | `src/audio/world.rs` | `WorldClock`、`Movement`、滞在・PRNG・停止再開・表示と保存用の選択 |
-| `src/audio/mix.rs` | `GainRamp`、手動／自動 slerp、音量・消音・復旧・終了の独立 gain |
+| `src/audio/mix.rs` | 現存 `GainRamp` のN声slerp。手動durationはrender側が選ぶ。現存volume／muteの `OutputRamp` はrender私有。自動duration・復旧・終了は対応作業で実装 |
 | `src/audio/transport.rs` | `ControlMailbox`、`StatusMailbox`、`VisualRing` と固定容量の数値転送 |
 | `src/audio/lease.rs` | `EngineLease` の排他所有だけ。unsafe とその安全証明を閉じる |
 | `src/audio/timing.rs` | `StreamEpoch`、Mach 時刻、CPAL 再生予定時刻、DSP 因果遅延 |
@@ -99,7 +99,7 @@ pub trait Voice: Send {
     fn advance_world(&mut self, frame: VoiceFrame,
                      knobs: &[Normalized], events: &mut VisualWriter);
     fn render_sample(&mut self) -> [f32; 2];
-    // gainの0/正の境界だけ。古い音の状態をO(1)で無効化し、世界は保持。
+    // gainの0/正の境界だけ。固定poolのscalar／lazy validityで古い音を無効化し、世界は保持。
     fn set_contributing(&mut self, active: bool);
     // worker排他中だけ。世界・PRNGを保持し、DSPのrate依存storageを再準備。
     fn prepare_rate(&mut self, sample_rate: u32)
@@ -155,7 +155,7 @@ pub struct ControlState {
 | 時間変更 | settings revision だけ。進行中の予定を変更しない |
 | 窓表示、設定閲覧、移動／fit、focus | 音声 intent を発行しない。矩形変更だけ保存世代へ |
 
-現存 `ControlEdit` は volume／mute／手動選択／ノブの部分操作で、`AppModel` が最新端点へ適用してから全 snapshot を公開する。invalid index と revision exhaustion は変更前に失敗させ、途中の field を残さない。同じ対象の明示選択・ノブ操作も新しい manual intent とする。Ely の stable id は metadata と field の意味から固定し、設定窓の制御 cache は生成時だけ確保、離散更新時に既存 storage へ値を写す。Slider／Switch は processor、segment は listener で配送する。固定版 Ely が選択済み segment の change を抑止するため、wrapper の mouse bubble と clean Enter／Space の key pair で明示再選択を扱い、新しい segment の change は propagation を止めて二重操作を防ぐ。pending key の実 focus handle と blur subscription は設定窓が短く所有する。blur は draw 時の観測であり、同一 frame 内の任意の focus ABA を保証したとはしない。表示する metadata・現在端点・受理文を Group／Label の意味付き node にも渡し、別の testing route は設けない。
+現存 `ControlEdit` はvolume／mute／手動選択／ノブの部分操作で、`AppModel` が最新端点へ適用してから全snapshotを公開する。invalid indexとrevision exhaustionは変更前に失敗させ、途中のfieldを残さない。同じ対象の明示選択・ノブ操作も新しいmanual intentとする。Elyのstable idはmetadataとfieldの意味から固定し、設定窓の制御cacheは生成時だけ確保、離散更新時に既存storageへ値を写す。Slider／Switchはprocessor、現存Radio choiceのmouseとclean Enter／Spaceのkey pairは個別wrapper listenerで配送する。選択済みの再選択も含め、そのchoiceが捕捉したtyped targetへ一度だけ発行する。pending keyのtarget・実focus handle・blur subscriptionは設定窓が短く所有する。blurはdraw時の観測であり、同一frame内の任意のfocus ABAを保証したとはしない。Radioの実role／label／選択値と、metadata・現在端点・受理文の意味付きnodeを使い、別のtesting routeは設けない。
 
 ### ControlMailbox
 
@@ -187,9 +187,9 @@ scratch と committed state は事前確保した二組。失敗 snapshot を co
 
 ### StatusMailbox と失敗
 
-`StatusMailbox` は同じ全 numeric SeqCst snapshot 方式の逆方向である。payload は `ack_revision`、`ack_manual_revision`、`epoch`、`world`、`display_dominant`、`resume_target`、移動 phase、出力状態、終了 fade の attempt／deadline。文字列や gains 全体は入れず、gains は時刻付き `WorldVisualState` に入れる。writer は engine 所有中の callback、または凍結中の worker のどちらか一人だけ。main は一回読み、失敗時は直前状態を保持する。
+`StatusMailbox` は同じ全numeric SeqCst snapshot方式の逆方向である。全体の **計画payload** は `ack_revision`、`ack_manual_revision`、`epoch`、`world`、`display_dominant`、`resume_target`、移動phase、出力状態、終了fadeのattempt／deadline。文字列やgains全体は入れず、gainsは時刻付き `WorldVisualState` に入れる。writerはengine所有中のcallback、または凍結中のworkerのどちらか一人だけ。mainは一回読み、失敗時は直前状態を保持する。
 
-現存 P03 の `ControlReceipt` payload は `epoch`、`ack_revision`、`ack_manual_revision`、`display_dominant`、`world` のみ。`resume_target`／移動 phase／終了 fade は後続の consumer が必要となるときに追加する。未受理 mailbox は `None`、一回の整合読取だけを採用する。callback が新しい制御を採用すると、その世代をまだ公開していない印を立てる。以降の callback 途中失敗でも、排他移譲後の凍結 worker が当該世代を一度公開でき、旧受理を最新の受理に見せない。settings は現在 epoch の受理を離散更新時に表示するだけで、受理の世界時刻を常時進む表示にはしない。
+現存 `ControlReceipt` payloadは `epoch`、`ack_revision`、`ack_manual_revision`、`display_dominant`、`world` のみ。P04手動時の `display_dominant` は受領した最新targetであり、実混合のg²最大や聴感を表さない。`resume_target`／移動phase／終了fadeは後続consumerが必要となるときに追加する。未受理mailboxは `None`、一回の整合読取だけを採用する。callbackが新しい制御を採用すると、その世代をまだ公開していない印を立てる。以降のcallback途中失敗でも、排他移譲後の凍結workerが当該世代を一度公開でき、旧受理を最新の受理に見せない。settingsは現在epochの受理を離散更新時に表示するだけで、受理の世界時刻を常時進む表示にはしない。
 
 CPAL error callback は engine を借りず、**その stream epoch 専用の別 cell** にある固定 `ErrorCode` の atomic bitset を更新するだけ。複数の呼出元があり得るので snapshot writer と共用しない。worker は現在採用中の epoch の cell だけを消費し、旧 cell を新 stream に再使用しない。旧 monitor が遅れて DeviceChanged 等を発行しても、新出力の状態を変えない。worker が bitset と OS の現在状態を読んで出力状態を決める。`DeviceChanged`、`DeviceNotAvailable`、`StreamInvalidated`、`UnsupportedConfig`、`Xrun`、その他を固定分類し、RT で `format!`・ログ・UI・rebuild を行わない。エラーメッセージの生成は worker／main。確認済み：[CPAL ErrorKind](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/error.rs)、[error delivery](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/error_emit.rs)、[旧monitorの配送と寿命](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/coreaudio/macos/mod.rs#L274-L365)。依存内の try_lock を「依存も完全 lock 無し」と説明しない。
 
@@ -197,7 +197,7 @@ main への status 通知は非RT worker が mailbox を読み、output／domina
 
 ## 世界と移動の状態遷移
 
-**計画 Interface**：`WorldClock` は生成した sample についてだけ `1 / actual_fs` 秒進む。stream の frame counter、Mach、UI Task の経過時間とは別である。秒は f64、長時間加算は補償加算を使い、区間端点・滞在残り・交差残りも論理秒として保持する。
+現存 `WorldClock` は生成した sample についてだけ `1 / actual_fs` 秒進む。stream の frame counter、Mach、UI Task の経過時間とは別である。秒は f64、長時間加算は補償加算を使う。P04の現存 `Movement` は `Staying { current }`／`ManualCrossing { target }` だけを持ち、`GainRamp` が出発vectorと交差の論理秒を所有する。`target()` は受領直後の手動表示・再開対象、`phase()` は滞在0／手動交差1。保存consumerはまだ実装していない。以下はP07以後の自動滞在・自動交差を含む **計画Interface** であり、現存型の転載ではない。
 
 ```rust
 pub enum CrossingKind { Manual, Automatic }
@@ -235,7 +235,7 @@ pub enum Movement {
 
 ## 多声slerpと出力ゲイン
 
-**計画 Interface**：`GainRamp::retarget(&mut self, target: SituationIndex, duration: Duration)`、`advance_frames(&mut self, frames: usize, rate: u32)`、`gains(&self) -> &[f64]`。N 個の current／g0／接平面 vector は事前確保する。duration は手動／自動の規則を呼出側が SPEC から選び、声の名前を判断しない。
+**現存P04 Interface**：`GainRamp::retarget(&mut self, target: SituationIndex, duration: Duration)`、`advance_frames(&mut self, frames: usize, rate: u32)`、`gains(&self) -> &[f64]`。N 個の current／g0／接平面 vector は事前確保する。durationは手動／自動の規則を呼出側がSPECから選び、声の名前を判断しない。現存consumerはmanual revision更新時だけSPECの手動durationを渡し、volume／muteではretargetしない。view公開時だけ事前確保のf32配列へ射影する。
 
 非負の unit vector g0 から target の one-hot e_j へ、θ=acos(clamp(g0[j],0,1)) として
 
@@ -246,7 +246,7 @@ g(u)=\frac{\sin((1-u)\theta)}{\sin\theta}g_0+
 
 θ=0 は既に target だけなので不要交差を開始しない。開始は **その瞬間の g**、第三声を選んでも一声へ畳まない。等パワー二声は θ=π/2 の特殊ケース。最新選択で毎回 duration を取り直し、旧選択を待たせない。終端は正確に e_j、非 target は正確に0へ確定してサンプル生成を止める。
 
-retarget 時に `v=(e_j-cosθ*g0)/sinθ` を作り、`g=g0*cosφ+v*sinφ` を使う。実装は近い target で `acos(1)` の丸めにより不要交差と誤認しないよう、`c=g0[j]`、`s=hypot` で求めた非target成分の norm、`θ=atan2(s,c)` とする（数学的に上式と同じ）。`s==0` だけが不要交差。接平面は `v[j]=s`、`v[i≠j]=-c*g0[i]/s` と計算して target の減算 cancellation を避ける。sample の φ 増分について cosΔ／sinΔ を区間／rate 準備時に一度計算し、rotation recurrence で進める。毎 sample の acos／sin を避ける。区間境界で φ から recurrence の誤差を補正し、末端で one-hot にする。丸めに由来するごく小さい負値だけ0へ戻して norm を補正し、操作に由来する正の寄与を tolerance で先に捨てない。rate 変更では残り秒から新 Δ を計算し、旧 frames を新 rate で読み替えない。`advance_frames(0,rate)` は不変、rate0 は準備失敗で到達不可。
+retarget時に `v=(e_j-cosθ*g0)/sinθ` を作り、`g=g0*cosφ+v*sinφ` を使う。現存実装はcurrentをその場で変えず、複写した出発vectorのnormをintentごとに一度補正する。近いtargetで `acos(1)` の丸めにより不要交差と誤認しないよう、`c=g0[j]`、`s=hypot` で求めた非target成分のnorm、`θ=atan2(s,c)` とする（数学的に上式と同じ）。`s==0` だけが不要交差。接平面は `v[j]=s`、`v[i≠j]=-c*g0[i]/s` と計算してtargetの減算cancellationを避ける。sampleのφ増分についてcosΔ／sinΔと `1/rate` を区間／rate準備時に一度計算し、rotation recurrenceで進める。毎sampleの三角関数・sqrtによる全vector再正規化はしない。固定区間境界でφからrecurrenceの誤差を補正し、末端でone-hotにする。丸めに由来するごく小さい負値だけ0へ戻し、操作に由来する正の寄与をtoleranceで先に捨てない。rate変更では経過・残り秒を保持して新Δを計算し、旧framesを新rateで読み替えない。`advance_frames(0,rate)` は不変、rate0は準備失敗で到達不可。
 
 出力は次の独立 gain を掛ける。
 
@@ -257,11 +257,11 @@ output = voice sum * volume_gain * mute_gain * recovery_gain * shutdown_gain
 
 volume／mute は別端点を持つ有限長 ramp、0・1へ正確に到達する。mute 中の volume 操作は解除にならない。復旧 gain は世界と mute を変えず出力だけ滑らかに戻す。shutdown gain は正常終了成功後だけ下げ、保存失敗では開始しない。voice calibration は試聴で決め、設定 volume として保存しない。
 
-現存 P03 の `OutputRamp` は `PreparedEngine` 内の私有部品で、actual rate に応じた20msの smoothstep を混合後の volume／mute に独立適用する。これは初回実装定数であり製品の新しい数値要件ではない。同じ端点は ramp を再開せず、途中の編集は現在値から追従し、有限 sample 数で端点を正確に確定する。出力が0でも声の世界・視覚イベント・寄与 gain は進める。復旧／終了 ramp と N 声交差は未実装であり、この部品をそれらの代用品にしない。
+現存 `OutputRamp` は `PreparedEngine` 内の私有部品で、actual rateに応じた20msのsmoothstepを混合後のvolume／muteに独立適用する。これは初回実装定数であり製品の新しい数値要件ではない。同じ端点はrampを再開せず、途中の編集は現在値から追従し、有限sample数で端点を正確に確定する。出力が0でも声の世界・視覚イベント・寄与gainは進める。N声交差は別の `GainRamp` が所有する。復旧／終了rampは未実装であり、この部品をそれらの代用品にしない。
 
 Σg²=1 は独立信号の power の数学的規則であり、波形相関・実 peak・聴感一定の証明ではない。混合は f64 積算、最終出力は finite を保つ音源設計・level 校正で収める。整数出力変換時は許容範囲へ clamp するが、この clamp を強い peak の音質修正や合格根拠に使わない。非有限発生を黙って通常音扱いせず固定 DSP fault を通知し、該当出力を無音として停止・調査する。これは未成立の DSP を隠す fallback ではない。
 
-親の throwaway 数学モデルで slerp の norm／連続 retarget を観測したが、アプリ未実装であり、実波形・RT・音質の検証ではない。境界と多声途中操作の実装・受け入れは [実装計画](implementation-plan.md) と [SPEC の切り替え](../SPEC.md#切り替えと途中操作) に従う。
+初期設計時の親のthrowaway数学モデルはslerpのnorm／連続retargetを観測したが、当時アプリは未実装であり実波形・RT・音質の証拠ではなかった。現存P04の数学境界・実声callback・実CPALの観測と限界は [検証記録](verification.md) に分けて残す。実三環境の重なり・最大三声の統合受け入れは [実装計画のP06](implementation-plan.md#p06-現在の多声混合から手動選択へ滑らかに寄せる)、規則は [SPECの切り替え](../SPEC.md#切り替えと途中操作) に従う。
 
 ## 合成とノブ曲線
 
@@ -288,6 +288,10 @@ pan は event と共通の normalized x から equal-power stereo を作る。y�
 | deep air | bubble Poisson 頻度と高い成分を線形増加。短い共鳴／pitch 下り包絡を bubble に用いる | air0 は bubble と高い air 成分だけ0、低い響きは独立して残す |
 
 全声は dry 経路と開始前に準備した stereo `RestartableReverb` の wet 経路を持つ。量0では、声自体が寄与中なら既存 tail を自然に終え、不連続に捨てない。声の寄与が正確に0へ到達したときだけ、無音の状態で音の履歴を無効化する。Knob smoothing は有限時間の滑らかな補間（端点の傾き0）で、SPEC の目安に沿う実装 ramp を使う。asymptotic smoother の微小な非ゼロ値で永遠に birth を続けない。量0では追従が終わった sample から gate が0、天候／息も0 gateを解除できない。共通 volume と mute も有限到達する。
+
+現存P04の岩は固定24衝突slot、各slotの低い三つの `Resonator<f64,U3>` と有限包絡、左右独立の色付きgated rolling noiseを持つ。低周波／高rateでpole係数を失わないようmodal計算をf64にし、FunDSPの第三入力へ `Q=center/bandwidth` を渡す。短い部屋は既存 `RestartableReverb`、DC除去とdry遅延の確認は実声の準備経路で行う。factoryは対応rateを検査し、変更時はworkerがrate依存storageを再準備する。量・大きさ・硬さの曲線はrock私有、UI／menuは登録metadataとtyped indexだけを使う。係数・ノブinitialはP13未確定のcandidateである。
+
+非寄与の雨／岩は新規Poisson入場を止め、既存粒の論理age・ノブ追従・息／天候の時間更新とPRNG状態を保持する。寄与境界で古い粒のaudio eligibilityとDSP履歴を無効化し、再入場で古い音を復活させない。global mute／volume0はこの非寄与状態へ変換しない。settingsは現存Ely Radioの実role／label／選択状態を持つ個別choiceを登録metadataから生成し、mouseとSpace／Enterのreleaseはそのchoiceのtyped targetへ届く。受理表示は「手動の表示対象」であり、g²最大・実聴感dominantとは呼ばない。
 
 ### 音質の確定方法
 
@@ -343,7 +347,7 @@ default host の `default_output_device()` をそのまま使う。列挙で同 
 
 callback は最初に全 output を silence にし、lease 取得失敗／inactive epoch ならそのまま返す。実 frame は `data.len()/channels`。partial channel の余りは silence のまま、固定 callback 長を仮定しない。必要な固定 scratch 単位へ分割するが、world frame offset は全区間で連続。mono は `(L+R)/2`、stereo は L/R、3ch 以上は最初の L/R だけで残り silence。機器設定と OS volume を変えない。I16 変換は `FromSample<f32>` の型付き経路を使う。
 
-各 sample の順序は、最新 snapshot の区間適用→世界／ノブ／粒包絡 advance→寄与 voice の tick→slerp と共通 gain を同じ sample 時刻で混合→形式変換→時刻付き event／state の固定 slot 公開である。終了 sample と gain の端点定義を全処理で揃える。
+現存P04の各sampleは、区間の最新snapshot適用後にslerpを1sample進め、実gainsの正／0境界をvoiceへ通知し、同じsampleの世界時刻でノブ・粒包絡・eventをadvanceする。正の寄与voiceだけtickし、f64で混合して独立volume／muteを掛け、形式変換と時刻付きevent／state公開を行って世界clockを1sample進める。終了sampleとgain端点をこの順序で揃える。将来の復旧／終了gainを追加しても世界・寄与と出力gainを混同しない。
 
 非寄与 voice は world update だけで tick しない。音の履歴は上記 `set_contributing` の境界で無効化し、数分後の再選択で以前の残響を再生しない。消音・volume0では world／イベントを必ず進め、寄与 voice の wet／filter tick を維持して tail の論理時間を止めず、出力計算／変換の不要な部分だけ省く。寄与と消音を同じ active flag にしない。
 
@@ -477,7 +481,9 @@ pub struct VisualEvent {
 
 VisualRing は queue を reader が空けるまで producer が待つ方式にしない。固定 slot を serial modulo capacity で上書きし、**全 payload atomic＋各 slot sequence＋global publish serial** を SeqCst で公開する。state の N 配列も開始前確保した atomic slots。reader は slot の before／payload／after が同一 even、かつ必要な serial・epoch に一致する場合だけ採用する。slot 読取中の上書きは視覚だけ省略。unsafe な plain-data seqlock は使わない。
 
-callback が state を公開するのは視覚 cadence または phase 変更時で十分、全 sample を state queue にしない。cadence は world sample で数え、timer ではない。main の state history は現在時刻の前後 state を持ち、同 epoch／連続 phase の時刻で g² 寄与と息を補間する。phase を跨いだ選択を数値で補間しない。未来 state しかなければ最後の eligible state（無ければ空）を保持する。到来済み state が不足しても最新の未来 state を先に見せない。状態を外挿して新しい粒や世界を作らない。
+callbackがstateを公開するcadenceはworld sampleで数え、timerではない。現存P04のmain cacheは、今のMach時刻以下で受け入れた最新のeligible stateと生存eventを保持する。粒opacityは同じcacheの所属voice gainをraw strengthと寿命fadeへ掛け、gain0ならfade／半径／GPU paint計算前に省く。global volume／muteは掛けず、凍結では既に受け入れたgainsとfade時刻を保持する。未来stateしかなければ最後のeligible state（無ければ空）を保持し、未到来stateを先に見せない。
+
+P08の **計画拡張** では、視覚cadenceまたはphase変更時にstateを公開し、全sampleをqueueにせず、mainのstate historyで現在時刻の前後を持つ。同epoch／連続phaseの時刻でg²寄与と息を補間し、phaseを跨いだ選択は数値補間しない。状態を外挿して新しい粒や世界を作らない。現存P04のeligible最新cacheを、この補間の実装済み証拠とは呼ばない。
 
 ### 初回実装容量とfullの意味
 
@@ -725,19 +731,19 @@ HTTPS Pages と Releases redirect、公開権限、実初回取得、隔離2vers
 | [成功条件](../SPEC.md#成功条件) | 合成・窓・時計・配布、未検証gate | P13・P17・P18／ユーザー試聴、実同期、下限OS signed DMG |
 | [対象にしないもの](../SPEC.md#対象にしないもの) | Module 分離、DSP、固定窓、手動更新policy | 全作業／除外を増やさず対象外を実装しない review |
 | [体験](../SPEC.md#体験) | 操作のcoherency、世界と移動 | P03・P07／UI 操作・virtual time |
-| [切り替えと途中操作](../SPEC.md#切り替えと途中操作) | 多声slerp、Voice 準備 | P06／第三声・連打・端点・実音と無確保経路 |
+| [切り替えと途中操作](../SPEC.md#切り替えと途中操作) | 多声slerp、Voice 準備 | P04・P06／最終手動規則と二声実選択、第三声・連打・端点・実音と無確保経路 |
 | [窓](../SPEC.md#窓) | 固定GPUI窓、scene paint | P01・P08／ガラス、close／reopen、可視 Task |
 | [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) | 固定GPUI、AppKit fit、最新 bounds | P01・P11／両窓固定・scroll・ゼロ領域・world 不変 |
 | [高DPIと描画負荷](../SPEC.md#高dpiと描画負荷) | 高DPIと確保コスト、視覚容量 | P11・P18／対応倍率の物理寸法・memory・WindowServer |
 | [基盤のサイズ制約と既知のコスト](../SPEC.md#基盤のサイズ制約と既知のコスト) | raw制約、open前fit、確保コスト | P01・P11・P18／desktop tiling固定・GPUI再確保の観測 |
 | [復元](../SPEC.md#復元) | AppKit座標、保存 | P09・P11／UUID喪失・画面外・過大保存の補正 |
-| [メニュー](../SPEC.md#メニュー) | AppModel／Reducer、終了、policy | P01・P03・P07・P12・P15／menu と設定の一貫性 |
+| [メニュー](../SPEC.md#メニュー) | AppModel／Reducer、終了、policy | P01・P03・P04・P07・P12・P15／menu と設定の一貫性 |
 | [音と絵](../SPEC.md#音と絵) | 合成、world、時計 | P02・P04・P05／実合成、独立成分、同一event |
 | [視覚イベント](../SPEC.md#視覚イベント) | VisualRing、full、hidden復帰 | P02・P08／音と視覚fullの独立、mute中・再表示 |
 | [再生予定時刻](../SPEC.md#再生予定時刻) | 三つの時計 | P08・P10・P18／epoch、DSP metadata、実音光差 |
 | [シチュエーション](../SPEC.md#シチュエーション) | Registry／Voice、予定配置 | P02・P04・P05／module＋登録、名前分岐なし |
 | [初期のシチュエーションとノブ](../SPEC.md#初期のシチュエーションとノブ) | 合成とノブ曲線、音質確定 | P04・P05・P13／端点、試聴してinitialを確定 |
-| [設定窓](../SPEC.md#設定窓) | controlled Ely、dominant | P01・P03・P07／実フォーム、閲覧はintent無し |
+| [設定窓](../SPEC.md#設定窓) | controlled Ely、dominant | P01・P03・P04・P07／実フォーム、閲覧はintent無し |
 | [ボリューム設定](../SPEC.md#ボリューム設定) | Reducer、独立出力gain、保存 | P03・P09／mute独立・復元・クリックなし |
 | [時間設定](../SPEC.md#時間設定) | Reducer、Movement、保存正規化 | P07・P09／相互追従、次回適用、同値 |
 | [消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止) | EngineLease、復旧、世界時計 | P10／sleep・機器切替・残り秒・rate再準備 |
@@ -748,7 +754,7 @@ HTTPS Pages と Releases redirect、公開権限、実初回取得、隔離2vers
 | [配布前提](../SPEC.md#配布前提) | credentials と技術gateの分離 | P14／実権限・下限OS・公開鍵、準備は今回実行無し |
 | [構成と Interface](../SPEC.md#構成と-interface) | 予定配置、全計画 Interface | 全作業／責務・所有・失敗の review |
 | [依存の選定](../SPEC.md#依存の選定) | DSP／CPAL／GPUI実Interface、根拠 | P01・P02・P15／実lock・link・採用経路 |
-| [スレッドと資源](../SPEC.md#スレッドと資源) | coherency、RT、EngineLease | P02・P06・P08・P10・P18／所有競合・alloc/drop/wait/I/O |
+| [スレッドと資源](../SPEC.md#スレッドと資源) | coherency、RT、EngineLease | P02・P04・P06・P08・P10・P18／所有競合・alloc/drop/wait/I/O |
 | [検証条件](../SPEC.md#検証条件) | 対応表、未検証gate | P18／全要件の実証拠と残る制約 |
 | [音と操作](../SPEC.md#音と操作) | 合成、slerp、coherency | P13・P18／各声試聴・最大実経路 |
 | [窓・高DPI・同期](../SPEC.md#窓高dpi同期) | 窓、時刻、容量、復旧 | P11・P18／対応画面・資源・音光・停止復帰 |

@@ -1,4 +1,5 @@
 mod rain;
+mod rock;
 mod synthesis;
 
 use std::{error::Error, fmt, ops::Range};
@@ -145,7 +146,7 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Result<Self, VoicePreparationError> {
-        Self::validate(vec![rain::definition()])
+        Self::validate(vec![rain::definition(), rock::definition()])
     }
 
     fn validate(definitions: Vec<SituationDefinition>) -> Result<Self, VoicePreparationError> {
@@ -291,5 +292,57 @@ mod tests {
             voice.prepare_rate(0),
             Err(VoicePreparationError::InvalidRate)
         ));
+    }
+
+    #[test]
+    fn p04_smallest_soft_rock_still_produces_finite_audio_from_its_real_voice() {
+        use crate::audio::{
+            timing::{MachNanos, StreamEpoch, WorldSeconds},
+            transport::VisualRing,
+        };
+
+        let registry = Registry::new().unwrap();
+        let index = registry.resolve("rock").expect("rock must be registered");
+        let definition = &registry.definitions()[index.get()];
+        let mut voice = registry
+            .prepare_voice(
+                index,
+                VoicePreparation {
+                    sample_rate: 8_000,
+                    seed: 137,
+                    grain_capacity: definition.grain_capacity,
+                },
+            )
+            .unwrap();
+        voice.set_contributing(true);
+        let ring = VisualRing::new(64, registry.definitions().len());
+        let knobs = [Normalized::ONE, Normalized::ZERO, Normalized::ZERO];
+        let mut energy = 0.0_f64;
+        for sample in 0..16_000 {
+            let world = WorldSeconds::new(sample as f64 / 8_000.0).unwrap();
+            let mut events = VisualWriter::new(
+                &ring,
+                StreamEpoch::new(1).unwrap(),
+                index,
+                world,
+                MachNanos::new(sample * 125_000),
+            );
+            voice.advance_world(
+                VoiceFrame {
+                    world,
+                    delta_seconds: 1.0 / 8_000.0,
+                    sample_rate: 8_000,
+                },
+                &knobs,
+                &mut events,
+            );
+            for value in voice.render_sample() {
+                assert!(value.is_finite());
+                assert!(value.abs() < 1.0);
+                energy += f64::from(value).powi(2);
+            }
+        }
+        assert!((energy / 32_000.0).sqrt() > 1e-5, "size=0 is not mute");
+        assert_eq!(voice.prepared_delay().unwrap().get(), 0.0);
     }
 }

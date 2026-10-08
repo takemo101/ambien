@@ -7,6 +7,7 @@ pub(crate) struct Normalized(f32);
 
 impl Normalized {
     pub(crate) const ZERO: Self = Self(0.0);
+    #[cfg(test)]
     pub(crate) const ONE: Self = Self(1.0);
 
     pub(crate) const fn new(value: f32) -> Option<Self> {
