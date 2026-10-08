@@ -237,6 +237,17 @@ impl WorldClock {
         self.sample_rate
     }
 
+    /// Worker-owned preparation changes only future sample steps. Elapsed
+    /// seconds and the Kahan residual are independent of the output rate.
+    pub(crate) fn prepare_rate(&mut self, sample_rate: u32) -> Result<(), VoicePreparationError> {
+        if sample_rate == 0 {
+            return Err(VoicePreparationError::InvalidRate);
+        }
+        self.sample_rate = sample_rate;
+        self.step = 1.0 / f64::from(sample_rate);
+        Ok(())
+    }
+
     pub fn advance_sample(&mut self) -> WorldSeconds {
         let corrected = self.step - self.compensation;
         let sum = self.elapsed.get() + corrected;
@@ -258,6 +269,32 @@ mod tests {
 
     fn index(value: usize, count: usize) -> SituationIndex {
         SituationIndex::from_index(value, count).unwrap()
+    }
+
+    #[test]
+    fn rate_preparation_preserves_world_seconds_and_next_sample_uses_new_rate() {
+        let mut clock = WorldClock::new(48_000).unwrap();
+        for _ in 0..36_000 {
+            clock.advance_sample();
+        }
+        let frozen = clock.now();
+        assert_eq!(frozen, at(0.75));
+        for rate in [44_100, 48_000, 44_100] {
+            clock.prepare_rate(rate).unwrap();
+            assert_eq!(clock.now(), frozen);
+            assert_eq!(clock.sample_rate(), rate);
+        }
+        assert_eq!(
+            clock.prepare_rate(0),
+            Err(VoicePreparationError::InvalidRate)
+        );
+        assert_eq!(clock.now(), frozen);
+        assert_eq!(clock.sample_rate(), 44_100);
+        assert!((clock.advance_sample().get() - (0.75 + 1.0 / 44_100.0)).abs() < 1e-15);
+        for _ in 1..55_125 {
+            clock.advance_sample();
+        }
+        assert_eq!(clock.now(), at(2.0));
     }
 
     #[test]

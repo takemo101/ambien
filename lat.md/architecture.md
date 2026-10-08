@@ -29,7 +29,7 @@
 - [体験](../SPEC.md#体験)、[切り替えと途中操作](../SPEC.md#切り替えと途中操作)、[シチュエーション](../SPEC.md#シチュエーション)。
 - [音と絵](../SPEC.md#音と絵)、[消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止)、[スレッドと資源](../SPEC.md#スレッドと資源)。
 - [構成説明](../docs/architecture.md)で操作から音と絵への進行、世界停止と無音の違い、時計の対応づけを読む。[検証手順](../docs/verification.md)で必要な観測を確認する。
-- 現存する登録・雨／岩／深海合成は [`src/situations/`](../src/situations/)、標準出力・sample世界時計・手動／自動slerp・到着基準滞在／有限抽選・atomic制御／表示とresume配送・epoch leaseは [`src/audio/`](../src/audio/)、型付き部分操作・対時間補正・manual ack優先の表示規則は [`src/controls.rs`](../src/controls.rs)。実clock観測とvirtual-time境界は別の証拠であり、sourceの存在を音質・物理同期の受け入れに置き換えない。
+- 現存する登録・雨／岩／深海合成は [`src/situations/`](../src/situations/)、標準出力・sample世界時計・手動／自動slerp・到着基準滞在／有限抽選・atomic制御／表示とresume配送・epoch leaseと同一engineの凍結／再準備／新stream復旧は [`src/audio/`](../src/audio/)、型付き部分操作・対時間補正・manual ack優先の表示規則は [`src/controls.rs`](../src/controls.rs)。実clock観測とvirtual-time境界、制御signalと実OS通知は別の証拠であり、sourceの存在を音質・物理同期の受け入れに置き換えない。
 
 操作と表示の入口は [[architecture#Scene and settings]]。要件は [[architecture#Specification]] に戻る。
 
@@ -61,6 +61,7 @@ macOS の窓制約・アクセシビリティと、Sparkle による手動更新
 - [基盤のサイズ制約と既知のコスト](../SPEC.md#基盤のサイズ制約と既知のコスト)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
 - [配布と更新](../SPEC.md#配布と更新)、[アプリ内更新](../SPEC.md#アプリ内更新)、[配布前提](../SPEC.md#配布前提)。
 - [参考資料](../docs/references.md)で選定に対応する一次資料を読み、[検証手順](../docs/verification.md)で下限 OS・配布物・実更新の証拠を確認する。
+- [`src/platform/macos.rs`](../src/platform/macos.rs) の所有 NSWorkspace sleep/wake observer と、stream から独立した CoreAudio default/alive/rate/stream listener を [詳細設計](../docs/detailed-design.md#出力停止と復旧) から追う。native callback は固定 signal だけを渡し、app owner と音声 worker がそれぞれ登録解除する。実機スリープ・機器変更と依存内部の全資源回収は [検証記録](../docs/verification.md) で別 gate として読む。
 
 保存の責任は [[architecture#Persistence]]、継続条件は [[architecture#Specification]]。
 

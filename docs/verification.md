@@ -859,3 +859,61 @@ POSIX mode故障は自分のfixtureだけ。通常保存失敗は音声hostを�
 
 parentの `npm run check:docs` はPASS（全体0.50秒／本体99ms、本節追加前）。Lat参照／graphの検査であり、保存の実動作や製品全体の受け入れではない。既存 `No init version recorded` 警告を保持し、init／hook／認証設定を変更していない。temporary startup Swiftと旧所有PR messageを除去し、private failure report／candidate log／fixtureだけを保持した。
 
+## P10 同一 engine の凍結・新出力 epoch・復旧候補
+
+本節は P10 の実装と観測済み範囲の記録。実機スリープ・機器変更・出力使用不能の受け入れ、独立レビュー、通常 PR merge は未完了であり、P10 全体の合格を意味しない。ユーザー指定により、次の P10 PR を必要な受け入れ・レビュー後に通常 mergeし、GitButler 同期・mikan 結果反映を終えた時点で開発を停止する。P11以降へ着手しない。
+
+### 実装と失敗前の証拠
+
+対象は `src/audio/{mod,render,lease,timing,world}.rs`、`src/app.rs`、`src/platform/macos.rs`、直接依存と実 lock の型付き OS 境界。app owner の NSWorkspace observer と、audio worker の独立 CoreAudio listener が固定 signal を渡す。transport は初回準備前から生存し、復旧も同じ engine の論理状態を保持する。旧 lease の永久 close／排他回収、新 cell／error cell、rate 必要時だけ準備、部分準備失敗の全声再検査、frozen latest receipt と独立 recovery gain を使う。OS／UI／I/O を callback へ持ち込む hook はない。通常 sleep／再準備と明示失敗を区別し、cleanup 失敗を同じ試行の再開で隠さない。
+
+実装前の actual-source example は、実標準出力を volume0／mute true で開始し、固定 error cell の DeviceChanged を発行した。5.80秒／exit1：epoch1 world0.5108390022675737、Failed world0.5340589569160998のまま3秒内に新 Runningへ戻らなかった。これは復旧 consumer が無い REDであり、実機器変更をした証拠ではない。
+
+最初の統合 chain84.60秒は178テストPASS40.21秒、strict all-target Clippyで未使用のtransport getter／lease gate読取が失敗し、以後のbuild／smokeは未実施。obsolete getterを削除して in-module fixture consumer を実 fieldへ移行し、出力世代は実 lease gate から得る。Rust ASTがmacro内getterを扱わず、親が現行compilerの該当assertionを修正した。
+
+親の consumer-visible regression は、準備した候補 epoch152 の receipt が失敗後の保持 epoch151 の最新操作を隠す経路を捕まえた。最初の1.12秒はlocal ControlEdit importと上記macro getterのcompile失敗で、behavior REDではない。修正後2.52秒／exit101で実 assertionがleft152／right151。boolean「公開済み」を `receipt_epoch: Option<StreamEpoch>` に置き換え、成功公開した世代を記録し、保持世代が変われば変更なしでも再発行する。
+
+### 統合検査と制御signalでの実stream
+
+Darwin27 arm64、Rust1.95／Swift6.4。fmt → `cargo test --locked --offline` → strict all-target Clippy → locked/offline build → actual-source temporary example の chain48.81秒PASS。179テスト39.97秒、Clippy1.20秒、build2.10秒。同率の声／世界event連続、rate変更中の残り滞在／交差とworld保持、frozen mute／zero volumeの先頭漏れ、別epochの遅延／host原点、新旧callbackの排他とworker DSP drop、部分rate準備失敗からの再検査、上記失敗候補 receipt を含む。決定的試験を実機器変更・音質・全framework RTの証拠へ拡張しない。
+
+実 CPAL default出力の mute true／volume zero の例：epoch1 world0.5108390022675737 → controlled DeviceChanged → new Running2 world0.5456689342403628。遅延した旧error cellのDeviceChanged／StreamInvalidatedを無視し、native signalで現在fingerprintを再読取した不変通知はepoch2のまま。controlled sleepはworld0.9984580498866213を400ms保持し、その間の最新手動変更ack4/1を受理。controlled wakeは実stream3／world1.0100680272108844で最新操作を継続した。実 listener の query／登録解除とworker終了を通ったが、Macをsleepした観測ではない。helperはOS既定出力／音量のsetterを呼ばない一方、実解決CPALの通常buildは内部でbest-effort physical format／rate準備を行うため、OS property全bytes不変をこの記録から宣言しない。
+
+### 実 GPUI host／control の影響確認
+
+同じ shipping binary SHA256 `6de5df265ffdd2726b305fd3308fd220c64f394a3634aeefb5b11bd73c96bdf8` で native `lifecycle` → `controls` の chain15.84秒PASS。reportsは `target/native-e2e/run-855B8B11-3F33-4A13-BFA7-CFADE7E55279/report.json` と `run-21612C13-7D68-4F77-985E-9DEE67AAB339/report.json`。前者はzero-window再生成とmenu Quit／両窓foreground Cmd-Q、owned PIDs14129／14459／14464が正常exit0。後者は実ノブ端点、選択Space／Enter／mouse、独立muteとvolume0/10/20、scroll後のfocus／AX identity、receipt9/5、settings解除と20%保持、再生成とQuit。mainの native power observer 登録を含む実 app 経路の限定的な成功で、実 sleep通知の配送・設定失敗表示・出力なし UI／実rate変更・全native caseの再受け入れではない。
+
+### 実解決依存の独立寿命診断
+
+Cargo.lock の CPAL0.18.2／coreaudio-rs0.14.2の実 rlib を用いた private throwaway Rust diagnostic。AudioUnit probe1.51秒PASS：未再生DefaultOutput unitの実native callback登録→unit dropを8回、各 capture Drop1回。実stream formatは44100／F32／non-interleaved／2ch。i16 data型との本当のformat mismatchを8回拒否し、unit drop前からcapture Drop1回。play／physical format setter／rate setter／input accessはない。
+
+native property登録失敗を安全な未再生AudioFilePlayer generatorで狭める追加試行0.73秒／exit1は、constructorのAudioUnit InvalidElementでcallback登録に到達しなかった。default unitの8組は再実行したが、追加経路をnative callback登録失敗の再現と扱わない。依存ソース上のBox→raw→set_property→成功後だけowner記録という失敗時の回収限界は残る。無効pointer／二重dispose／OS機器設定による故障を注入していない。
+
+独立CPAL probeは最初のborrowed StreamConfig APIが実0.18.2のby-value APIと不一致で0.12秒compile失敗。正しいAPIへ直し2.91秒PASS：実default 2ch／44100／Default bufferのゼロ出力streamをplay40ms→drop、8回とも出力／errorの2captureが既存2秒deadline内に解放。実validationをhardware setter前で失敗させるchannels0の8回は「channel count must be at least 1」で拒否し、2captureとも解放。thread join／thread数／全allocatorやVM残留を測ったものではなく、post-Box native登録失敗や依存全資源回収を保証しない。アプリengineの排他回収はこれらのclosure Dropや一定待機を根拠にしない。
+
+### 残る gate
+
+実NSWorkspace sleep/wake、機器抜差し／標準出力変更／実rate変更と出力使用不能からの自動復旧、進行中の滞在／交差の実経路、実シーンの停止／新epoch継続、消音保持・滑らかな可聴復帰、古い光・物理同期は未確認。OSのsleep／出力選択は本人が行い、AIの無断設定変更や合成通知で代用しない。依存全monitor/AudioUnit/closureの回収は上の限定診断から合格にしない。独立レビュー・文書検査・追加の実観測を追記してから、P10の受け入れと通常mergeを判定する。
+
+### 独立レビュー3指摘の是正と再観測
+
+最初の Spec／Standards read-only review は両方incorrect／confidence0.94。Specの2P2は「initial refresh失敗でglobal listenerを解除してworkerが永久終了」と「CPALのid/rate/channel/sample型だけの比較では監視対象stream／physical／virtual format変更を捨てる」。Standardsの1P2は初期 `try_read_into(latest)` のfalse無視で、old target／new manual revisionのtorn snapshotをcommitして最新選択を永久に受け取り済みと誤認する。reviewerによる検査・実起動・編集はない。Spec初回公開payloadのfindings欠落はfollowupで正確な2件を取得した。
+
+親は該当経路をsourceで確かめ、listener設置だけのconstructorへ切り分け、失敗時もqueryを行うworkerとglobal／device guardを保持した。obsolete initialization-cleanup variantを削除。current native snapshotはdevice／nominal rate／buffer layout／stream IDs／各virtual・physical descriptorまで比較し、unchanged currentに対する旧通知は再準備しない。初期controlsへの危険なmailbox読取は削除し、起動時の整合stateと既存engine scratchの成功commitを使う。新しい互換経路・タイマーretry・RT queryはない。
+
+是正後 fmt → full179テスト39.93秒 → strictall-targetClippy1.89秒 → locked/offlinebuild1.80秒、chain46.76秒PASS。shipping SHA256は `6edc6a20e27b4da6c5f45b5b73596a0e1949a4bb09c141497dabe7f788c91e80`。同SHAのnative lifecycle／controls chain13.15秒PASS、reports `run-4FE82C2B-9184-425E-84B9-770FDF01E370`／`run-0026248B-FD2D-4AA4-9960-2D2CA1D125A1`。owned PIDs17145／17298／17307は正常Quit0、実フォーム／独立mute・volume／受理／再生成の契約は維持した。実OS sleep／hardware format transitionの代用ではない。
+
+別のactual-source review smokeは一度、OutputStatusの未実装Debugをtemporary formatterに使い0.76秒compile失敗した。shippingへDebugを追加せず、実text APIへ修正して4.08秒PASS（compile1.11秒）：起動直後64回の実mailbox編集からepoch1/world0.5108390022675737、ack66/64、最新深海を受理。これはtorn readを決定的に強制したREDではない。fullnative fingerprintを実5回読み直しepoch1を保持、controlled DeviceChangedで2へ、遅延旧StreamInvalidatedと不変native通知を無視。controlled sleep中world1.2770975056689342を400ms保持して最新岩を受理、wakeの実stream3/world1.2887074829931973、ack67/65とworker正常終了。追加source probeは観測後に除去した。native query自体の故障／raw property登録失敗／実hardware format変更を成功に数えない。
+
+本人の操作を要する実機gateの準備としてread-only `system_profiler SPAudioDataType -json` 0.25秒成功。現在defaultはBluetooth Creative Stage SE mini／44100Hz、利用可能なDisplay／U270CA／Mac miniのスピーカーは48000Hz。microphoneは選択・使用していない。AIは出力選択や接続／OSsleepを変更していない。本人の実操作・観測と最終独立再レビューは未完了のため、P10をcompleted／mergeしていない。
+
+### 最終独立再レビューと本人操作の準備
+
+同じbaseからのcomplete-source再レビューは、Spec51.0秒correct／findings0／confidence0.93、Standards44.3秒correct／findings0／confidence0.92。3指摘の是正、新native snapshotのworker消費、coherent初期controls、lease／native owner／既存UI consumerを確認した。両者とも検査・実起動なし。実OS／実hardware／聴感・同期・依存全資源のgateをsource判定へ拡張せず、P10後の停止を保持した。
+
+親の最終 `cargo fmt --all -- --check` 0.45秒PASS。それ以前のdoc／Lat検査0.50秒PASS（111ms）は当時の参照構造だけの証拠で、追記後は再検査する。actual-source Cargo examplesと独立診断source／親の2診断binaryを除去し、native evidenceと通常build artifactsを保持した。
+
+本人の実機操作用に、未起動の新規owned private HOMEを用意した。stateはversion1／mute true／volume0を最初のsample前から適用、wander/timeは観測fixture1/1分／1秒で採用presetではない。通常HOME／既定出力／音量／TCCは変更しない。BSD chmodへmode後の`--`を渡した最初の0.07秒は失敗しfileの後続chmodは未実施、対象4directoriesが700になったことをstatで観測して、飛ばされたstateだけ600へ設定0.03秒成功。candidateはまだ起動していない。
+
+private read-only AX observerのCLI `--help` はSwift0.66秒成功。指定したowned PIDとexact executable identity、AX element所有を照合し、owned窓のtextだけを読む。input／capture／OS setter／permission promptを持たない。このCLI成功は実AX snapshot・sleep/wake配送・rate変更の成功ではない。本人操作の後にactual candidateの状態を観測し、未確認を埋める。
+

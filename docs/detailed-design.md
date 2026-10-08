@@ -372,7 +372,7 @@ RT では Box／Vec の構築・clone・drop、resize、DSP の rate／allocate�
 
 ### 最小unsafeの安全証明
 
-以下は **計画 Interface の内部設計**。payload seqlock とは別物である。ownership container は **stream epoch ごとに別 cell** を作り、旧 cell を新 engine で再使用しない。
+以下は **現存する `src/audio/lease.rs` の内部 protocol**。payload seqlock とは別物である。ownership container は **stream epoch ごとに別 cell** を作り、旧 cell を新 engine で再使用しない。P10 の復旧 worker は同じ PreparedEngine を保持してこの protocol を反復する。
 
 ```rust
 struct EngineLease {
@@ -406,9 +406,9 @@ worker freeze:
   旧 stream の pause/drop を非RTで実施（所有権の根拠にはしない）
 
 worker start:
-  別の新cellをworker所有で作成、必要なVoice::prepare_rateを実行
-  新cellへengineを設置、新owner=Idleへ返す
-  新 epoch の別 gate だけを enable
+  worker が独占保持する engine に必要な Voice::prepare_rate と最新制御を適用
+  新 epoch の別 cell に engine を設置し、owner=Idle
+  新 epoch 専用 gate だけを enable（旧 gate は再び開かない）
   新 stream の play。失敗ならその gate をcloseしてworkerがengine.take
 ```
 
@@ -423,7 +423,7 @@ worker start:
 
 この protocol のメモリ安全性と実時間完了は別である。実行中 callback が永久に返らない場合、worker が排他獲得を完了したと報告してはならない。pause 成功、次 callback が無いこと、closure Drop、一定 sleep のいずれも所有移譲 ack ではない。
 
-確認済み [CPAL macOS Stream／monitor](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/coreaudio/macos/mod.rs#L374-L457) は stream drop で monitor を join しない。補足 [coreaudio-rs 0.14.2 の render callback 登録](https://docs.rs/crate/coreaudio-rs/0.14.2/source/src/audio_unit/render_callback.rs) は registration 失敗経路の closure 回収を保証しない。CPAL の semver 依存なので、Ambien の実 `Cargo.lock` が選ぶ transitive 版はまだ未確定。アプリの DSP 回収が成立しても、依存の closure／AudioUnit／monitor が全回収された証拠にはならない。実解決版の失敗注入と反復停止の残留観測を別 gate にする。
+実 `Cargo.lock` は SPEC 選定の CPAL 0.18.2 と transitive coreaudio-rs 0.14.2 を解決した。実際の依存ソースの [CPAL macOS Stream／monitor](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/coreaudio/macos/mod.rs#L374-L457) は stream drop で monitor を join しない。[coreaudio-rs 0.14.2 の render callback 登録](https://docs.rs/crate/coreaudio-rs/0.14.2/source/src/audio_unit/render_callback.rs) は Box を raw にしてから native property を登録し、成功後にだけ所有 pointer を記録するため、その property 登録失敗の closure 回収を保証しない。実解決 rlib での独立 probe は未再生の DefaultOutput AudioUnit の登録→drop と本当の format mismatch の各8回で capture Drop を各1回観測したが、raw 移譲後の native property 失敗を再現していない。別の未再生 generator は callback 登録前の constructor で InvalidElement になり、その経路の証拠にはならなかった。アプリの DSP 回収と依存の closure／AudioUnit／monitor の全回収は別。詳細な実行結果・追加の反復停止観測と未確認範囲は [検証記録](verification.md) に置く。
 
 ### 出力停止と復旧
 
@@ -432,6 +432,11 @@ AudioController の出力状態は `Starting → Running(epoch) → Freezing →
 worker は stream とは独立の CoreAudio property listener を所有し、default output・device alive・nominal rate の変更を固定 signal として受け、非RTで現在 default/config を読み直す。stream を捨てた後も復旧通知を受ける。登録解除は worker shutdown、listener 内で engine／App を操作しない。[公開 property listener](https://developer.apple.com/documentation/coreaudio/audioobjectaddpropertylistener(_:_:_:_:))
 
 `DeviceChanged` は既存 DefaultOutput が reroute した可能性があり、失われた機器と即断しない。ただし旧 latency の単調 clamp を持ち越さないため、freeze→現在 config 検査→新 stream epoch と対応を作る。rate／形式不変なら DSP は再準備不要、rate が変わるときだけ worker で準備する。どちらも論理 checkpoint は維持する。出力復旧では最新 control を適用して mute を維持、recovery gain だけ上げる。無音を user mute 解除で隠さない。
+
+現存の `OutputStatus` は起動・実行中・通常スリープ・再準備・明示失敗を分ける。freeze 自体は worker の内部所有移譲であり UI 状態に仮の成功を置かない。NSWorkspace observer の登録失敗でも設定 metadata／control transport は保持し、出力を成功に見せない。native listener は default output・alive・nominal rate に加え出力 stream/config/format を監視し、登録と解除の失敗を返す。旧 native 通知は scalar signal だけなので、worker が現在 fingerprint を再検査し、不変なら不要な epoch を作らない。凍結中の latest receipt は発行した epoch を記録し、失敗した候補世代の receipt が現在世代の操作を隠さない。rate 準備の一部が失敗した場合は、古い rate へ戻る場合でも全声を再検査する。
+
+復旧 listener の設置と出力 availability／config 検査は分ける。constructor は独立 global listener だけを保持し、最初の query が失敗しても worker／登録済み listener を破棄しない。native fingerprint は現在 device ID・nominal rate・実 buffer layout・stream ID列・各 stream の virtual／physical AudioStreamBasicDescription を含み、CPAL の rate／channel／sample型が同じでも stream／format が変われば新 epoch を作る。初期 engine は起動時の整合済み ControlState から準備し、失敗すると途中まで書き換わり得る mailbox 読取をその committed state へ直接適用しない。最新操作は engine が既存 scratch へ読み、成功した snapshot だけを受理する。
+
 
 ## 三つの時計と再生予定時刻
 

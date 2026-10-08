@@ -294,9 +294,11 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **DependsOn:** P09。**SPEC:** [消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止)、[再生予定時刻](../SPEC.md#再生予定時刻)、[スレッドと資源](../SPEC.md#スレッドと資源)。
 
-**Files:** Modify `src/audio/mod.rs`, `src/audio/lease.rs`, `src/audio/timing.rs`, `src/audio/world.rs`, `src/audio/render.rs`, `src/platform/macos.rs`, `src/app.rs`。Tests: `lease.rs`, `world.rs`, `timing.rs` 内。
+**Files:** Modify `src/audio/mod.rs`（実worker復旧・固定signal）, `src/audio/lease.rs`, `src/audio/timing.rs`, `src/audio/world.rs`, `src/audio/render.rs`（worker-only再準備・独立recovery gain）, `src/platform/macos.rs`（stream外のCoreAudio listenerとmain-owned workspace通知）, `src/app.rs`（observer所有／明示失敗／通常解除）, `Cargo.toml`／`Cargo.lock`（現存resolved native binding/blockの必要direct依存とfeatureのみ）。既存scene／settingsのepoch consumerを確認し、必要な消費側のみ更新する。Tests: 既存audio各Module内。実CPAL throwaway smokeはvolume0／mute true、native app smokeはprivate HOME。既存関連文書だけ更新する。
 
 **Consumes:** I08 lease/epoch、I06 logical seconds/remaining state、I03 mute、I04 status。**Produces:** I11 `AudioController` recovery と worker checkpoint、I08 新 epoch での再準備。
+
+**今回の所有・実施順:** parentはAudioController／main root／実native観測／文書の統合を所有する。native Adapterは固定 `RecoverySignals` だけをcallbackへcaptureし、worker-owned `OutputDeviceMonitor` とmain-owned `PowerMonitor` を返す。Engineは同じBox声／controls mailbox／world／wander／mixをmoveしてworker排他中だけ `prepare_output_epoch(rate)` を行い、同rateではDSPを再生成しない。旧gate／error cellを新cellへ再利用せず、失敗した準備のengineもworkerに保持する。最初に現存実streamへfixed DeviceChangedをreportする消音smokeでmissing recoveryを観測し、変更後は同じ経路の新epoch／残りworld／旧error拒否とshutdownを確認する。このcontrolled signalを実Mac sleep／物理的抜差しと呼ばず、本人の安全な操作による実機観測を別gateにする。
 
 - [ ] stream 外に OS device property listener と sleep/wake 通知を保持する。error callback は epoch ごとの別 bitset cell へ固定 code を公開し、worker は現在 cell だけを処理する。旧 monitor の遅延 DeviceChanged/StreamInvalidated で復旧済み stream を止めない。
 - [ ] enabled=false→worker の Idle→Worker 単発取得を非 RT で待ち→checkpoint/engine take を行う。pause/drop/最後 callback を回収証明にしない。
