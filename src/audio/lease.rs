@@ -143,7 +143,7 @@ mod tests {
 
     use super::*;
     use crate::audio::timing::MachNanos;
-    use crate::audio::transport::{ErrorCell, VisualRing};
+    use crate::audio::transport::{ControlMailbox, ErrorCell, StatusMailbox, VisualRing};
     use crate::controls::ControlState;
     use crate::situations::Registry;
 
@@ -155,7 +155,9 @@ mod tests {
         let registry = Arc::new(Registry::new().unwrap());
         let controls = ControlState::new(&registry);
         let visuals = Arc::new(VisualRing::new(2048, registry.definitions().len()));
-        PreparedEngine::prepare(registry, controls, visuals, 48_000, 42).unwrap()
+        let mailbox = Arc::new(ControlMailbox::new(&controls));
+        let receipts = Arc::new(StatusMailbox::new(controls.registry_count()));
+        PreparedEngine::prepare(registry, controls, visuals, mailbox, receipts, 48_000, 42).unwrap()
     }
 
     fn render(guard: &mut CallbackGuard<'_>, frames: &mut [f32], epoch: StreamEpoch) {
@@ -202,17 +204,38 @@ mod tests {
                 assert!(old.gate().is_enabled());
                 delayed_ready.wait();
                 new_ready.wait();
-                assert!(old.try_borrow().is_none());
+                let playback = cpal::StreamInstant::from_nanos(3_600_000_000_000);
+                let info = cpal::OutputCallbackInfo::new(cpal::OutputStreamTimestamp {
+                    callback: playback,
+                    playback,
+                });
+                let errors = ErrorCell::new(epoch(1));
+                let mut float_output = [1.0; 513 * 2];
+                let mut integer_output = [i16::MAX; 127 * 6];
+                for _ in 0..8 {
+                    crate::audio::render::output_f32(&old, &mut float_output, 2, &info, &errors);
+                    crate::audio::render::output_i16(&old, &mut integer_output, 6, &info, &errors);
+                    assert!(float_output.iter().all(|sample| *sample == 0.0));
+                    assert!(integer_output.iter().all(|sample| *sample == 0));
+                    assert!(old.try_borrow().is_none());
+                }
+                assert_eq!(errors.take_bits(), 0);
+                assert!(!old.gate().is_enabled());
+                assert_eq!(old.owner.load(Ordering::SeqCst), OWNER_WORKER);
             });
             delayed_ready.wait();
-            let new = EngineLease::new(old.try_take().unwrap(), epoch(2));
+            let mut recovered = old.try_take().unwrap();
+            recovered.prepare_output_epoch(44_100).unwrap();
+            let new = EngineLease::new(recovered, epoch(2));
             let mut callback = new.try_borrow().unwrap();
             let before = callback.engine().world();
             new_ready.wait();
             delayed.join().unwrap();
             assert_eq!(callback.engine().world(), before);
             render(&mut callback, &mut [0.0; 2], epoch(2));
-            assert!(callback.engine().world().get() > before.get());
+            assert!(
+                (callback.engine().world().get() - before.get() - 1.0 / 44_100.0).abs() < 1e-15
+            );
             drop(callback);
             drop(new.try_take().unwrap());
         });

@@ -25,7 +25,7 @@
 | `src/audio/mod.rs` | `AudioController` worker、標準出力、config、build/play/pause、停止・復旧 |
 | `src/audio/render.rs` | `PreparedEngine`、型付き CPAL render、合成・混合・出力形式変換 |
 | `src/audio/world.rs` | `WorldClock`、`Movement`、滞在・PRNG・停止再開・表示と保存用の選択 |
-| `src/audio/mix.rs` | 現存 `GainRamp` のN声slerp。手動／自動durationはrender側が選び、進行中の秒はrampが保持。現存volume／muteの `OutputRamp` はrender私有。復旧・終了は対応作業で実装 |
+| `src/audio/mix.rs` | 現存 `GainRamp` のN声slerp。手動／自動durationはrender側が選び、進行中の秒はrampが保持。現存volume／muteと独立した復旧gainの `OutputRamp` はrender私有。正常終了rampは対応作業で実装 |
 | `src/audio/transport.rs` | `ControlMailbox`、`StatusMailbox`、`VisualRing` と固定容量の数値転送 |
 | `src/audio/lease.rs` | `EngineLease` の排他所有だけ。unsafe とその安全証明を閉じる |
 | `src/audio/timing.rs` | `StreamEpoch`、Mach 時刻、CPAL 再生予定時刻、DSP 因果遅延 |
@@ -255,7 +255,7 @@ output = voice sum * volume_gain * mute_gain * recovery_gain * shutdown_gain
 
 volume／mute は別端点を持つ有限長 ramp、0・1へ正確に到達する。mute 中の volume 操作は解除にならない。復旧 gain は世界と mute を変えず出力だけ滑らかに戻す。shutdown gain は正常終了成功後だけ下げ、保存失敗では開始しない。voice calibration は試聴で決め、設定 volume として保存しない。
 
-現存 `OutputRamp` は `PreparedEngine` 内の私有部品で、actual rateに応じた20msのsmoothstepを混合後のvolume／muteに独立適用する。これは初回実装定数であり製品の新しい数値要件ではない。同じ端点はrampを再開せず、途中の編集は現在値から追従し、有限sample数で端点を正確に確定する。出力が0でも声の世界・視覚イベント・寄与gainは進める。N声交差は別の `GainRamp` が所有する。復旧／終了rampは未実装であり、この部品をそれらの代用品にしない。
+現存 `OutputRamp` は `PreparedEngine` 内の私有部品で、actual rateに応じた20msのsmoothstepを混合後のvolume／muteに独立適用する。これは初回実装定数であり製品の新しい数値要件ではない。同じ端点はrampを再開せず、途中の編集は現在値から追従し、有限sample数で端点を正確に確定する。出力が0でも声の世界・視覚イベント・寄与gainは進める。N声交差は別の `GainRamp` が所有する。現存の復旧gainは別の `OutputRamp` として同じengine内に保持し、epoch再準備時に無音から戻す。正常終了rampは未実装であり、volume／muteや復旧gainをその代用品にしない。
 
 Σg²=1 は独立信号の power の数学的規則であり、波形相関・実 peak・聴感一定の証明ではない。混合は f64 積算、最終出力は finite を保つ音源設計・level 校正で収める。整数出力変換時は許容範囲へ clamp するが、この clamp を強い peak の音質修正や合格根拠に使わない。非有限発生を黙って通常音扱いせず固定 DSP fault を通知し、該当出力を無音として停止・調査する。これは未成立の DSP を隠す fallback ではない。
 
@@ -351,7 +351,7 @@ default host の `default_output_device()` をそのまま使う。列挙で同 
 
 callback は最初に全 output を silence にし、lease 取得失敗／inactive epoch ならそのまま返す。実 frame は `data.len()/channels`。partial channel の余りは silence のまま、固定 callback 長を仮定しない。必要な固定 scratch 単位へ分割するが、world frame offset は全区間で連続。mono は `(L+R)/2`、stereo は L/R、3ch 以上は最初の L/R だけで残り silence。機器設定と OS volume を変えない。I16 変換は `FromSample<f32>` の型付き経路を使う。
 
-現存P04の各sampleは、区間の最新snapshot適用後にslerpを1sample進め、実gainsの正／0境界をvoiceへ通知し、同じsampleの世界時刻でノブ・粒包絡・eventをadvanceする。正の寄与voiceだけtickし、f64で混合して独立volume／muteを掛け、形式変換と時刻付きevent／state公開を行って世界clockを1sample進める。終了sampleとgain端点をこの順序で揃える。将来の復旧／終了gainを追加しても世界・寄与と出力gainを混同しない。
+現存P04の各sampleは、区間の最新snapshot適用後にslerpを1sample進め、実gainsの正／0境界をvoiceへ通知し、同じsampleの世界時刻でノブ・粒包絡・eventをadvanceする。正の寄与voiceだけtickし、f64で混合して独立volume／muteを掛け、形式変換と時刻付きevent／state公開を行って世界clockを1sample進める。終了sampleとgain端点をこの順序で揃える。P10の独立復旧gainを含め、世界・寄与と出力gainを混同しない。正常終了gainの追加は対応作業で扱う。
 
 非寄与 voice は world update だけで tick しない。音の履歴は上記 `set_contributing` の境界で無効化し、数分後の再選択で以前の残響を再生しない。消音・volume0では world／イベントを必ず進め、寄与 voice の wet／filter tick を維持して tail の論理時間を止めず、出力計算／変換の不要な部分だけ省く。寄与と消音を同じ active flag にしない。
 
@@ -372,7 +372,7 @@ RT では Box／Vec の構築・clone・drop、resize、DSP の rate／allocate�
 
 ### 最小unsafeの安全証明
 
-以下は **計画 Interface の内部設計**。payload seqlock とは別物である。ownership container は **stream epoch ごとに別 cell** を作り、旧 cell を新 engine で再使用しない。
+以下は **現存する `src/audio/lease.rs` の内部 protocol**。payload seqlock とは別物である。ownership container は **stream epoch ごとに別 cell** を作り、旧 cell を新 engine で再使用しない。P10 の復旧 worker は同じ PreparedEngine を保持してこの protocol を反復する。
 
 ```rust
 struct EngineLease {
@@ -406,9 +406,9 @@ worker freeze:
   旧 stream の pause/drop を非RTで実施（所有権の根拠にはしない）
 
 worker start:
-  別の新cellをworker所有で作成、必要なVoice::prepare_rateを実行
-  新cellへengineを設置、新owner=Idleへ返す
-  新 epoch の別 gate だけを enable
+  worker が独占保持する engine に必要な Voice::prepare_rate と最新制御を適用
+  新 epoch の別 cell に engine を設置し、owner=Idle
+  新 epoch 専用 gate だけを enable（旧 gate は再び開かない）
   新 stream の play。失敗ならその gate をcloseしてworkerがengine.take
 ```
 
@@ -423,7 +423,7 @@ worker start:
 
 この protocol のメモリ安全性と実時間完了は別である。実行中 callback が永久に返らない場合、worker が排他獲得を完了したと報告してはならない。pause 成功、次 callback が無いこと、closure Drop、一定 sleep のいずれも所有移譲 ack ではない。
 
-確認済み [CPAL macOS Stream／monitor](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/coreaudio/macos/mod.rs#L374-L457) は stream drop で monitor を join しない。補足 [coreaudio-rs 0.14.2 の render callback 登録](https://docs.rs/crate/coreaudio-rs/0.14.2/source/src/audio_unit/render_callback.rs) は registration 失敗経路の closure 回収を保証しない。CPAL の semver 依存なので、Ambien の実 `Cargo.lock` が選ぶ transitive 版はまだ未確定。アプリの DSP 回収が成立しても、依存の closure／AudioUnit／monitor が全回収された証拠にはならない。実解決版の失敗注入と反復停止の残留観測を別 gate にする。
+実 `Cargo.lock` は SPEC 選定の CPAL 0.18.2 と transitive coreaudio-rs 0.14.2 を解決した。実際の依存ソースの [CPAL macOS Stream／monitor](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/coreaudio/macos/mod.rs#L374-L457) は stream drop で monitor を join しない。[coreaudio-rs 0.14.2 の render callback 登録](https://docs.rs/crate/coreaudio-rs/0.14.2/source/src/audio_unit/render_callback.rs) は Box を raw にしてから native property を登録し、成功後にだけ所有 pointer を記録するため、その property 登録失敗の closure 回収を保証しない。実解決 rlib での独立 probe は未再生の DefaultOutput AudioUnit の登録→drop と本当の format mismatch の各8回で capture Drop を各1回観測したが、raw 移譲後の native property 失敗を再現していない。別の未再生 generator は callback 登録前の constructor で InvalidElement になり、その経路の証拠にはならなかった。アプリの DSP 回収と依存の closure／AudioUnit／monitor の全回収は別。詳細な実行結果・追加の反復停止観測と未確認範囲は [検証記録](verification.md) に置く。
 
 ### 出力停止と復旧
 
@@ -432,6 +432,13 @@ AudioController の出力状態は `Starting → Running(epoch) → Freezing →
 worker は stream とは独立の CoreAudio property listener を所有し、default output・device alive・nominal rate の変更を固定 signal として受け、非RTで現在 default/config を読み直す。stream を捨てた後も復旧通知を受ける。登録解除は worker shutdown、listener 内で engine／App を操作しない。[公開 property listener](https://developer.apple.com/documentation/coreaudio/audioobjectaddpropertylistener(_:_:_:_:))
 
 `DeviceChanged` は既存 DefaultOutput が reroute した可能性があり、失われた機器と即断しない。ただし旧 latency の単調 clamp を持ち越さないため、freeze→現在 config 検査→新 stream epoch と対応を作る。rate／形式不変なら DSP は再準備不要、rate が変わるときだけ worker で準備する。どちらも論理 checkpoint は維持する。出力復旧では最新 control を適用して mute を維持、recovery gain だけ上げる。無音を user mute 解除で隠さない。
+
+現存の `OutputStatus` は起動・実行中・通常スリープ・再準備・明示失敗を分ける。freeze 自体は worker の内部所有移譲であり UI 状態に仮の成功を置かない。NSWorkspace observer の登録失敗でも設定 metadata／control transport は保持し、出力を成功に見せない。native listener は default output・alive・nominal rate に加え出力 stream/config/format を監視し、登録と解除の失敗を返す。旧 native 通知は scalar signal だけなので、worker が現在 fingerprint を再検査し、不変なら不要な epoch を作らない。凍結中の latest receipt は発行した epoch を記録し、失敗した候補世代の receipt が現在世代の操作を隠さない。rate 準備の一部が失敗した場合は、古い rate へ戻る場合でも全声を再検査する。
+
+復旧 listener の設置と出力 availability／config 検査は分ける。constructor は独立 global listener だけを保持し、最初の query が失敗しても worker／登録済み listener を破棄しない。native fingerprint は現在 device ID・nominal rate・実 buffer layout・stream ID列・各 stream の virtual／physical AudioStreamBasicDescription を含み、CPAL の rate／channel／sample型が同じでも stream／format が変われば新 epoch を作る。初期 engine は起動時の整合済み ControlState から準備し、失敗すると途中まで書き換わり得る mailbox 読取をその committed state へ直接適用しない。最新操作は engine が既存 scratch へ読み、成功した snapshot だけを受理する。
+
+`OutputListener::remove` は native 解除成功の `ListenerRetirement::Unregistered` と、解除先の AudioObjectID がもう存在しない `ObjectInvalidated` を区別する。CoreAudio の `kAudioHardwareBadObjectError`（`!obj`）だけは、再解除不能な旧 guard を引退させて現在 default／stream の再読へ進む。実 device／stream の変更時も shutdown 時も同じ扱いにし、それ以外の解除失敗は guard を保持して明示失敗を返す。登録・property query の `!obj` を成功にはしない。引退はアプリ所有の RcBlock 参照を解放する意味であり、HAL 所有／queued Block copy の全解放を保証しない。遅延 callback は所有 Arc の固定 signal だけへ届き、worker が現在状態を再検査する。監視の失敗を worker gate の無条件解除・timer retry・world 再生成・user mute 解除で隠さない。
+
 
 ## 三つの時計と再生予定時刻
 

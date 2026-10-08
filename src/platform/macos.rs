@@ -1,12 +1,733 @@
-use std::fmt;
+use std::{fmt, marker::PhantomData, ptr::NonNull, rc::Rc, sync::Arc, thread::ThreadId};
 
+use block2::RcBlock;
 use gpui::{Bounds, DisplayId, Pixels, point, px, size};
-use objc2::MainThreadMarker;
+use objc2::{MainThreadMarker, rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::{
     NSScreen, NSView, NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
 };
-use objc2_foundation::{NSNumber, NSPoint, NSRect, NSSize, ns_string};
+use objc2_core_audio::{
+    AudioObjectAddPropertyListenerBlock, AudioObjectGetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
+    AudioObjectRemovePropertyListenerBlock, kAudioDevicePropertyDeviceIsAlive,
+    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreamConfiguration,
+    kAudioDevicePropertyStreams, kAudioHardwareBadObjectError,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+    kAudioObjectUnknown, kAudioStreamPropertyPhysicalFormat, kAudioStreamPropertyVirtualFormat,
+};
+use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioStreamBasicDescription};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    ns_string,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+use crate::audio::RecoverySignals;
+
+#[derive(Debug)]
+pub(crate) enum AudioMonitorError {
+    MainThreadRequired,
+    OutputWorkerRequired,
+    WrongOutputThread,
+    Native {
+        operation: &'static str,
+        object: u32,
+        selector: u32,
+        status: i32,
+    },
+    PropertySize {
+        object: u32,
+        selector: u32,
+        expected: u32,
+        actual: u32,
+    },
+    PropertyValue {
+        object: u32,
+        selector: u32,
+        detail: &'static str,
+    },
+    Shutdown(Vec<AudioMonitorError>),
+}
+
+impl fmt::Display for AudioMonitorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MainThreadRequired => {
+                f.write_str("power monitor requires the AppKit main thread")
+            }
+            Self::OutputWorkerRequired => {
+                f.write_str("output monitor must be created on its output worker")
+            }
+            Self::WrongOutputThread => {
+                f.write_str("output monitor called outside its owning worker")
+            }
+            Self::Native {
+                operation,
+                object,
+                selector,
+                status,
+            } => write!(
+                f,
+                "{operation} failed for audio object {object}, property {selector:#010x}: OSStatus {status}"
+            ),
+            Self::PropertySize {
+                object,
+                selector,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "audio object {object}, property {selector:#010x}: expected {expected} bytes, received {actual}"
+            ),
+            Self::PropertyValue {
+                object,
+                selector,
+                detail,
+            } => write!(
+                f,
+                "audio object {object}, property {selector:#010x}: {detail}"
+            ),
+            Self::Shutdown(errors) => {
+                f.write_str("output listener shutdown failed")?;
+                for error in errors {
+                    write!(f, "; {error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for AudioMonitorError {}
+
+/// Main-owned workspace tokens. Blocks retain only the atomic recovery signal.
+pub(crate) struct PowerMonitor {
+    _main: MainThreadMarker,
+    center: Retained<NSNotificationCenter>,
+    sleep: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
+    wake: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
+}
+
+impl PowerMonitor {
+    pub(crate) fn new(signals: Arc<RecoverySignals>) -> Result<Self, AudioMonitorError> {
+        let main = MainThreadMarker::new().ok_or(AudioMonitorError::MainThreadRequired)?;
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        let sleeping_signals = Arc::clone(&signals);
+        let sleep_block = RcBlock::new(move |_: NonNull<NSNotification>| {
+            sleeping_signals.set_sleeping(true);
+        });
+        let wake_block = RcBlock::new(move |_: NonNull<NSNotification>| {
+            signals.set_sleeping(false);
+        });
+        // Workspace's own center copies the blocks. queue=None permits delivery on
+        // the posting thread; both closures are Send+Sync and touch only atomics.
+        let sleep = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSWorkspaceWillSleepNotification),
+                None,
+                None,
+                &sleep_block,
+            )
+        };
+        let wake = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSWorkspaceDidWakeNotification),
+                None,
+                None,
+                &wake_block,
+            )
+        };
+        Ok(Self {
+            _main: main,
+            center,
+            sleep: Some(sleep),
+            wake: Some(wake),
+        })
+    }
+
+    pub(crate) fn shutdown(&mut self) -> Result<(), AudioMonitorError> {
+        MainThreadMarker::new().ok_or(AudioMonitorError::MainThreadRequired)?;
+        // removeObserver has no native failure result. These are exactly the
+        // retained registration tokens from this center, not selector observers.
+        if let Some(token) = self.sleep.take() {
+            unsafe {
+                self.center.removeObserver((*token).as_ref());
+            }
+        }
+        if let Some(token) = self.wake.take() {
+            unsafe {
+                self.center.removeObserver((*token).as_ref());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PowerMonitor {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown() {
+            eprintln!("Ambien power monitor shutdown: {error}");
+        }
+    }
+}
+
+type OutputChangeBlock = RcBlock<dyn Fn(u32, NonNull<AudioObjectPropertyAddress>)>;
+
+struct OutputListener {
+    object: u32,
+    address: AudioObjectPropertyAddress,
+    block: OutputChangeBlock,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ListenerRetirement {
+    Unregistered,
+    ObjectInvalidated,
+}
+
+impl OutputListener {
+    fn new(
+        object: u32,
+        selector: u32,
+        scope: u32,
+        signals: Arc<RecoverySignals>,
+    ) -> Result<Self, AudioMonitorError> {
+        let address = property_address(selector, scope);
+        let block: OutputChangeBlock =
+            RcBlock::new(move |_: u32, _: NonNull<AudioObjectPropertyAddress>| {
+                signals.output_changed()
+            });
+        // The installed binding's exact block ABI is (u32, NonNull<Address>).
+        // CoreAudio Block_copy retains this Arc-only closure until removal.
+        let status = unsafe {
+            AudioObjectAddPropertyListenerBlock(
+                object,
+                NonNull::from(&address),
+                None,
+                RcBlock::as_ptr(&block),
+            )
+        };
+        native_status("register listener", object, selector, status)?;
+        Ok(Self {
+            object,
+            address,
+            block,
+        })
+    }
+
+    fn remove(&self) -> Result<ListenerRetirement, AudioMonitorError> {
+        let status = unsafe {
+            AudioObjectRemovePropertyListenerBlock(
+                self.object,
+                NonNull::from(&self.address),
+                None,
+                RcBlock::as_ptr(&self.block),
+            )
+        };
+        if status == kAudioHardwareBadObjectError {
+            // HAL says this ID no longer names an object, so retaining its guard
+            // can never make a later removal succeed. Retire our reference, not
+            // the new output. HAL-owned/queued Block copies may still survive;
+            // their Arc-only callback never borrows this guard or the engine.
+            Ok(ListenerRetirement::ObjectInvalidated)
+        } else {
+            native_status(
+                "remove listener",
+                self.object,
+                self.address.mSelector,
+                status,
+            )
+            .map(|()| ListenerRetirement::Unregistered)
+        }
+    }
+}
+
+/// Current native timing/layout identity, not just CPAL's reduced sample config.
+#[derive(Debug, PartialEq)]
+pub(crate) struct OutputDeviceSnapshot {
+    pub device_id: u32,
+    nominal_rate: f64,
+    output_layout: Vec<u32>,
+    streams: Vec<OutputStreamSnapshot>,
+}
+
+#[derive(Debug, PartialEq)]
+struct OutputStreamSnapshot {
+    id: u32,
+    virtual_format: AudioStreamBasicDescription,
+    physical_format: AudioStreamBasicDescription,
+}
+
+/// Worker-local listeners outlive every stream epoch, including no-output time.
+pub(crate) struct OutputDeviceMonitor {
+    thread: ThreadId,
+    _worker_local: PhantomData<Rc<()>>,
+    signals: Arc<RecoverySignals>,
+    global: Option<OutputListener>,
+    device: Option<u32>,
+    device_listeners: Vec<OutputListener>,
+}
+
+impl OutputDeviceMonitor {
+    pub(crate) fn new(signals: Arc<RecoverySignals>) -> Result<Self, AudioMonitorError> {
+        if MainThreadMarker::new().is_some() {
+            return Err(AudioMonitorError::OutputWorkerRequired);
+        }
+        let global = OutputListener::new(
+            kAudioObjectSystemObject as u32,
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioObjectPropertyScopeGlobal,
+            Arc::clone(&signals),
+        )?;
+        let monitor = Self {
+            thread: std::thread::current().id(),
+            _worker_local: PhantomData,
+            signals,
+            global: Some(global),
+            device: None,
+            device_listeners: Vec::with_capacity(4),
+        };
+        Ok(monitor)
+    }
+
+    fn check_thread(&self) -> Result<(), AudioMonitorError> {
+        if std::thread::current().id() == self.thread {
+            Ok(())
+        } else {
+            Err(AudioMonitorError::WrongOutputThread)
+        }
+    }
+
+    pub(crate) fn refresh(&mut self) -> Result<Option<OutputDeviceSnapshot>, AudioMonitorError> {
+        self.check_thread()?;
+        let default = read_u32(
+            kAudioObjectSystemObject as u32,
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioObjectPropertyScopeGlobal,
+        )?;
+        let device = (default != kAudioObjectUnknown).then_some(default);
+        if self.device != device {
+            self.remove_device_listeners()?;
+            self.device = device;
+        }
+        if let Some(device) = device {
+            // A failed partial registration remains owned and is retried without
+            // duplicates. The alive listener remains attached when alive=false.
+            for (selector, scope) in [
+                (
+                    kAudioDevicePropertyDeviceIsAlive,
+                    kAudioObjectPropertyScopeGlobal,
+                ),
+                (
+                    kAudioDevicePropertyNominalSampleRate,
+                    kAudioObjectPropertyScopeGlobal,
+                ),
+                (
+                    kAudioDevicePropertyStreamConfiguration,
+                    kAudioObjectPropertyScopeOutput,
+                ),
+                (kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput),
+            ] {
+                if !self
+                    .device_listeners
+                    .iter()
+                    .any(|entry| entry.object == device && entry.address.mSelector == selector)
+                {
+                    self.device_listeners.push(OutputListener::new(
+                        device,
+                        selector,
+                        scope,
+                        Arc::clone(&self.signals),
+                    )?);
+                }
+            }
+            let alive = read_u32(
+                device,
+                kAudioDevicePropertyDeviceIsAlive,
+                kAudioObjectPropertyScopeGlobal,
+            )?;
+            if !device_alive(alive).map_err(|detail| AudioMonitorError::PropertyValue {
+                object: device,
+                selector: kAudioDevicePropertyDeviceIsAlive,
+                detail,
+            })? {
+                return Ok(None);
+            }
+            let streams = output_stream_ids(device)?;
+            self.refresh_stream_listeners(device, &streams)?;
+            let rate = read_f64(device, kAudioDevicePropertyNominalSampleRate)?;
+            validate_nominal_rate(rate).map_err(|detail| AudioMonitorError::PropertyValue {
+                object: device,
+                selector: kAudioDevicePropertyNominalSampleRate,
+                detail,
+            })?;
+            let output_layout = read_output_configuration(device)?;
+            let mut native_streams = Vec::with_capacity(streams.len());
+            for stream in streams {
+                native_streams.push(OutputStreamSnapshot {
+                    id: stream,
+                    virtual_format: read_stream_format(stream, kAudioStreamPropertyVirtualFormat)?,
+                    physical_format: read_stream_format(
+                        stream,
+                        kAudioStreamPropertyPhysicalFormat,
+                    )?,
+                });
+            }
+            return Ok(Some(OutputDeviceSnapshot {
+                device_id: device,
+                nominal_rate: rate,
+                output_layout,
+                streams: native_streams,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn refresh_stream_listeners(
+        &mut self,
+        device: u32,
+        streams: &[u32],
+    ) -> Result<(), AudioMonitorError> {
+        let mut errors = Vec::new();
+        self.device_listeners.retain(|entry| {
+            if entry.object == device || streams.contains(&entry.object) {
+                return true;
+            }
+            match entry.remove() {
+                Ok(ListenerRetirement::Unregistered | ListenerRetirement::ObjectInvalidated) => {
+                    false
+                }
+                Err(error) => {
+                    errors.push(error);
+                    true
+                }
+            }
+        });
+        if !errors.is_empty() {
+            return Err(AudioMonitorError::Shutdown(errors));
+        }
+        // Channel configuration and stream-list notifications alone do not cover
+        // a format-only change. Keep each output stream's actual format listeners.
+        for &stream in streams {
+            for selector in [
+                kAudioStreamPropertyVirtualFormat,
+                kAudioStreamPropertyPhysicalFormat,
+            ] {
+                if !self
+                    .device_listeners
+                    .iter()
+                    .any(|entry| entry.object == stream && entry.address.mSelector == selector)
+                {
+                    self.device_listeners.push(OutputListener::new(
+                        stream,
+                        selector,
+                        kAudioObjectPropertyScopeGlobal,
+                        Arc::clone(&self.signals),
+                    )?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_device_listeners(&mut self) -> Result<(), AudioMonitorError> {
+        let mut errors = Vec::new();
+        self.device_listeners.retain(|entry| match entry.remove() {
+            Ok(ListenerRetirement::Unregistered | ListenerRetirement::ObjectInvalidated) => false,
+            Err(error) => {
+                errors.push(error);
+                true
+            }
+        });
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AudioMonitorError::Shutdown(errors))
+        }
+    }
+
+    pub(crate) fn shutdown(&mut self) -> Result<(), AudioMonitorError> {
+        self.check_thread()?;
+        let mut errors = Vec::new();
+        if let Err(error) = self.remove_device_listeners() {
+            errors.push(error);
+        }
+        if let Some(global) = &self.global {
+            match global.remove() {
+                Ok(ListenerRetirement::Unregistered | ListenerRetirement::ObjectInvalidated) => {
+                    self.global = None
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        if self.device_listeners.is_empty() {
+            self.device = None;
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AudioMonitorError::Shutdown(errors))
+        }
+    }
+}
+
+impl Drop for OutputDeviceMonitor {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown() {
+            eprintln!("Ambien output monitor shutdown: {error}");
+        }
+        // On removal failure CoreAudio still owns its Block_copy. Releasing our
+        // RcBlock is safe: no raw callback context, monitor pointer, or DSP is
+        // captured. The remaining Arc only reaches closed atomic signals.
+    }
+}
+
+fn property_address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    }
+}
+
+fn native_status(
+    operation: &'static str,
+    object: u32,
+    selector: u32,
+    status: i32,
+) -> Result<(), AudioMonitorError> {
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(AudioMonitorError::Native {
+            operation,
+            object,
+            selector,
+            status,
+        })
+    }
+}
+
+fn property_size(
+    object: u32,
+    address: &AudioObjectPropertyAddress,
+) -> Result<u32, AudioMonitorError> {
+    let mut size = 0;
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            object,
+            NonNull::from(address),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+        )
+    };
+    native_status("query property size", object, address.mSelector, status)?;
+    Ok(size)
+}
+
+fn read_property(
+    object: u32,
+    address: &AudioObjectPropertyAddress,
+    capacity: u32,
+    output: NonNull<std::ffi::c_void>,
+) -> Result<u32, AudioMonitorError> {
+    let mut size = capacity;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(address),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+            output,
+        )
+    };
+    native_status("read property", object, address.mSelector, status)?;
+    Ok(size)
+}
+
+fn expect_size(
+    object: u32,
+    selector: u32,
+    actual: u32,
+    expected: u32,
+) -> Result<(), AudioMonitorError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(AudioMonitorError::PropertySize {
+            object,
+            selector,
+            expected,
+            actual,
+        })
+    }
+}
+
+fn read_u32(object: u32, selector: u32, scope: u32) -> Result<u32, AudioMonitorError> {
+    let address = property_address(selector, scope);
+    let expected = std::mem::size_of::<u32>() as u32;
+    expect_size(object, selector, property_size(object, &address)?, expected)?;
+    let mut value = 0_u32;
+    let actual = read_property(object, &address, expected, NonNull::from(&mut value).cast())?;
+    expect_size(object, selector, actual, expected)?;
+    Ok(value)
+}
+
+fn read_f64(object: u32, selector: u32) -> Result<f64, AudioMonitorError> {
+    let address = property_address(selector, kAudioObjectPropertyScopeGlobal);
+    let expected = std::mem::size_of::<f64>() as u32;
+    expect_size(object, selector, property_size(object, &address)?, expected)?;
+    let mut value = 0.0_f64;
+    let actual = read_property(object, &address, expected, NonNull::from(&mut value).cast())?;
+    expect_size(object, selector, actual, expected)?;
+    Ok(value)
+}
+
+fn read_stream_format(
+    object: u32,
+    selector: u32,
+) -> Result<AudioStreamBasicDescription, AudioMonitorError> {
+    let address = property_address(selector, kAudioObjectPropertyScopeGlobal);
+    let expected = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
+    expect_size(object, selector, property_size(object, &address)?, expected)?;
+    let mut format = AudioStreamBasicDescription {
+        mSampleRate: 0.0,
+        mFormatID: 0,
+        mFormatFlags: 0,
+        mBytesPerPacket: 0,
+        mFramesPerPacket: 0,
+        mBytesPerFrame: 0,
+        mChannelsPerFrame: 0,
+        mBitsPerChannel: 0,
+        mReserved: 0,
+    };
+    let actual = read_property(
+        object,
+        &address,
+        expected,
+        NonNull::from(&mut format).cast(),
+    )?;
+    expect_size(object, selector, actual, expected)?;
+    validate_nominal_rate(format.mSampleRate).map_err(|detail| {
+        AudioMonitorError::PropertyValue {
+            object,
+            selector,
+            detail,
+        }
+    })?;
+    Ok(format)
+}
+
+fn device_alive(value: u32) -> Result<bool, &'static str> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err("device alive is not 0 or 1"),
+    }
+}
+
+fn validate_nominal_rate(rate: f64) -> Result<(), &'static str> {
+    if rate.is_finite() && rate > 0.0 {
+        Ok(())
+    } else {
+        Err("nominal sample rate is not finite and positive")
+    }
+}
+
+fn output_buffer_channels(bytes: &[u8]) -> Result<Vec<u32>, &'static str> {
+    let offset = std::mem::offset_of!(AudioBufferList, mBuffers);
+    let stride = std::mem::size_of::<AudioBuffer>();
+    if bytes.len() < offset {
+        return Err("output configuration header is truncated");
+    }
+    let count = u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as usize;
+    let required = count
+        .checked_mul(stride)
+        .and_then(|size| offset.checked_add(size))
+        .ok_or("output configuration size overflow")?;
+    if required != bytes.len() {
+        return Err("output configuration buffer count does not match its size");
+    }
+    let mut channels = 0_u32;
+    let mut layout = Vec::with_capacity(count);
+    for buffer in bytes[offset..].chunks_exact(stride) {
+        let start = std::mem::offset_of!(AudioBuffer, mNumberChannels);
+        let count = u32::from_ne_bytes(buffer[start..start + 4].try_into().unwrap());
+        channels = channels
+            .checked_add(count)
+            .ok_or("output channel count overflow")?;
+        layout.push(count);
+    }
+    if channels == 0 {
+        Err("device has no output channels")
+    } else {
+        Ok(layout)
+    }
+}
+
+fn read_output_configuration(object: u32) -> Result<Vec<u32>, AudioMonitorError> {
+    let selector = kAudioDevicePropertyStreamConfiguration;
+    let address = property_address(selector, kAudioObjectPropertyScopeOutput);
+    let size = property_size(object, &address)?;
+    if size < std::mem::offset_of!(AudioBufferList, mBuffers) as u32 {
+        return Err(AudioMonitorError::PropertyValue {
+            object,
+            selector,
+            detail: "output configuration header is truncated",
+        });
+    }
+    // u64 storage provides the alignment of the installed AudioBufferList ABI,
+    // including its native pointers, and is allocated only on the output worker.
+    let mut storage = vec![0_u64; (size as usize).div_ceil(std::mem::size_of::<u64>())];
+    let actual = read_property(
+        object,
+        &address,
+        size,
+        NonNull::new(storage.as_mut_ptr()).unwrap().cast(),
+    )?;
+    expect_size(object, selector, actual, size)?;
+    // All storage began initialized; only the exact bytes returned are decoded.
+    let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), size as usize) };
+    output_buffer_channels(bytes).map_err(|detail| AudioMonitorError::PropertyValue {
+        object,
+        selector,
+        detail,
+    })
+}
+
+fn output_stream_ids(object: u32) -> Result<Vec<u32>, AudioMonitorError> {
+    let selector = kAudioDevicePropertyStreams;
+    let address = property_address(selector, kAudioObjectPropertyScopeOutput);
+    let size = property_size(object, &address)?;
+    let stride = std::mem::size_of::<u32>() as u32;
+    if size == 0 || !size.is_multiple_of(stride) {
+        return Err(AudioMonitorError::PropertyValue {
+            object,
+            selector,
+            detail: "output stream list is empty or not an array of AudioStreamID",
+        });
+    }
+    let mut streams = vec![0_u32; (size / stride) as usize];
+    let actual = read_property(
+        object,
+        &address,
+        size,
+        NonNull::new(streams.as_mut_ptr()).unwrap().cast(),
+    )?;
+    expect_size(object, selector, actual, size)?;
+    if streams.contains(&kAudioObjectUnknown) {
+        return Err(AudioMonitorError::PropertyValue {
+            object,
+            selector,
+            detail: "output stream list contains an unknown stream ID",
+        });
+    }
+    Ok(streams)
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum WindowRole {
@@ -479,6 +1200,104 @@ pub(crate) fn constrain_window(
 mod tests {
     use super::*;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    #[test]
+    fn invalidated_audio_objects_do_not_block_device_listener_retirement() {
+        let signals = Arc::new(RecoverySignals::new());
+        let mut monitor = OutputDeviceMonitor {
+            thread: std::thread::current().id(),
+            _worker_local: PhantomData,
+            signals: Arc::clone(&signals),
+            global: None,
+            device: Some(kAudioObjectUnknown),
+            device_listeners: Vec::new(),
+        };
+        // Unknown is guaranteed not to name a live HAL object. Calling the real
+        // removal API recreates the destroyed-device/stream status without
+        // changing the default output or disconnecting physical hardware.
+        for (selector, scope) in [
+            (
+                kAudioDevicePropertyDeviceIsAlive,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            (
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            (
+                kAudioDevicePropertyStreamConfiguration,
+                kAudioObjectPropertyScopeOutput,
+            ),
+            (kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput),
+            (
+                kAudioStreamPropertyVirtualFormat,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            (
+                kAudioStreamPropertyPhysicalFormat,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+        ] {
+            let captured = Arc::clone(&signals);
+            monitor.device_listeners.push(OutputListener {
+                object: kAudioObjectUnknown,
+                address: property_address(selector, scope),
+                block: RcBlock::new(move |_: u32, _: NonNull<AudioObjectPropertyAddress>| {
+                    captured.output_changed();
+                }),
+            });
+        }
+        let retired = monitor.remove_device_listeners();
+        assert!(
+            retired.is_ok(),
+            "Invalidated objects blocked retirement: {retired:?}"
+        );
+        assert!(
+            monitor.device_listeners.is_empty(),
+            "Dead handles still prevent replacement"
+        );
+    }
+
+    fn output_configuration(channels: &[u32]) -> Vec<u8> {
+        let offset = std::mem::offset_of!(AudioBufferList, mBuffers);
+        let stride = std::mem::size_of::<AudioBuffer>();
+        let mut bytes = vec![0; offset + channels.len() * stride];
+        bytes[..4].copy_from_slice(&(channels.len() as u32).to_ne_bytes());
+        for (index, channels) in channels.iter().enumerate() {
+            let start = offset + index * stride;
+            bytes[start..start + 4].copy_from_slice(&channels.to_ne_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn native_output_configuration_rejects_truncated_and_oversized_buffer_counts() {
+        let valid = output_configuration(&[1, 1]);
+        assert_eq!(output_buffer_channels(&valid), Ok(vec![1, 1]));
+        assert!(output_buffer_channels(&valid[..valid.len() - 1]).is_err());
+        let mut excessive = valid;
+        excessive[..4].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert!(output_buffer_channels(&excessive).is_err());
+        assert!(output_buffer_channels(&[0; 3]).is_err());
+    }
+
+    #[test]
+    fn native_output_configuration_rejects_absent_channels_and_overflow() {
+        assert!(output_buffer_channels(&output_configuration(&[])).is_err());
+        assert!(output_buffer_channels(&output_configuration(&[0, 0])).is_err());
+        assert!(output_buffer_channels(&output_configuration(&[u32::MAX, 1])).is_err());
+    }
+
+    #[test]
+    fn native_device_values_reject_non_boolean_alive_and_invalid_rate() {
+        assert_eq!(device_alive(0), Ok(false));
+        assert_eq!(device_alive(1), Ok(true));
+        assert!(device_alive(2).is_err());
+        assert!(validate_nominal_rate(0.0).is_err());
+        assert!(validate_nominal_rate(f64::NAN).is_err());
+        assert!(validate_nominal_rate(f64::INFINITY).is_err());
+        assert_eq!(validate_nominal_rate(44_100.0), Ok(()));
+    }
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
         NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))

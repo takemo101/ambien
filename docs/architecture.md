@@ -4,7 +4,7 @@
 
 本書は、[SPEC の構成と Interface](../SPEC.md#構成と-interface)で選択された構成を、責務・所有・時間・失敗の関係から説明する補助文書である。製品要件と継続条件の唯一の正本は [SPEC.md](../SPEC.md) であり、本書から新しい仕様を決めない。数値、初期値、依存の改訂は正本の該当節を参照する。
 
-以下は製品全体の選択済み設計の説明であり、性能の実測結果ではない。現存する固定二窓・三環境の合成・共通手動／自動移動・独立音量／消音・保護付き保存の責務は各節のソース参照から追い、未実装の出力復旧・終了調停・更新を区別する。本書では具体的な型・呼び出し形式・細かな配置・実装順序を定めず、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、実際のソースを区別して読む。観測済みの範囲と未確認 gate は [検証記録](verification.md)、現在の作業状態は mikan に置く。最終承認と次の作業への条件は [文書の状態](../SPEC.md#文書の状態)と[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)に従う。
+以下は製品全体の選択済み設計の説明であり、性能の実測結果ではない。現存する固定二窓・三環境の合成・共通手動／自動移動・独立音量／消音・保護付き保存・出力復旧の責務は各節のソース参照から追い、未実装の終了調停・更新を区別する。出力復旧の実装・制御signalでの実stream観測と、実機スリープ・機器変更の受け入れは同一ではない。本書では具体的な型・呼び出し形式・細かな配置・実装順序を定めず、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、実際のソースを区別して読む。観測済みの範囲と未確認 gate は [検証記録](verification.md)、現在の作業状態は mikan に置く。最終承認と次の作業への条件は [文書の状態](../SPEC.md#文書の状態)と[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)に従う。
 
 関連文書は [索引](README.md)、[検証手順](verification.md)、[参考資料](references.md) を参照する。
 
@@ -27,6 +27,8 @@ GPUI がアプリの実行ループを持ち、シーンと設定はその上の
 現存経路は、[`src/main.rs`](../src/main.rs) が GPUI を起動し、[`src/app.rs`](../src/app.rs) の global root が窓 handles、close・外観・音声／保存更新・quit の subscriptions と Task、音声 controller、保存 worker、整合した制御 state と最新の有限窓位置を所有する。起動時の保存読取りは専用 worker が行い、最初の stream／窓より前に読み終えた端点を音声へ渡す。窓の close と音声停止は分離し、現存 quit observer は最新端点の flush 結果を扱ってから音声停止・DSP 回収・join を待つ。終了 veto／fade／更新の調停は別の未実装 gate。設定の再表示は既存窓を前面へ出し、action は active window の借用後に適用する。[`src/ui/`](../src/ui/) は固定視覚キャッシュを直接 paint するシーン、登録 metadata に基づく controlled Ely フォーム、出力／受理状態と独立した保存通知を扱う。[`src/platform/macos.rs`](../src/platform/macos.rs) は実 workarea 補正と借用 NSWindow の固定制約・所有 screen 相対位置を扱う。menu とフォームは同じ部分操作を適用し、viewport を音声 intent にしない。
 
 [`src/situations/`](../src/situations/) が登録と雨／岩／深海固有の声・粒・揺らぎ・残響を持ち、[`src/audio/`](../src/audio/) のworkerが標準Deviceとconfig、声・固定配列・N声gain vectorを準備してstreamを開始する。callbackは単発lease借用の間だけengineとsample世界時計を進め、共通手動／自動slerp、到着基準の滞在とcallback単位の有限抽選budget、数値制御・受理通知・視覚リング・epoch専用error bitsetに触れる。混合後の音量と消音は独立して追従し、世界やシーンを停止しない。UIはDSPを所有しない。workerは受理mailboxを読み、出力・表示／再開対象・受理世代・失敗の離散変更だけを非RTの `AudioShared` とbounded wake経路で渡し、callbackからchannelへ送らない。自動表示はg²、同率は以前の表示、保存用の自動同率はdeparture。manual ack前はmainの最新targetを即表示する。実寄与gainsは時刻付き視覚stateで別に配送する。出力失敗時はworkerがgateを閉じてengineを回収し、凍結中も最新設定を受理できるが世界は進めない。シーンは既に受け入れたキャッシュとfade時刻を保持する。非可視シーンの更新は止め、復帰時は現在の生存イベントを読み直してからtimerを開始する。
+
+復旧時も同じ engine と最新制御の transport を保持する。app owner の NSWorkspace observer と音声 worker の CoreAudio listener は stream から独立して生存し、native callback は容量固定の signal だけを更新する。worker が現在の標準出力を読み直し、旧 gate を永久に閉じて engine を回収し、必要な rate 準備・新しい stream／時刻対応を作る。同一 rate は声を再構築しない。凍結中も最新操作を受理し、候補 stream の準備失敗後は保持中の世代へ receipt を戻す。新 epoch は別 lease cell／error cell を持ち、古い callback・通知が新 engine を借用しない。通常の再準備と sleep は失敗表示と区別し、pause／停止時刻の失敗は同じ試行の再開で覆い隠さない。native 通知を契機とした一回の再試行に限り、一定周期の成功待ちや代用 rate はない。
 
 ## 操作から音と絵まで
 

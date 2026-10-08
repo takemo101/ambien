@@ -70,6 +70,7 @@ impl fmt::Display for TimingError {
 impl std::error::Error for TimingError {}
 
 /// A cached native timebase. Construction belongs outside the audio callback.
+#[derive(Clone, Copy)]
 pub struct MachClock {
     numer: u32,
     denom: u32,

@@ -205,6 +205,7 @@ name = "ambien"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "block2 0.6.2",
  "cpal",
  "ely-gpui-component",
  "fundsp",
@@ -212,6 +213,8 @@ dependencies = [
  "gpui_platform",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
  "objc2-foundation 0.3.2",
  "parking_lot",
  "raw-window-handle",
@@ -3997,6 +4000,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1eebcea8b0dbff5f7c8504f3107c68fc061a3eb44932051c8cf8a68d969c3b2"
 dependencies = [
+ "block2 0.6.2",
  "dispatch2",
  "objc2 0.6.4",
  "objc2-core-audio-types",

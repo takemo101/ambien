@@ -8,12 +8,12 @@ use gpui::{
 };
 
 use crate::{
-    audio::{AudioController, OutputStatus},
+    audio::{AudioController, OutputStatus, RecoverySignals},
     controls::{ControlEdit, ControlState, Revision},
     persistence::{LoadedState, SaveError, SaveSnapshot, SaveStage, SaveStartup, SaveWorker},
     platform::macos::{
-        WindowGeometryError, WindowPlacement, WindowRole, capture_placement, constrain_window,
-        prepare_window,
+        PowerMonitor, WindowGeometryError, WindowPlacement, WindowRole, capture_placement,
+        constrain_window, prepare_window,
     },
     situations::{Registry, SituationIndex},
     ui::{
@@ -43,6 +43,7 @@ pub(crate) struct AppModel {
     scene: Option<WindowHandle<SceneView>>,
     settings: Option<WindowHandle<SettingsView>>,
     audio: AudioController,
+    power_monitor: Option<PowerMonitor>,
     controls: ControlState,
     menu_selection: Option<SituationIndex>,
     audio_updates: Option<Task<()>>,
@@ -104,13 +105,22 @@ pub(crate) fn start(cx: &mut App) {
         notice: Some(format!("状態を読み込めず保存できません: {error}")),
     });
     let last_resume = controls.manual_target;
-    let (audio, updates) = AudioController::start(registry, controls.clone());
+    let signals = Arc::new(RecoverySignals::new());
+    let (power_monitor, power_ready) = match PowerMonitor::new(signals.clone()) {
+        Ok(monitor) => (Some(monitor), Ok(())),
+        Err(error) => (
+            None,
+            Err(format!("スリープ復旧通知を登録できません: {error}")),
+        ),
+    };
+    let (audio, updates) = AudioController::start(registry, controls.clone(), signals, power_ready);
     let owner = cx.new(move |_| AppModel {
         scene: None,
         settings: None,
         _window_closed: None,
         settings_appearance: None,
         audio,
+        power_monitor,
         controls,
         menu_selection: None,
         audio_updates: None,
@@ -143,6 +153,11 @@ pub(crate) fn start(cx: &mut App) {
         model._quit = Some(cx.on_app_quit(|model, cx| {
             if let Err(error) = model.flush_latest(cx) {
                 model.record_save_error(error, cx);
+            }
+            if let Some(mut monitor) = model.power_monitor.take()
+                && let Err(error) = monitor.shutdown()
+            {
+                eprintln!("Ambien: スリープ復旧通知の解除に失敗しました: {error}");
             }
             model.audio.shutdown();
             std::future::ready(())
