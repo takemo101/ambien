@@ -25,7 +25,7 @@
 | `src/audio/mod.rs` | `AudioController` worker、標準出力、config、build/play/pause、停止・復旧 |
 | `src/audio/render.rs` | `PreparedEngine`、型付き CPAL render、合成・混合・出力形式変換 |
 | `src/audio/world.rs` | `WorldClock`、`Movement`、滞在・PRNG・停止再開・表示と保存用の選択 |
-| `src/audio/mix.rs` | 現存 `GainRamp` のN声slerp。手動／自動durationはrender側が選び、進行中の秒はrampが保持。現存volume／muteの `OutputRamp` はrender私有。復旧・終了は対応作業で実装 |
+| `src/audio/mix.rs` | 現存 `GainRamp` のN声slerp。手動／自動durationはrender側が選び、進行中の秒はrampが保持。現存volume／muteと独立した復旧gainの `OutputRamp` はrender私有。正常終了rampは対応作業で実装 |
 | `src/audio/transport.rs` | `ControlMailbox`、`StatusMailbox`、`VisualRing` と固定容量の数値転送 |
 | `src/audio/lease.rs` | `EngineLease` の排他所有だけ。unsafe とその安全証明を閉じる |
 | `src/audio/timing.rs` | `StreamEpoch`、Mach 時刻、CPAL 再生予定時刻、DSP 因果遅延 |
@@ -255,7 +255,7 @@ output = voice sum * volume_gain * mute_gain * recovery_gain * shutdown_gain
 
 volume／mute は別端点を持つ有限長 ramp、0・1へ正確に到達する。mute 中の volume 操作は解除にならない。復旧 gain は世界と mute を変えず出力だけ滑らかに戻す。shutdown gain は正常終了成功後だけ下げ、保存失敗では開始しない。voice calibration は試聴で決め、設定 volume として保存しない。
 
-現存 `OutputRamp` は `PreparedEngine` 内の私有部品で、actual rateに応じた20msのsmoothstepを混合後のvolume／muteに独立適用する。これは初回実装定数であり製品の新しい数値要件ではない。同じ端点はrampを再開せず、途中の編集は現在値から追従し、有限sample数で端点を正確に確定する。出力が0でも声の世界・視覚イベント・寄与gainは進める。N声交差は別の `GainRamp` が所有する。復旧／終了rampは未実装であり、この部品をそれらの代用品にしない。
+現存 `OutputRamp` は `PreparedEngine` 内の私有部品で、actual rateに応じた20msのsmoothstepを混合後のvolume／muteに独立適用する。これは初回実装定数であり製品の新しい数値要件ではない。同じ端点はrampを再開せず、途中の編集は現在値から追従し、有限sample数で端点を正確に確定する。出力が0でも声の世界・視覚イベント・寄与gainは進める。N声交差は別の `GainRamp` が所有する。現存の復旧gainは別の `OutputRamp` として同じengine内に保持し、epoch再準備時に無音から戻す。正常終了rampは未実装であり、volume／muteや復旧gainをその代用品にしない。
 
 Σg²=1 は独立信号の power の数学的規則であり、波形相関・実 peak・聴感一定の証明ではない。混合は f64 積算、最終出力は finite を保つ音源設計・level 校正で収める。整数出力変換時は許容範囲へ clamp するが、この clamp を強い peak の音質修正や合格根拠に使わない。非有限発生を黙って通常音扱いせず固定 DSP fault を通知し、該当出力を無音として停止・調査する。これは未成立の DSP を隠す fallback ではない。
 
@@ -351,7 +351,7 @@ default host の `default_output_device()` をそのまま使う。列挙で同 
 
 callback は最初に全 output を silence にし、lease 取得失敗／inactive epoch ならそのまま返す。実 frame は `data.len()/channels`。partial channel の余りは silence のまま、固定 callback 長を仮定しない。必要な固定 scratch 単位へ分割するが、world frame offset は全区間で連続。mono は `(L+R)/2`、stereo は L/R、3ch 以上は最初の L/R だけで残り silence。機器設定と OS volume を変えない。I16 変換は `FromSample<f32>` の型付き経路を使う。
 
-現存P04の各sampleは、区間の最新snapshot適用後にslerpを1sample進め、実gainsの正／0境界をvoiceへ通知し、同じsampleの世界時刻でノブ・粒包絡・eventをadvanceする。正の寄与voiceだけtickし、f64で混合して独立volume／muteを掛け、形式変換と時刻付きevent／state公開を行って世界clockを1sample進める。終了sampleとgain端点をこの順序で揃える。将来の復旧／終了gainを追加しても世界・寄与と出力gainを混同しない。
+現存P04の各sampleは、区間の最新snapshot適用後にslerpを1sample進め、実gainsの正／0境界をvoiceへ通知し、同じsampleの世界時刻でノブ・粒包絡・eventをadvanceする。正の寄与voiceだけtickし、f64で混合して独立volume／muteを掛け、形式変換と時刻付きevent／state公開を行って世界clockを1sample進める。終了sampleとgain端点をこの順序で揃える。P10の独立復旧gainを含め、世界・寄与と出力gainを混同しない。正常終了gainの追加は対応作業で扱う。
 
 非寄与 voice は world update だけで tick しない。音の履歴は上記 `set_contributing` の境界で無効化し、数分後の再選択で以前の残響を再生しない。消音・volume0では world／イベントを必ず進め、寄与 voice の wet／filter tick を維持して tail の論理時間を止めず、出力計算／変換の不要な部分だけ省く。寄与と消音を同じ active flag にしない。
 
