@@ -300,10 +300,10 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **今回の所有・実施順:** parentはAudioController／main root／実native観測／文書の統合を所有する。native Adapterは固定 `RecoverySignals` だけをcallbackへcaptureし、worker-owned `OutputDeviceMonitor` とmain-owned `PowerMonitor` を返す。Engineは同じBox声／controls mailbox／world／wander／mixをmoveしてworker排他中だけ `prepare_output_epoch(rate)` を行い、同rateではDSPを再生成しない。旧gate／error cellを新cellへ再利用せず、失敗した準備のengineもworkerに保持する。最初に現存実streamへfixed DeviceChangedをreportする消音smokeでmissing recoveryを観測し、変更後は同じ経路の新epoch／残りworld／旧error拒否とshutdownを確認する。このcontrolled signalを実Mac sleep／物理的抜差しと呼ばず、本人の安全な操作による実機観測を別gateにする。
 
-- [ ] stream 外に OS device property listener と sleep/wake 通知を保持する。error callback は epoch ごとの別 bitset cell へ固定 code を公開し、worker は現在 cell だけを処理する。旧 monitor の遅延 DeviceChanged/StreamInvalidated で復旧済み stream を止めない。
-- [ ] enabled=false→worker の Idle→Worker 単発取得を非 RT で待ち→checkpoint/engine take を行う。pause/drop/最後 callback を回収証明にしない。
-- [ ] reroute と rebuild を区別し、rate/config 変更は worker 排他中に I02 `prepare_rate` で再準備する。論理残り秒・世界の PRNG/粒寿命/息/天候・mute を保持し、旧 frame 数を新 rate と読み替えない。返す `VoiceLatencyFrames` は新 rate で予定再生時刻へ変換する。失敗は Frozen と明示出力失敗を維持し、未知遅延を 0 にしない。
-- [ ] 旧 gate を永久 disabled にし worker が engine.take した旧 cell は Owner=Worker 固定で封じる。別の新 epoch cell へ engine を move/install→Idle→enable し、復旧 gain を滑らかに戻す。旧 callback が新 cell の CAS を取得できないことと、新 callback に旧 closure が作る無音 gap がないことを interleaving test に追加する。
+- [x] stream 外に OS device property listener と sleep/wake 通知を保持する。error callback は epoch ごとの別 bitset cell へ固定 code を公開し、worker は現在 cell だけを処理する。旧 monitor の遅延 DeviceChanged/StreamInvalidated で復旧済み stream を止めない。
+- [x] enabled=false→worker の Idle→Worker 単発取得を非 RT で待ち→checkpoint/engine take を行う。pause/drop/最後 callback を回収証明にしない。
+- [x] reroute と rebuild を区別し、rate/config 変更は worker 排他中に I02 `prepare_rate` で再準備する。論理残り秒・世界の PRNG/粒寿命/息/天候・mute を保持し、旧 frame 数を新 rate と読み替えない。返す `VoiceLatencyFrames` は新 rate で予定再生時刻へ変換する。失敗は Frozen と明示出力失敗を維持し、未知遅延を 0 にしない。
+- [x] 旧 gate を永久 disabled にし worker が engine.take した旧 cell は Owner=Worker 固定で封じる。別の新 epoch cell へ engine を move/install→Idle→enable し、復旧 gain を滑らかに戻す。旧 callback が新 cell の CAS を取得できないことと、新 callback に旧 closure が作る無音 gap がないことを interleaving test に追加する。
 
 **Behavior tests:** callback CAS 前/後に disable を挟む interleaving→worker と callback が同時 borrow しない、旧 closure 遅延呼出→無音/world 不変、旧 error cell の遅延 DeviceChanged→新 epoch と正常出力不変。rate48k→44.1k、cross 残り1.25秒→新 rate でも残り1.25秒；sleep 壁時計1時間→world delta0；mute=true→復旧後 true。engine/DSP drop が worker、closure 遅延寿命でも engine を回収できる。
 

@@ -931,7 +931,7 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 
 新shipping SHA256は `2c2dbd50e647846bf1e6235cb1438f6a99052a5c91a82a961a7658f8bed3cddd`。同SHAの実GPUI `lifecycle` 7.08秒PASS、`target/native-e2e/run-C44CEEA0-8DA6-4B91-A4FB-AAABE3189E36/report.json` に所有menu／minimize／zero-window再生成／3正常Quit40118・40274・40280 exit0を記録。native lifetime read-only review1分17秒findings0／confidence0.95、recovery consumer review1分32秒findings0／confidence0.94。reviewerは検査・起動・編集なし。
 
-是正後の本人による実出力切替とsleep復帰は、次節のユーザー報告で問題なしと確認された。実rate変更・再接続・出力不可からの復旧、world／消音／シーン保持の個別測定と可聴復帰の未観測条件は別に残す。過去の実失敗や限定成功を全面成功に書き換えず、確認済みの切替やsleepを同じ結果の再確認のために繰り返さない。PR12はDraftのまま、受け入れ後の通常merge・but同期・Mikan反映を最後に停止し、P11へ進まない。
+是正後の本人による実出力切替・sleep復帰・消音onの機器切断／再接続は、次節のユーザー報告で問題なしと確認された。自動試験、実native／CPAL／GPUI経路、本人の定性的な実機観測を区別してP10の受け入れを判定する。過去の実失敗や限定成功を全面成功に書き換えず、未計測の物理値や依存全資源の保証を足さない。通常mergeは最終headの独立レビューと検査後に行い、but同期・Mikan反映を最後に停止してP11へ進まない。
 
 ### 修正版の実出力切替についてのユーザー成功報告
 
@@ -942,4 +942,18 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 続いてユーザーは「スリープからの復帰も問題ありませんでした」と報告した。修正版の実sleep/wakeで問題なしという本人観測を受け入れる。sleep期間、前後のworld／残り滞在・交差、消音on、出力世代増加の数値・画像は未報告であり、測定したとは主張しない。後から準備したread-only power observer PID45545の取得済みログはreadyのみで、本人のsleepについてwillSleep／didWakeの時刻は記録されていない。これを本人の成功報告の否定や未実施の根拠にせず、再度sleepを求めない。不要になったobserverは停止済みで実appを終了していない。
 
 受領時のread-only `system_profiler SPAudioDataType -json` は0.18秒成功、Creative Stage SE miniのBluetooth／44100Hzが現在default、Mac miniのスピーカー／Display／HDMIは48000Hzで利用可能。入力機器は列挙metadataのみで選択・録音していない。残る具体的な新条件は消音onでCreativeの機器接続だけを切断し、48000Hzの出力への復旧、Creative再接続後の44100Hzへの復旧を通した消音保持・シーン継続と古い光が一斉に出ないこと。world／残り秒の個別観測、実出力使用不能を作れる範囲、滑らかな可聴復帰は別に判定する。成功した通常切替・sleepを繰り返さず、未確認条件をP10全体の合格へ広げない。
+
+### P10 の最終受け入れと統合前の証拠
+
+消音をonにし、Creative Stage SE miniだけを切断、他の標準出力への復旧後とCreative再接続後に消音保持・シーンの自然な継続・rate／出力世代／エラーの有無を確認する依頼に対し、ユーザーは「問題ありませんでした」と報告した。通常の出力切替、sleep復帰、消音onでの機器切断・再接続の3報告を、指定した操作の定性的な成功として受け入れる。最後の報告には追加画像や各rate／出力世代／worldの数値はなく、44100→48000→44100の測定列や実sleep中world delta0を観測したとは主張しない。既に成功した本人操作を同じ結果の再確認のために繰り返さない。
+
+| P10 の条件 | 当該条件の証拠 |
+|---|---|
+| stream外のnative listener／power通知、現在epochだけのerror消費 | native source・実monitor smoke・実sleep復帰の本人報告。旧error cell／不変native通知の拒否は独立試験と実CPALの制御signal経路 |
+| callbackとworkerの排他回収、旧gateの永久閉鎖・新cellの独立性 | `lease` のinterleaving／遅延旧callback／worker所有drop、実typed callback境界の180テストと最終sourceレビュー |
+| rate変更時のworld・残り滞在／交差・mute、失敗後も保持 | `recovery_preserves_dwell_deadline_and_uses_no_wall_clock_catchup`、`recovered_real_rate_consumer_finishes_its_existing_arc_in_remaining_seconds`、frozen control／部分rate失敗／receipt保持の試験。本人のsleep・消音on再接続の定性的な復帰報告とは別証拠 |
+| 出力失敗を明示し窓・操作・最後のsceneを保持 | frozen owner／最新receipt／scene checkpointの試験、実GPUI controls。修正前の実失敗画像はエラー・保持world104.188秒と設定窓の実表示を記録したもので、現在の復旧成功や全無出力機器構成の証明にはしない |
+| 新出力での復旧と旧光の破棄、独立した滑らかな出力gain | real-rate／same-rate recovery、frozen mute／volume0の先頭漏れ防止、epoch scene clearの試験と実CPAL再準備。実切替・sleep・消音on再接続の本人確認 |
+
+この証拠の組合せをP10の実装・behavior tests・実経路・本人smokeの受け入れとする。任意の機器で全出力が長時間使用不能になる実験、sleep前後の物理的な詳細時刻、全native依存の無漏れ・全RT、音質の採用、50ms物理同期、高DPI負荷、下限OS、署名・公証・更新を合格にしたものではない。P10の規則を制御signalだけで実機成功へ読み替えず、数値規則の独立試験と実機の定性的な報告の範囲を保持する。最終headのレビューと文書検査、PR12通常merge・workspace同期・Mikan結果反映はこの受け入れ後に行い、完了したら開発を停止する。
 
