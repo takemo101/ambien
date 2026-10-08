@@ -611,3 +611,53 @@ native担当は実PNG9枚すべてを目視し、端点では位置／半径が�
 最終caseのfocused-other keyboard選択とcaptureノブを既存rowへ反映後、同じ課題をrecipeだけのfresh-context stateless completionへもう1回適用した。`situations`、3ノブ、menu／最新対象、消音制御、雨Space→岩Return、実size100／hardness0、PNG3枚／2比較／正常Quitを取得し、capture値を品質採用値やreceiptを実gain／可聴出力にしなかった。未記載の閾値／実装細部／実行結果は推定せず不足として報告した。前後各1回に加えた最終更新後1回のpure-reference評価であり、pressure試験や5-rep wording実験ではない。
 
 交差capture追加の参照評価も変更前後に各1回、recipeだけのfresh-context completionで実行した。同じRock3ノブ／menu／消音frame課題に「実雨→岩交差の独立capture段階と枚数」を加えたbaselineは「separate crossing-frame stageは未記載、3PNG／2比較は対象／markとは別で交差証拠にできない」と回答した。既存case rowへ独立`rock-crossing-muted`段階を追記後は、雨選択から2.3秒後の岩再選択直後、追加3PNG／2比較、計6PNG／4比較を取得し、実gain／同期／可聴出力／現run成功とは分離した。pure-reference gapの前後適用であり、pressureや実native成功の試験ではない。
+
+## P05 深海登録のoffline検証とnative前提待ち
+
+対象はP04統合commit `156a11b352c5a4792398f12253855fbd1981ee5d` を基点とする `feat/amb-007-deep-voice` の未commit候補。環境はDarwin27.0.0／Apple Silicon arm64、実際のcompilerはcargo1.95.0・rustc1.95.0、Apple Swift6.4／arm64-apple-macosx27.0.0。下限macOS15の動作証拠ではない。
+
+### RED／GREENと実factory波形
+
+parentのreal-factory回帰 `situations::deep::tests::shallow_deep_air_zero_retains_the_low_sound_and_stops_new_visual_bubbles` は、未登録Deepで `deep voice must be available`、1test失敗・exit101・3.54秒（artifact1123）。最初の `cargo` 起動はPATH不足exit127でありREDではない。既存 `~/.cargo/bin/cargo` を確認して絶対pathで再実行し、導入・全体設定変更は行わなかった。
+
+実装後のparent aggregate（artifact1128）は `cargo fmt --all`、locked／offlineの114tests（15.46秒）、all-targets Clippy `-D warnings`（1.63秒）、build（1.57秒）、実Swift `--help` がPASS、全体23.96秒。private behavior試験はair0／低帯域、depth曲線、入場eventの実音との一致、full pool／極端rate・大幅ノブ変更／有限出力／heap0、下降pitchと終端、非寄与のaging・再入／旧尾失効・rate準備失敗を確認する。初期値やsource文言の転記を固定する試験は追加していない。
+
+parentは実Registryから準備した声を48kHz・seed137・各5秒、全sample有限かつ絶対値1未満を観測し、最後3秒のstereo RMSを測定した（artifact1133、throwaway1test PASS・5.61秒、全体9.76秒）。Device／stream／UIは起動していない。実登録順とknob所有rangeはrain0..2、rock2..5、deep5..7、準備経路が返すdry delayは各0framesだった。
+
+| 実factory／knob | raw peak | 最後3秒RMS | 観測した強いevent |
+|---|---:|---:|---:|
+| rain候補 .34／.12 | 0.166777626 | 0.010071152 | 41 |
+| rock候補 .27／.61／.18 | 0.018213162 | 0.003903708 | 1 |
+| deep候補 .68／.16 | 0.019970099 | 0.005058582 | 0 |
+| deep depth0／air0 | 0.024619939 | 0.005925881 | 0 |
+| deep depth1／air0 | 0.018730294 | 0.004676820 | 0 |
+| deep depth0／air1 | 0.024746109 | 0.005885361 | 12 |
+| deep depth1／air1 | 0.018293355 | 0.004515441 | 12 |
+
+air0でも低い実出力が残り、観測した新しい強いSlowGlowはなかった。弱い粒を含むadmissionのzero境界は上記のbehavior試験で別に確認する。同じseed／air1のdepth0→1では最初の実event world0.328792・x0.009237・y0.024788・radius3.777719が一致し、strength0.700335→0.315151、寿命406.761371→1016.903412ms。二つ目もworld／位置／radius一致と暗いstrength／長い寿命を観測した。これは同じ気泡のsource属性と有限波形の証拠であり、実画面の暗さ／速度、CPAL出力・可聴音・物理同期・全入力のpeak保証・聴感音量の校正ではない。temporary test sourceと `main.rs` のcfg attachmentは測定後に除去した。係数・initialはP13未確定のcandidateのまま。
+
+### native allは起動前BLOCKED
+
+現binary SHA256 `2f1cbba7196114758b666148db36e1850d59ef8468b092327d1824ecfd57e426` へofficial `all` を1回実行した。今回reportは `target/native-e2e/run-B9B47665-988C-4B15-9BA7-7F2C0A6D1E2C/report.json`、2026-10-08T03:21:30Z→03:21:31Z、全体1.04秒／exit77。binary.identityはPASSだがsession.preflightは `lock=true`、console=true／login=true／UID501／active1／asleep0でBLOCKED。lifecycle／controls／situations／deep／visualは未実行で、候補PID・PNG・画像測定・正常Quitはない。directory0700／report0600を実確認した。
+
+これは権限不足やAX failureではなく、安全なconsoleの外部前提不足である。ユーザーへMacのunlock後「解除した」と返信するよう案内した。自動unlock・入力・OS／TCC変更・同条件再試行は行わず、positive lock中の実CPAL起動も行わない。actual session変化後の新規native受け入れと実CPAL観測が必要で、以前のP04成功やoffline波形をP05 native成功へ書き換えない。
+
+### 独立sourceレビューと固有recipe参照評価
+
+read-only Spec／Standards reviewはそれぞれcorrect・findings0・confidence0.91／0.92。source・SPEC・pinned DSP／resource／inactive／event／native guardを対象とし、reviewerはchecks・launch・editsを実行していない。これはsource-only verdictで、stable docsの最終claim確認、native／CPAL、P06最大三声RT、P08物理同期、P13試聴を承認していない。
+
+既存recipeだけをsystem参照に、tools／履歴なしのfresh-context completionへ同じ「深海case・depth／air端点・三環境menu／settingsと保持・消音frame枚数／比較／正常Quit・capture／lockの分類とproof limits」課題を変更前後各1回適用した。baselineはdeep case／ノブ端点／深海選択・保持／画像契約を未記載と回答し、岩の契約を転用しなかった。既存case表とpreflight対応を最小更新した後は `--case deep`、深さ0／空気0→空気100／深さ100、0/0→11/10、三環境choice／独立mute／深海端点保持、設定close後2.3秒のsetup分離、deep-muted PNG3枚／2比較／正常exit0、capture不足とlockのBLOCKEDを取得した。receipt／待ち時間／画像を実gain・低い可聴音・気泡頻度・物理的な暗さ／速度／同期へ拡張せず、未記載の入力細部・雨岩の値保持・実行結果は不足と回答した。pure-reference retrieval／application gapの前後観測であり、5-rep wording microtestはN/A、pressure／自然遵守率／実native成功の試験ではない。
+
+stable docsを供給したbounded claim follow-upもSpec／Standardsがcorrect・findings0、confidence0.93／0.94。code再監査・checks・edits・launchは行わず、上記の数値とsource／native前提待ちの区別を確認した。parentの `npm run check:docs` は全体0.41秒・本体114msでPASS、21Rust／2Swift等の現存sourceをscanした。`No init version recorded` warningは残し、Lat init／hooks／設定変更を行っていない。このdocs検査はこの結果追記前のP05文書・recipeを対象とし、製品受け入れやblockedの解除を意味しない。
+
+### ユーザーunlock後の同一候補native allと実CPAL
+
+ユーザーの「解除した」報告後、同一binary SHA256 `2f1cbba7196114758b666148db36e1850d59ef8468b092327d1824ecfd57e426` の未完全caseを新規private runで実行した。今回reportは `target/native-e2e/run-2A83FEC5-11E6-4EFA-B8BD-D5C0EDA2A0C0/report.json`、2026-10-08T04:32:17Z→04:33:07Z、全体50.44秒／PASS。own console・login完了・UID一致・awake／active display・non-loginwindow foregroundが揃い、positive lockなしを確認した（nilだけを解除証拠にしていない）。AX／event／captureもtrue、OS／TCC／認証設定変更はない。binary／session／lifecycle／controls／situations／deep／visualの7checksすべてPASS。過去のlock BLOCKEDは前節のまま保持する。
+
+実native `deep` はmenu／settingsの全三環境choice、exclusive mark／radio／mainと音声receipt、独立muteを確認し、深さ0・空気0→空気100・深さ100、世代0/0→11/10、戻った深海で両100の保持がPASS。候補初期値は観測だけで採用値として固定していない。設定close／2.3秒setup分離後、所有PID14286／CGWindowID10710の1920×1200実PNG3枚と隣接2比較がPASS、変化6528pixels／fraction0.0050595238095238098、5864／0.0045448908730158733（crop1536×840、1290240pixels）。parentも実 `deep-muted-2.png` を読み、青い円形の光を観測したが、暗さ・速度の比較・Deepのみの帰属・主観品質の合格にはしていない。全allは合計12PNG／8比較。実menu／Cmd-Q正常0の所有PIDsは12181・12506・12522・12532・12714・14286・15188。parentがdirectory0700／report0600／deep PNG3枚0600を実確認した。画像はlocalのみ、透ける背景の影響や音・物理同期の限界は今回reportに残る。
+
+native終了後に実 `AudioController::start` とworker／CPAL callback／control・visual transportを使うtemporary probeを実行した（artifact1154、1test PASS7.31秒／全体10.91秒）。実標準出力44100Hz／2channel／F32。mute・deep選択・volume18%・depth0／air0のreceipt5/3を受理し、実header phase0／gains `[0,0,1]`、deep breath0.35936114を観測。mute中world2.000000→4.000000が進み、新しいdeep eventはなかった。mute解除後のdepth0／air0を2秒、18%の実出力経路で動かし、Running継続とreceipt6/3を確認。air1へ変えた実receipt7/4と、world6.9327210884353745・x0.13902998・y0.068993315・strength0.8021462・radius4.569639・SlowGlow・寿命467.619832msの実入場eventを観測し、controllerの正常worker shutdown／joinが戻った。sample waveformは前節のoffline測定、物理的な可聴音・録音・聴感・同期は今回probeで測定していない。temporary probeとmain cfg attachmentは除去し、shipping sourceは変更していない。
+
+これにより今回P05のnative／CPAL前提待ちは実観測で解消した。P06最大三声RT／再入統合、P08物理同期、P13試聴／係数・initial確定、下限OS・高DPI負荷・配布の別gateへ一般化しない。現時点では通常PR merge／同期／Issue completionをまだ実施していない。
+
+今回native／CPAL追記の最終bounded Spec／Standards evidence reviewもcorrect・findings0、confidence0.95／0.97。unchanged sourceと実report／artifact1154の整合、過去BLOCKED保持、P06／P08／P13と物理的な未測定範囲の区別を確認し、reviewerによるchecks／launch／edit／source再監査はない。追記後のparent docs検査は0.45秒／本体109msでPASS（この結果行の追加前）、Latのinit警告は保持した。

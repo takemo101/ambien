@@ -8,7 +8,7 @@
 - **計画 Interface／設計**：製品全体の型・関数・規則を示す代表断片。実際に作成した部分は以下の現存ソースへの参照と区別し、断片をコンパイル済みコードの転載として扱わない。
 - **限定検証**：固定二窓は build・幾何試験・実 GPUI/NSWindow の状態観測を実施し、2x主画面でガラス・シーン／設定操作・最小化と復帰・system appearance・全OSタイリングの成功回答を得た。診断を除去した shipping source に外部 AX／foreground CGEvent の E2E runner を実行し、設定・窓の lifecycle と、両窓からの ⌘Q による実 PID 消失・exit0 を確認した。過去の physical 終了報告と host 生存の不一致の原因特定とは区別する。別1x画面・倍率切替・負荷、音質、RT、物理同期、署名・公証・更新へ一般化しない。証拠は [検証記録](verification.md) に置く。
 
-ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界、P03 の雨ノブ・音量・独立消音・受理通知、P04 の岩と最終形の共通手動交差を作成した。P02 の雨・左右の光・シーン閉鎖中の音継続・再表示、P03 のフォーム操作・独立消音にはユーザーの確認を得た。P04 は実標準出力の寄与gains・途中再選択・消音中の世界とImpactを観測した。新しい選択フォームのnative観測とその限界は検証記録で区別する。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
+ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界、P03 の雨ノブ・音量・独立消音・受理通知、P04 の岩と最終形の共通手動交差、P05 の深海合成と登録を作成した。P02 の雨・左右の光・シーン閉鎖中の音継続・再表示、P03 のフォーム操作・独立消音にはユーザーの確認を得た。P04 は実標準出力の寄与gains・途中再選択・消音中の世界とImpactを観測した。P05 の実factory端点波形と同じ気泡のevent記録はoffline観測であり、native／CPAL・試聴の受け入れとは分離する。新しい選択フォームのnative観測とその限界は検証記録で区別する。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
 
 ## 予定ファイル構成
 
@@ -291,7 +291,9 @@ pan は event と共通の normalized x から equal-power stereo を作る。y�
 
 現存P04の岩は固定24衝突slot、各slotの低い三つの `Resonator<f64,U3>` と有限包絡、左右独立の色付きgated rolling noiseを持つ。低周波／高rateでpole係数を失わないようmodal計算をf64にし、FunDSPの第三入力へ `Q=center/bandwidth` を渡す。短い部屋は既存 `RestartableReverb`、DC除去とdry遅延の確認は実声の準備経路で行う。factoryは対応rateを検査し、変更時はworkerがrate依存storageを再準備する。量・大きさ・硬さの曲線はrock私有、UI／menuは登録metadataとtyped indexだけを使う。係数・ノブinitialはP13未確定のcandidateである。
 
-非寄与の雨／岩は新規Poisson入場を止め、既存粒の論理age・ノブ追従・息／天候の時間更新とPRNG状態を保持する。寄与境界で古い粒のaudio eligibilityとDSP履歴を無効化し、再入場で古い音を復活させない。global mute／volume0はこの非寄与状態へ変換しない。settingsは現存Ely Radioの実role／label／選択状態を持つ個別choiceを登録metadataから生成し、mouseとSpace／Enterのreleaseはそのchoiceのtyped targetへ届く。受理表示は「手動の表示対象」であり、g²最大・実聴感dominantとは呼ばない。
+現存P05の深海は固定24気泡slot、左右独立のpink／brown相当低帯域noiseと86／143Hzの固定低共鳴、depthのlowpass／暗さ／寿命、airの高い成分とPoisson密度を持つ。air0へ追従後は新規気泡と高いair成分を正確に0にし、低い連続音と既存粒／wet尾は残す。気泡の `Resonator<f64,U1>` は `Q=center/bandwidth`、中心周波数は有限包絡中に下降し、tone係数50Hz／pitch係数200Hzのcadenceで更新する。eventのx・strength・radius・寿命は実入場気泡から渡し、depthは音とSlowGlow双方の強さと寿命へ作用する。対応rateのworker準備時に実dry routingの遅延を検査する。既存synthesis primitiveとI02／I07を再利用し、production consumerへdeep名の分岐や新UI経路を追加しない。係数・initialはP13未確定のcandidateであり、offline eventを物理的な光の暗さ・速度・同期の証拠とは呼ばない。
+
+非寄与の雨／岩／深海は新規Poisson入場を止め、既存粒の論理age・ノブ追従・息／天候の時間更新とPRNG状態を保持する。寄与境界で古い粒のaudio eligibilityとDSP履歴を無効化し、再入場で古い音を復活させない。global mute／volume0はこの非寄与状態へ変換しない。settingsは現存Ely Radioの実role／label／選択状態を持つ個別choiceを登録metadataから生成し、mouseとSpace／Enterのreleaseはそのchoiceのtyped targetへ届く。受理表示は「手動の表示対象」であり、g²最大・実聴感dominantとは呼ばない。
 
 ### 音質の確定方法
 

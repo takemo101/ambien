@@ -1,6 +1,6 @@
 ---
 name: verifying-ambien
-description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩ノブ・選択・音量・消音の受理、または固有の検証コマンドと受け入れ条件を確認するとき。
+description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・三環境選択・音量・消音の受理、または固有の検証コマンドと受け入れ条件を確認するとき。
 ---
 
 # Ambien 固有の検証レシピ
@@ -22,6 +22,7 @@ description: Use when Ambien の native E2E、実行元の権限不足・許可�
 | 窓・menu・最小化・再生成・終了 | `lifecycle` | 「窓」／AX 窓 identity・外枠・終了 PID とコード |
 | 雨・風・音量・独立消音・選択・scroll | `controls` | 「設定窓」「消音・スリープ・出力停止」／menu・設定一致、settings/manual revisionと音声receipt、focused AX sliderとviewport。座標入力は実hit PID・所有window identity・最新control boundsを照合 |
 | 岩の3ノブ・menu／設定選択・消音中frame | `situations` | 「シチュエーション」「切り替えと途中操作」／登録された岩、岩の量・大きさ・硬さの端点受理、雨→岩の最新手動対象とmenu mark、消音中volume0／10／20・解除20%後再消音、focused-other雨Space→岩Return、capture前の実size100／hardness0受理、端点の所有シーンPNG3枚／隣接2比較に加え、実scene雨選択から2.3秒後に岩へ再選択した直後の`rock-crossing-muted` PNG3枚／隣接2比較、実menu Quit正常0。受理対象は実gainや可聴出力の証拠ではなく、captureノブは品質採用値ではない。画像契約と実gain／物理同期は別証拠 |
+| 深海の2ノブ・三環境選択・消音中frame | `deep` | 「シチュエーション」「切り替えと途中操作」／深さ0・空気0→空気100・深さ100、三環境のmenu／settings choiceと独立mute保持、深海へ戻った両端点の保持、exact receipt0/0→11/10。設定close後2.3秒のsetup分離、所有シーンの`deep-muted` PNG3枚／隣接2比較、実menu Quit正常0。receipt・待ち時間・画像は実gain／低い可聴音／気泡頻度／物理的な暗さ・速度／同期を証明せず、端点を品質採用値にしない |
 | 消音中の実シーン窓 frame 変化 | `visual` | 「音と絵」「検証条件」／所有窓 PNG と内部 pixel 比較。背景透過の変化も含み得る |
 | 上記すべて | `all`（省略時） | 選択した全ケースの証拠 |
 | 値・時間・状態・容量・callback 境界 | `cargo test --locked` | 現存 `src/controls.rs`、`src/audio/`、`src/platform/` の対応試験。native smoke の代わりにしない |
@@ -38,7 +39,7 @@ description: Use when Ambien の native E2E、実行元の権限不足・許可�
 /usr/bin/swift -e 'import CoreGraphics; print(CGPreflightScreenCaptureAccess())'
 ```
 
-falseなら取得APIや未完の`visual`／`situations`画像段階を実行せず、共通手順で次の具体的な準備を案内する。trueは画面取得の利用可否だけであり、安全入力や画像ケースの合格ではない。現存runnerがsession／display／AX／event／所有を確認する。binary hashと関連条件の影響を照合し、既存lifecycle／controlsの成功が有効なら、準備のためにそれらを繰り返さず、未完の選択ケースだけを新規runで実行する（以下はvisualの例。岩のケースは`--case situations`）：
+falseなら取得APIや未完の`visual`／`situations`／`deep`画像段階を実行せず、共通手順で次の具体的な準備を案内する。trueは画面取得の利用可否だけであり、安全入力や画像ケースの合格ではない。現存runnerがsession／display／AX／event／所有を確認する。`lock=true`なら候補起動前にblockedとして停止し、ユーザー本人のunlock後の実セッション変化があるまで再試行しない。binary hashと関連条件の影響を照合し、既存lifecycle／controlsの成功が有効なら、準備のためにそれらを繰り返さず、未完の選択ケースだけを新規runで実行する（以下はvisualの例。岩は`--case situations`、深海は`--case deep`）：
 
 ```sh
 /usr/bin/swift scripts/native-e2e.swift "$PWD/target/debug/ambien" \
@@ -52,7 +53,7 @@ falseなら取得APIや未完の`visual`／`situations`画像段階を実行せ�
 
 stdout の今回の report path を読む。一意の run directory0700、`report.json`0600。`schema_version:1`、`executable`、`binary_sha256`、`selected_case`、`started_at/finished_at`、`status`、`checks[].id/status/expected/observed/artifacts` を照合する。
 
-退出は fail=1、blocked=77、選択全ケースpass=0、優先順は fail > blocked > pass。capture不足は`visual`と`situations`の画像段階をblockedにし、独立したlifecycle／controlsは続ける。situationsの途中controls受理を全ケースPASSにせず、controls単独passを画像や製品全体の合格にしない。岩・雨の初期ノブ値はP13の品質判断前の候補で、public採用値として固定しない。
+退出は fail=1、blocked=77、選択全ケースpass=0、優先順は fail > blocked > pass。capture不足は`visual`／`situations`／`deep`の画像段階をblockedにし、独立したlifecycle／controlsは続ける。situations／deepの途中controls受理を全ケースPASSにせず、controls単独passを画像や製品全体の合格にしない。雨・岩・深海の初期ノブ値はP13の品質判断前の候補で、public採用値として固定しない。
 
 画像 helper は通常 runner が呼ぶ。直接使う場合の現存 CLI：
 
