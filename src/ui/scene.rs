@@ -317,7 +317,10 @@ mod tests {
     use crate::{
         audio::{
             timing::{MachClock, StreamEpoch, WorldSeconds},
-            transport::{ControlMailbox, ErrorCell, LogicalPixels, VisualRing, WorldVisualState},
+            transport::{
+                ControlMailbox, ErrorCell, LogicalPixels, StatusMailbox, VisualRing,
+                WorldVisualState,
+            },
         },
         controls::{ControlState, Normalized},
         situations::Registry,
@@ -330,6 +333,7 @@ mod tests {
         AudioSource {
             controls: Arc::new(ControlMailbox::new(&ControlState::new(&registry))),
             visuals: Arc::new(VisualRing::new(1, registry.definitions().len())),
+            receipts: Arc::new(StatusMailbox::new(registry.definitions().len())),
             registry,
             epoch,
             clock: MachClock::new().unwrap(),

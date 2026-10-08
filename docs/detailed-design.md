@@ -8,7 +8,7 @@
 - **計画 Interface／設計**：製品全体の型・関数・規則を示す代表断片。実際に作成した部分は以下の現存ソースへの参照と区別し、断片をコンパイル済みコードの転載として扱わない。
 - **限定検証**：固定二窓は build・幾何試験・実 GPUI/NSWindow の状態観測を実施し、2x主画面でガラス・シーン／設定操作・最小化と復帰・system appearance・全OSタイリングの成功回答を得た。診断を除去した shipping source に外部 AX／foreground CGEvent の E2E runner を実行し、設定・窓の lifecycle と、両窓からの ⌘Q による実 PID 消失・exit0 を確認した。過去の physical 終了報告と host 生存の不一致の原因特定とは区別する。別1x画面・倍率切替・負荷、音質、RT、物理同期、署名・公証・更新へ一般化しない。証拠は [検証記録](verification.md) に置く。
 
-ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界を作成した。P02 は現行環境で外部 native 操作を確認し、雨・左右の光・シーン閉鎖中の音継続・再表示にユーザーの確認を得た。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
+ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界、P03 の雨ノブ・音量・独立消音・受理通知を作成した。P02 は外部 native 操作と雨・左右の光・シーン閉鎖中の音継続・再表示にユーザーの確認を得た。P03 は実標準出力で消音中の世界進行を観測したが、新しいフォーム操作の native smoke は画面ロックにより未完である。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
 
 ## 予定ファイル構成
 
@@ -124,7 +124,7 @@ rate 再準備では worker が engine を move して保有し、`PreparedEngin
 
 ### UI の正本と intent
 
-**計画 Interface** の `ControlState` は以下を持つ。main が設定端点の唯一の writer、audio が実行状態の所有者である。
+現存 [`ControlState`](../src/controls.rs) の数値部分を代表断片として示す。登録から準備する private な knob owner 配列は断片に含めない。main が設定端点の唯一の writer、audio が実行状態の所有者である。時間・自動移動の操作 UI は後続の成果である。
 
 ```rust
 pub struct ControlState {
@@ -155,6 +155,8 @@ pub struct ControlState {
 | 時間変更 | settings revision だけ。進行中の予定を変更しない |
 | 窓表示、設定閲覧、移動／fit、focus | 音声 intent を発行しない。矩形変更だけ保存世代へ |
 
+現存 `ControlEdit` は volume／mute／手動選択／ノブの部分操作で、`AppModel` が最新端点へ適用してから全 snapshot を公開する。invalid index と revision exhaustion は変更前に失敗させ、途中の field を残さない。同じ対象の明示選択・ノブ操作も新しい manual intent とする。Ely の stable id は metadata と field の意味から固定し、設定窓の制御 cache は生成時だけ確保、離散更新時に既存 storage へ値を写す。Slider／Switch は processor、segment は listener で配送する。固定版 Ely が選択済み segment の change を抑止するため、wrapper の mouse bubble と clean Enter／Space の key pair で明示再選択を扱い、新しい segment の change は propagation を止めて二重操作を防ぐ。pending key の実 focus handle と blur subscription は設定窓が短く所有する。blur は draw 時の観測であり、同一 frame 内の任意の focus ABA を保証したとはしない。表示する metadata・現在端点・受理文を Group／Label の意味付き node にも渡し、別の testing route は設けない。
+
 ### ControlMailbox
 
 ```rust
@@ -179,13 +181,15 @@ reader（試行は一回）:
   before == after && even なら scratch を採用、それ以外は前の整合 state を維持
 ```
 
-scratch と committed state は事前確保した二組。失敗 snapshot を committed に上書きせず、成功したときだけ numeric field と既存 knob slice をコピーする。コピーは callback 区間開始時だけで、毎 sample 全 field を読まない。読み取り失敗でも spin・retry・待ちなし。全 atomic の SeqCst 順序で accepted read が書込前後を混ぜないことを設計条件にし、plain payload＋`UnsafeCell` の seqlock を混ぜない。簡易モデルの interleaving 観測は Rust 実装のメモリ検証の代わりにならない。
+scratch と committed state は事前確保した二組。失敗 snapshot を committed に上書きせず、成功したときだけ準備済み state を swap する。読み取りは callback 区間開始時だけで、毎 sample 全 field を読まない。読み取り失敗でも spin・retry・待ちなし。全 atomic の SeqCst 順序で accepted read が書込前後を混ぜないことを設計条件にし、plain payload＋`UnsafeCell` の seqlock を混ぜない。簡易モデルの interleaving 観測は Rust 実装のメモリ検証の代わりにならない。
 
 受領後はまず最新 volume・mute・時間端点を反映し、未適用 manual revision ならその場のゲインから一度 retarget、最後に snapshot の最新 wander 端点を反映する。手動選択の後で wander を再び on にした二操作が一 snapshot にまとまっても、古い manual に付随する false を別途適用して巻き戻さない。手動 target を sample ごとに再発行しない。knob の細かな連続変更も queue にせず最新端点が勝つ。
 
 ### StatusMailbox と失敗
 
 `StatusMailbox` は同じ全 numeric SeqCst snapshot 方式の逆方向である。payload は `ack_revision`、`ack_manual_revision`、`epoch`、`world`、`display_dominant`、`resume_target`、移動 phase、出力状態、終了 fade の attempt／deadline。文字列や gains 全体は入れず、gains は時刻付き `WorldVisualState` に入れる。writer は engine 所有中の callback、または凍結中の worker のどちらか一人だけ。main は一回読み、失敗時は直前状態を保持する。
+
+現存 P03 の `ControlReceipt` payload は `epoch`、`ack_revision`、`ack_manual_revision`、`display_dominant`、`world` のみ。`resume_target`／移動 phase／終了 fade は後続の consumer が必要となるときに追加する。未受理 mailbox は `None`、一回の整合読取だけを採用する。callback が新しい制御を採用すると、その世代をまだ公開していない印を立てる。以降の callback 途中失敗でも、排他移譲後の凍結 worker が当該世代を一度公開でき、旧受理を最新の受理に見せない。settings は現在 epoch の受理を離散更新時に表示するだけで、受理の世界時刻を常時進む表示にはしない。
 
 CPAL error callback は engine を借りず、**その stream epoch 専用の別 cell** にある固定 `ErrorCode` の atomic bitset を更新するだけ。複数の呼出元があり得るので snapshot writer と共用しない。worker は現在採用中の epoch の cell だけを消費し、旧 cell を新 stream に再使用しない。旧 monitor が遅れて DeviceChanged 等を発行しても、新出力の状態を変えない。worker が bitset と OS の現在状態を読んで出力状態を決める。`DeviceChanged`、`DeviceNotAvailable`、`StreamInvalidated`、`UnsupportedConfig`、`Xrun`、その他を固定分類し、RT で `format!`・ログ・UI・rebuild を行わない。エラーメッセージの生成は worker／main。確認済み：[CPAL ErrorKind](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/error.rs)、[error delivery](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/error_emit.rs)、[旧monitorの配送と寿命](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/host/coreaudio/macos/mod.rs#L274-L365)。依存内の try_lock を「依存も完全 lock 無し」と説明しない。
 
@@ -252,6 +256,8 @@ output = voice sum * volume_gain * mute_gain * recovery_gain * shutdown_gain
 ```
 
 volume／mute は別端点を持つ有限長 ramp、0・1へ正確に到達する。mute 中の volume 操作は解除にならない。復旧 gain は世界と mute を変えず出力だけ滑らかに戻す。shutdown gain は正常終了成功後だけ下げ、保存失敗では開始しない。voice calibration は試聴で決め、設定 volume として保存しない。
+
+現存 P03 の `OutputRamp` は `PreparedEngine` 内の私有部品で、actual rate に応じた20msの smoothstep を混合後の volume／mute に独立適用する。これは初回実装定数であり製品の新しい数値要件ではない。同じ端点は ramp を再開せず、途中の編集は現在値から追従し、有限 sample 数で端点を正確に確定する。出力が0でも声の世界・視覚イベント・寄与 gain は進める。復旧／終了 ramp と N 声交差は未実装であり、この部品をそれらの代用品にしない。
 
 Σg²=1 は独立信号の power の数学的規則であり、波形相関・実 peak・聴感一定の証明ではない。混合は f64 積算、最終出力は finite を保つ音源設計・level 校正で収める。整数出力変換時は許容範囲へ clamp するが、この clamp を強い peak の音質修正や合格根拠に使わない。非有限発生を黙って通常音扱いせず固定 DSP fault を通知し、該当出力を無音として停止・調査する。これは未成立の DSP を隠す fallback ではない。
 

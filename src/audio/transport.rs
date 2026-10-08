@@ -651,6 +651,84 @@ impl ControlMailbox {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ControlReceipt {
+    pub(crate) epoch: StreamEpoch,
+    pub(crate) ack_revision: Revision,
+    pub(crate) ack_manual_revision: Revision,
+    pub(crate) display_dominant: SituationIndex,
+    pub(crate) world: WorldSeconds,
+}
+
+// Reverse boundary: the engine's exclusive owner is the only publisher.
+// Zero sequence means no actual receipt, not an acknowledgment of defaults.
+// Every word and both sequence reads use the same SeqCst total order.
+pub(crate) struct StatusMailbox {
+    sequence: AtomicU64,
+    registry_count: usize,
+    epoch: AtomicU64,
+    ack_revision: AtomicU64,
+    ack_manual_revision: AtomicU64,
+    display_dominant: AtomicU64,
+    world: AtomicU64,
+}
+
+impl StatusMailbox {
+    pub(crate) fn new(registry_count: usize) -> Self {
+        assert!(registry_count > 0);
+        Self {
+            sequence: AtomicU64::new(0),
+            registry_count,
+            epoch: AtomicU64::new(0),
+            ack_revision: AtomicU64::new(0),
+            ack_manual_revision: AtomicU64::new(0),
+            display_dominant: AtomicU64::new(0),
+            world: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn publish(&self, receipt: ControlReceipt) -> bool {
+        if receipt.display_dominant.get() >= self.registry_count {
+            return false;
+        }
+        let Some(sequence) = begin_publication(&self.sequence) else {
+            return false;
+        };
+        self.epoch.store(receipt.epoch.get(), Ordering::SeqCst);
+        self.ack_revision
+            .store(receipt.ack_revision.get(), Ordering::SeqCst);
+        self.ack_manual_revision
+            .store(receipt.ack_manual_revision.get(), Ordering::SeqCst);
+        self.display_dominant
+            .store(receipt.display_dominant.get() as u64, Ordering::SeqCst);
+        self.world
+            .store(receipt.world.get().to_bits(), Ordering::SeqCst);
+        self.sequence.store(sequence, Ordering::SeqCst);
+        true
+    }
+
+    /// A single bounded attempt; callers retain their last accepted receipt.
+    pub(crate) fn try_read(&self) -> Option<ControlReceipt> {
+        let before = self.sequence.load(Ordering::SeqCst);
+        if before == 0 || before & 1 != 0 {
+            return None;
+        }
+        let receipt = ControlReceipt {
+            epoch: StreamEpoch::new(self.epoch.load(Ordering::SeqCst))?,
+            ack_revision: Revision::from_raw(self.ack_revision.load(Ordering::SeqCst)),
+            ack_manual_revision: Revision::from_raw(
+                self.ack_manual_revision.load(Ordering::SeqCst),
+            ),
+            display_dominant: SituationIndex::from_index(
+                usize::try_from(self.display_dominant.load(Ordering::SeqCst)).ok()?,
+                self.registry_count,
+            )?,
+            world: WorldSeconds::new(f64::from_bits(self.world.load(Ordering::SeqCst)))?,
+        };
+        (self.sequence.load(Ordering::SeqCst) == before).then_some(receipt)
+    }
+}
+
 fn read_bool(value: &AtomicU32) -> Option<bool> {
     match value.load(Ordering::SeqCst) {
         0 => Some(false),
@@ -1311,5 +1389,171 @@ mod tests {
         );
         assert_eq!(faults & ErrorCode::FATAL, faults);
         assert_eq!(cell.take_bits(), 0);
+    }
+
+    fn receipt(value: u64) -> ControlReceipt {
+        ControlReceipt {
+            epoch: epoch(value),
+            ack_revision: Revision::from_raw(value * 2),
+            ack_manual_revision: Revision::from_raw(value * 3),
+            display_dominant: SituationIndex::from_index((value % 2) as usize, 2).unwrap(),
+            world: WorldSeconds::new(value as f64).unwrap(),
+        }
+    }
+
+    #[test]
+    fn receipt_starts_unreceived_and_rejects_every_partial_payload_publication() {
+        let mailbox = StatusMailbox::new(2);
+        assert_eq!(mailbox.try_read(), None);
+        let old = receipt(1);
+        let latest = receipt(2);
+        assert!(mailbox.publish(old));
+        let mut accepted = mailbox.try_read();
+        assert_eq!(accepted, Some(old));
+        let sequence = begin_publication(&mailbox.sequence).unwrap();
+        let words = [
+            (&mailbox.epoch, latest.epoch.get()),
+            (&mailbox.ack_revision, latest.ack_revision.get()),
+            (
+                &mailbox.ack_manual_revision,
+                latest.ack_manual_revision.get(),
+            ),
+            (
+                &mailbox.display_dominant,
+                latest.display_dominant.get() as u64,
+            ),
+            (&mailbox.world, latest.world.get().to_bits()),
+        ];
+        for (word, value) in words {
+            word.store(value, Ordering::SeqCst);
+            if let Some(value) = mailbox.try_read() {
+                accepted = Some(value);
+            }
+            assert_eq!(accepted, Some(old));
+        }
+        mailbox.sequence.store(sequence, Ordering::SeqCst);
+        assert_eq!(mailbox.try_read(), Some(latest));
+        mailbox.world.store(f64::NAN.to_bits(), Ordering::SeqCst);
+        assert_eq!(mailbox.try_read(), None);
+        mailbox
+            .world
+            .store(latest.world.get().to_bits(), Ordering::SeqCst);
+        mailbox.display_dominant.store(2, Ordering::SeqCst);
+        assert_eq!(mailbox.try_read(), None);
+        mailbox.display_dominant.store(0, Ordering::SeqCst);
+        mailbox.epoch.store(0, Ordering::SeqCst);
+        assert_eq!(mailbox.try_read(), None);
+    }
+
+    #[test]
+    fn concurrent_receipts_never_mix_epoch_acknowledgments_dominant_or_world() {
+        let mailbox = Arc::new(StatusMailbox::new(2));
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_mailbox = mailbox.clone();
+        let writer_barrier = barrier.clone();
+        let writer = thread::spawn(move || {
+            writer_barrier.wait();
+            for value in 1..=10_000 {
+                assert!(writer_mailbox.publish(receipt(value)));
+            }
+        });
+        barrier.wait();
+        let (_, heap) = crate::rt_alloc::measure(|| {
+            for _ in 0..10_000 {
+                if let Some(accepted) = mailbox.try_read() {
+                    assert_eq!(accepted, receipt(accepted.epoch.get()));
+                }
+            }
+        });
+        assert_eq!(heap, crate::rt_alloc::Counts::default());
+        writer.join().unwrap();
+        assert_eq!(mailbox.try_read(), Some(receipt(10_000)));
+    }
+
+    #[test]
+    fn receipt_sequence_exhaustion_keeps_the_last_real_receipt() {
+        let mailbox = StatusMailbox::new(2);
+        assert!(mailbox.publish(receipt(1)));
+        mailbox.sequence.store(u64::MAX - 1, Ordering::SeqCst);
+        assert!(!mailbox.publish(receipt(2)));
+        assert_eq!(mailbox.try_read(), Some(receipt(1)));
+    }
+
+    #[test]
+    fn newer_common_endpoints_do_not_get_overwritten_by_an_older_manual_intent() {
+        use crate::controls::ControlEdit;
+        use crate::situations::KnobIndex;
+
+        let registry = Registry::new().unwrap();
+        let mut main = ControlState::new(&registry);
+        let mailbox = ControlMailbox::new(&main);
+        main.edit_knob(
+            KnobIndex::from_index(0, registry.knob_count()).unwrap(),
+            Normalized::ONE,
+        )
+        .unwrap();
+        mailbox.publish(&main);
+        let manual_revision = main.manual_revision;
+        main.apply(ControlEdit::Mute(true)).unwrap();
+        main.apply(ControlEdit::Volume(Normalized::new(0.8).unwrap()))
+            .unwrap();
+        mailbox.publish(&main);
+        let mut scratch = ControlState::new(&registry);
+        assert!(mailbox.try_read_into(&mut scratch));
+        assert_eq!(scratch, main);
+        assert_eq!(scratch.manual_revision, manual_revision);
+        assert_eq!(scratch.volume.get(), 0.8);
+        assert!(scratch.mute);
+        assert!(!scratch.wander);
+    }
+
+    #[test]
+    fn every_in_progress_control_payload_prefix_retains_old_committed_state() {
+        let registry = Registry::new().unwrap();
+        let old = controls(&registry, false);
+        let latest = controls(&registry, true);
+        let mailbox = ControlMailbox::new(&old);
+        let mut committed = old.clone();
+        let mut scratch = old.clone();
+        let sequence = begin_publication(&mailbox.sequence).unwrap();
+        let u32_words = [
+            (&mailbox.volume, latest.volume.get().to_bits()),
+            (&mailbox.mute, u32::from(latest.mute)),
+            (&mailbox.wander, u32::from(latest.wander)),
+            (&mailbox.dwell_min_minutes, latest.dwell_min_minutes),
+            (&mailbox.dwell_max_minutes, latest.dwell_max_minutes),
+            (&mailbox.transition_seconds, latest.transition_seconds),
+        ];
+        for (word, value) in u32_words {
+            word.store(value, Ordering::SeqCst);
+            if mailbox.try_read_into(&mut scratch) {
+                std::mem::swap(&mut committed, &mut scratch);
+            }
+            assert_eq!(committed, old);
+        }
+        for (word, value) in mailbox.knobs.iter().zip(&latest.knobs) {
+            word.store(value.get().to_bits(), Ordering::SeqCst);
+            if mailbox.try_read_into(&mut scratch) {
+                std::mem::swap(&mut committed, &mut scratch);
+            }
+            assert_eq!(committed, old);
+        }
+        let u64_words = [
+            (&mailbox.manual_target, latest.manual_target.get() as u64),
+            (&mailbox.manual_revision, latest.manual_revision.get()),
+            (&mailbox.wander_revision, latest.wander_revision.get()),
+            (&mailbox.settings_revision, latest.settings_revision.get()),
+        ];
+        for (word, value) in u64_words {
+            word.store(value, Ordering::SeqCst);
+            if mailbox.try_read_into(&mut scratch) {
+                std::mem::swap(&mut committed, &mut scratch);
+            }
+            assert_eq!(committed, old);
+        }
+        mailbox.sequence.store(sequence, Ordering::SeqCst);
+        assert!(mailbox.try_read_into(&mut scratch));
+        std::mem::swap(&mut committed, &mut scratch);
+        assert_eq!(committed, latest);
     }
 }

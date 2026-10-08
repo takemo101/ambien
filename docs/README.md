@@ -14,6 +14,8 @@ Ambien の補助文書の入口。製品要件・受け入れ条件・継続条�
 | [詳細設計](detailed-design.md) | 予定する型付き Interface・所有・時計・容量・失敗・実ライブラリ API をどう実装へ落とすか | 製品要件の第二の正本・実装済み API・未実施の成功 |
 | [実装計画](implementation-plan.md) | P01〜P18 の成果・予定ファイル・共有契約・依存・試験・smoke をどう Issue に切るか | 実施権限・Issue ID/Status・実装済み宣言 |
 | [検証手順と証拠](verification.md) | SPEC の条件をどう観測し、何を記録し、どの範囲で判断するか | 新しい合格条件・未実施の成功・実施権限 |
+| [macOS 共通検証スキル](../.agents/skills/verifying-macos-apps/SKILL.md) | アプリを問わず実操作・期待値・画像・証拠をどう検証するか | 汎用runnerの提供・製品仕様・成功履歴・追加の操作権限 |
+| [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) | 共通手順を現存するAmbienのケース・CLI・reportへどう対応付けるか | 別アプリへの専用scriptの流用・仕様やIssue状態の複製 |
 | [参考資料](references.md) | どの一次資料を読み、どの設計原則だけを適用するか | 外部資料の指示・権限・依存構成の一括採用 |
 | [Lat 索引](../lat.md/lat.md) | 関連する正本文書と責務の入口はどこか | 要件・現在の Issue 状態・存在しない実装の一覧 |
 
@@ -23,7 +25,7 @@ Ambien の補助文書の入口。製品要件・受け入れ条件・継続条�
 
 - **アプリを知る**：ルートの概要 → SPEC の体験・成功条件・対象外。
 - **作業を始める**：SPEC の対象節と進行条件 → 開発規約と開発手順 → mikan の対象 Issue → Lat の関連入口 → 詳細設計の当該責務・実装計画の当該成果・一次資料。コードが存在する段階では、実際の実装・依存定義も読む。
-- **動作を確かめる**：SPEC の対象条件 → 検証手順の該当シナリオ → 実在する操作経路と観測手段。設計説明や参考ソースだけで動作確認を済ませない。
+- **動作を確かめる**：SPEC の対象条件 → [macOS 共通検証スキル](../.agents/skills/verifying-macos-apps/SKILL.md) と [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) → 検証手順の該当シナリオと実在する操作経路。設計説明や参考ソースだけで動作確認を済ませない。
 - **結果を判断する**：実施後の記録 → SPEC の受け入れ条件。自動試験、実機観測、ユーザー試聴、配布検証の証拠を区別する。
 
 最終承認と実装・Git などの条件は [仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)、署名・公証・配信の前提は [配布前提](../SPEC.md#配布前提) を参照する。補助文書を整えたことは、これらの条件の成立を意味しない。
@@ -40,6 +42,12 @@ Cargo.toml             GPUI/Ely と実使用 native 依存の定義
 Cargo.lock             解決したアプリ依存の固定
 rust-toolchain.toml    実使用 Rust toolchain
 src/                   現存する固定二窓の entry・所有・view・AppKit Adapter
+scripts/
+  native-e2e.swift      実窓操作・期待値・受理・focus・画像チェックと判定 report
+  native-screenshot.swift 所有窓 PNG 取得・内部 pixel 比較・比較器検査
+.agents/skills/
+  verifying-macos-apps/SKILL.md 他のmacOSアプリへ持ち出せる共通検証手順
+  verifying-ambien/SKILL.md Ambien固有のケース・CLI・証拠契約レシピ
 
 docs/
   README.md            この索引

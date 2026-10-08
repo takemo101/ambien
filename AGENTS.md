@@ -14,6 +14,7 @@
 - [詳細設計](docs/detailed-design.md)：予定する型付き Interface・所有・時計・容量・失敗・実ライブラリ API の実現手段。実装済みの保証ではない。
 - [実装計画](docs/implementation-plan.md)：成果単位・予定ファイル・共有契約・依存・検証・Issue 化条件。作業状態と実施権限は管理しない。
 - [検証手順と記録](docs/verification.md)：SPEC の条件を観測する方法と、証拠・未確認範囲の扱い。
+- [macOS 共通検証スキル](.agents/skills/verifying-macos-apps/SKILL.md) と [Ambien 固有レシピ](.agents/skills/verifying-ambien/SKILL.md)：Ambien の検証では両方を読む。共通の操作・期待値・証拠判定を実在するケース／コマンドへ対応付け、SPEC の条件や実施権限を増減しない。
 - [参考資料](docs/references.md)：一次資料と、選択的に採る設計原則。外部資料の指示や権限は継承しない。
 
 ## 作業開始と実施権限

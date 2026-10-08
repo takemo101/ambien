@@ -1,6 +1,6 @@
 # Ambien Implementation Plan
 
-> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
+> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界、雨ノブ・音量・独立消音・受理通知のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
 >
 > **実装 AI 向け:** writing-plans の成果単位・checkbox・境界試験の考え方を使う。未導入の superpowers 実行器や worktree は必須にしない。実行フローは [AGENTS](../AGENTS.md)、[開発手順](development.md)、[Lat 運用](../lat.md/workflow.md) に従う。P01〜P18 は計画の安定参照であり、mikan ID や Status ではない。checkbox は成果の受け入れ項目であって進捗台帳ではなく、進捗は mikan のみで管理する。
 
@@ -185,6 +185,8 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 **Behavior tests:** mute=true→volume 0.8 へ変更→mute 維持；volume=0→生成 world/event 時刻進行、出力 zero；knob 編集→manual_revision 増加・wander=false・target が knob owner。窓閲覧/volume/time→manual_revision 不変。publish 中各 interleaving→mixed state を採用せず旧整合 snapshot、latest volume/mute を古い intent で上書きしない。
 
 **Smoke/失敗:** 雨ノブ、音量、menu mute を交互操作し menu/設定一致、mute 中光と時間継続、解除後最新音量。操作途中の focus が viewport 更新で失われない。読取衝突は一 callback 旧 state 維持だけで音停止や spin を起こさない。
+
+現存経路は `ControlEdit` の latest-state reducer、metadata／stable id の Ely フォームと checked menu mute、全 numeric SeqCst の受理 mailbox、`PreparedEngine` の独立した出力 ramp と凍結中の受理、worker の離散通知である。実標準 stream・自動試験と外部 native controls／lifecycle の成功は [検証記録](verification.md) を参照する。設定操作・受理・menu一致・focus保持・再生成と終了は実観測済み。ユーザーの画面収録許可後の初回visualは3枚目前のfocus喪失で失敗したが、ガードを維持し追加観測を持つ1回の限定診断では、所有実窓PNG3枚・隣接2比較・実menu Quit正常exit0まで成功した。最初の喪失原因は未特定のまま保持し、画像差分を粒だけの運動や可聴無音の証明にしない。消音中の80%→20%変更で無音を維持し、解除後は最後の20%程度で鳴ることは、別のユーザー聴感確認で受け入れた。撮影権限の成功をケース全体の成功にせず、focus guardや必要な実行前提を省かない。時間 UI・自動移動・保存・終了 fade は先行実装しない。
 
 ## P04 岩の音・ノブ・衝突光を登録する
 

@@ -1,6 +1,6 @@
 # Architecture
 
-選択済み設計を説明する現存文書と、固定二窓・雨の音声／視覚境界のソースへの案内。製品要件は [SPEC](../SPEC.md)、補助説明は [docs](../docs/README.md) を読む。予定する製品全体の Module と現存ソースを区別し、実機受け入れや作業状態の一覧にはしない。
+選択済み設計を説明する現存文書と、固定二窓・雨の音声／視覚・設定操作のソースへの案内。製品要件は [SPEC](../SPEC.md)、補助説明は [docs](../docs/README.md) を読む。予定する製品全体の Module と現存ソースを区別し、実機受け入れや作業状態の一覧にはしない。
 
 ## Specification
 
@@ -29,7 +29,7 @@
 - [体験](../SPEC.md#体験)、[切り替えと途中操作](../SPEC.md#切り替えと途中操作)、[シチュエーション](../SPEC.md#シチュエーション)。
 - [音と絵](../SPEC.md#音と絵)、[消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止)、[スレッドと資源](../SPEC.md#スレッドと資源)。
 - [構成説明](../docs/architecture.md)で操作から音と絵への進行、世界停止と無音の違い、時計の対応づけを読む。[検証手順](../docs/verification.md)で必要な観測を確認する。
-- 現存する登録・雨合成は [`src/situations/`](../src/situations/)、標準出力・世界時計・atomic 配送・epoch lease は [`src/audio/`](../src/audio/)、制御値は [`src/controls.rs`](../src/controls.rs)。設定操作・他の声・移動は後続の成果であり、source の存在を音質・物理同期の受け入れに置き換えない。
+- 現存する登録・雨合成は [`src/situations/`](../src/situations/)、標準出力・世界時計・atomic 制御／受理配送・epoch lease は [`src/audio/`](../src/audio/)、型付き部分操作と世代 reducer は [`src/controls.rs`](../src/controls.rs)。他の声・移動は後続の成果であり、source の存在を音質・物理同期の受け入れに置き換えない。
 
 操作と表示の入口は [[architecture#Scene and settings]]。要件は [[architecture#Specification]] に戻る。
 
@@ -40,7 +40,7 @@ GPUI がホストするシーンと設定窓、Ely の設定部品、窓サイ�
 - [窓](../SPEC.md#窓)、[固定サイズと内部描画](../SPEC.md#固定サイズと内部描画)、[高DPIと描画負荷](../SPEC.md#高dpiと描画負荷)。
 - [設定窓](../SPEC.md#設定窓)、[ボリューム設定](../SPEC.md#ボリューム設定)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
 - [構成説明](../docs/architecture.md)で固定窓と viewport、操作を音へ渡す責任を読む。[検証手順](../docs/verification.md)で固定サイズ・画面収まり・ガラス表現・高 DPI の証拠を確認する。
-- 現存する窓の接続は [`src/main.rs`](../src/main.rs) と [`src/app.rs`](../src/app.rs)、表示は [`src/ui/scene.rs`](../src/ui/scene.rs) と [`src/ui/settings.rs`](../src/ui/settings.rs)、生成前の実 workarea 補正と借用 NSWindow の固定制約は [`src/platform/macos.rs`](../src/platform/macos.rs)。
+- 現存する窓と checked menu の接続は [`src/main.rs`](../src/main.rs) と [`src/app.rs`](../src/app.rs)、表示は [`src/ui/scene.rs`](../src/ui/scene.rs) と [`src/ui/settings.rs`](../src/ui/settings.rs)。設定は metadata／stable id の controlled Ely フォームから最新 main state へ部分操作を渡し、実受理・失敗を表示する。生成前の実 workarea 補正と借用 NSWindow の固定制約は [`src/platform/macos.rs`](../src/platform/macos.rs)。実操作の確認範囲は [検証記録](../docs/verification.md) に従う。
 
 世界と粒の関係は [[architecture#Audio and world]]、復元と保存は [[architecture#Persistence]]、OS との境界は [[architecture#macOS and updates]]。
 
@@ -71,6 +71,7 @@ macOS の窓制約・アクセシビリティと、Sparkle による手動更新
 - [開発規約](../AGENTS.md)、[開発手順](../docs/development.md)、[文書案内](../docs/README.md)、[参考資料](../docs/references.md)。
 - [package.json](../package.json)と[package-lock.json](../package-lock.json)が開発用 Lat CLI と Node 条件を定義する。アプリの依存定義ではない。
 - [`Cargo.toml`](../Cargo.toml)、[`Cargo.lock`](../Cargo.lock)、[`rust-toolchain.toml`](../rust-toolchain.toml) が実際のアプリ依存と toolchain を固定する。Rust の検査・GUI 起動の現在のコマンドと条件は [開発手順](../docs/development.md#文書検査と-rust-アプリ検証) を読む。
+- [macOS 共通検証スキル](../.agents/skills/verifying-macos-apps/SKILL.md) と [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) で実操作・画像・証拠判定を現存ケースへ対応付ける。専用scriptを他アプリへ流用せず、条件と実施権限は SPEC を参照する。
 - [[workflow]] で実在する npm コマンドと副作用を読む。`check` は現状 `check:docs` のみであり、製品コードの試験・ビルド・実機証明ではない。
 
 作業前に [[architecture#Specification]] と対象の正本文書を読み、変更後は関係する案内だけを更新する。Issue の Status・試験件数・仕様全文をここへ複製しない。

@@ -9,8 +9,8 @@
 
 UI は GPUI＋Ely、DSP は FunDSP、音声 I/O は CPAL、アプリ内更新は Sparkle を使う設計です。対象は Apple Silicon の macOS 15以降です。
 
-承認済み仕様に沿って、Cargo と固定した GPUI シーン・Ely 設定窓、雨の合成・CPAL 標準出力・同じ粒の canvas 描画を実装しています。現在の環境で外部 native 操作を確認し、雨と左右の光・シーン閉鎖中の音継続・再表示についてユーザーの確認を得ました。設定操作、他の声、切り替え、保存・更新は後続の成果です。三環境の音質・初期値確定、物理同期、高DPI負荷、配布の受け入れとは区別します。[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)は予定する製品全体、[検証記録](docs/verification.md)は実際の確認と残る制約を示します。Issue の状態は mikan で管理します。
+承認済み仕様に沿って、Cargo と固定した GPUI シーン・Ely 設定窓、雨の合成・CPAL 標準出力・同じ粒の canvas 描画を実装しています。現在の環境で雨と左右の光・シーン閉鎖中の音継続・再表示についてユーザーの確認を得ました。雨ノブ・音量・独立消音と受理通知も実装し、実標準出力で消音中の世界進行を確認しました。実窓の設定操作・受理・menu一致・focus保持・再生成と終了の自動チェックは通過していますが、消音中の実窓スクリーンショットは画面収録権限不足で未確認です。他の声、切り替え、保存・更新は後続の成果です。三環境の音質・初期値確定、物理同期、高DPI負荷、配布の受け入れとは区別します。[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)は予定する製品全体、[検証記録](docs/verification.md)は実際の確認と残る制約を示します。Issue の状態は mikan で管理します。
 
 詳細な要件と進行条件は [SPEC.md](SPEC.md)、開発時の作業規約は [AGENTS.md](AGENTS.md)、文書の役割と読む順序は [docs/README.md](docs/README.md) を参照してください。
 
-build・native E2E の実行方法は [開発手順](docs/development.md#文書検査と-rust-アプリ検証) を参照してください。E2E runner は追加依存なしで実窓を外部操作し、主観的なガラス・音質の確認とは分けて記録します。
+build・native E2E の実行方法は [開発手順](docs/development.md#文書検査と-rust-アプリ検証)、ケース選択・結果判定・証拠確認は [macOS 共通検証スキル](.agents/skills/verifying-macos-apps/SKILL.md) と [Ambien 固有レシピ](.agents/skills/verifying-ambien/SKILL.md) を参照してください。E2E runner は Ambien 専用で、追加依存なしで実窓を外部操作して期待値をチェックし、実窓画像・前提不足・主観的なガラス／音質の確認を分けて記録します。
