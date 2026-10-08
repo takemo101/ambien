@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod controls;
+mod persistence;
 mod platform;
 #[cfg(test)]
 mod rt_alloc;

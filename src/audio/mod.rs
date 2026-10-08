@@ -160,7 +160,7 @@ pub(crate) struct AudioController {
 }
 
 impl AudioController {
-    pub(crate) fn start() -> (Self, Receiver<()>) {
+    pub(crate) fn start(registry: Arc<Registry>, controls: ControlState) -> (Self, Receiver<()>) {
         let shared = Arc::new(AudioShared {
             state: Mutex::new((OutputStatus::Starting, None, None)),
         });
@@ -172,7 +172,7 @@ impl AudioController {
         let worker = match thread::Builder::new()
             .name("ambien-output".into())
             .spawn(move || {
-                run_worker(worker_shared, worker_stop, notify);
+                run_worker(worker_shared, worker_stop, notify, registry, controls);
             }) {
             Ok(worker) => Some(worker),
             Err(error) => {
@@ -240,7 +240,10 @@ impl PreparedOutput {
     }
 }
 
-fn prepare_output() -> Result<PreparedOutput, String> {
+fn prepare_output(
+    registry: Arc<Registry>,
+    controls: ControlState,
+) -> Result<PreparedOutput, String> {
     // This endpoint is CPAL's DefaultOutput; do not enumerate it as a HalOutput device.
     let device = cpal::default_host()
         .default_output_device()
@@ -259,8 +262,6 @@ fn prepare_output() -> Result<PreparedOutput, String> {
     }
     let channels = config.channels;
     let sample_rate = config.sample_rate;
-    let registry = Arc::new(Registry::new().map_err(|error| error.to_string())?);
-    let controls = ControlState::new(&registry);
     let visuals = Arc::new(VisualRing::new(
         EVENT_CAPACITY,
         registry.definitions().len(),
@@ -346,8 +347,14 @@ fn prepare_output() -> Result<PreparedOutput, String> {
     })
 }
 
-fn run_worker(shared: Arc<AudioShared>, stop: Arc<AtomicBool>, notify: Sender<()>) {
-    let output = match prepare_output() {
+fn run_worker(
+    shared: Arc<AudioShared>,
+    stop: Arc<AtomicBool>,
+    notify: Sender<()>,
+    registry: Arc<Registry>,
+    controls: ControlState,
+) {
+    let output = match prepare_output(registry, controls) {
         Ok(output) => output,
         Err(reason) => {
             shared.set_status(

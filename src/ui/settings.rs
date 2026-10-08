@@ -33,6 +33,12 @@ struct SelectionActivation {
     _blur: Subscription,
 }
 
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct SettingsNotices {
+    pub(crate) control: Option<SharedString>,
+    pub(crate) persistence: Option<SharedString>,
+}
+
 pub(crate) struct SettingsView {
     focus: FocusHandle,
     audio_status: SharedString,
@@ -40,7 +46,7 @@ pub(crate) struct SettingsView {
     controls: Option<ControlState>,
     knobs: Vec<KnobControl>,
     receipt: Option<ControlReceipt>,
-    control_error: Option<SharedString>,
+    notices: SettingsNotices,
     selection_activation: Option<SelectionActivation>,
 }
 
@@ -52,7 +58,7 @@ impl SettingsView {
         source: Option<Arc<AudioSource>>,
         controls: Option<&ControlState>,
         receipt: Option<ControlReceipt>,
-        control_error: Option<SharedString>,
+        notices: SettingsNotices,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -63,7 +69,7 @@ impl SettingsView {
             controls: None,
             knobs: Vec::new(),
             receipt,
-            control_error,
+            notices,
             selection_activation: None,
         };
         view.initialize_controls(source.as_deref(), controls);
@@ -113,11 +119,10 @@ impl SettingsView {
         source: Option<Arc<AudioSource>>,
         controls: Option<&ControlState>,
         receipt: Option<ControlReceipt>,
-        control_error: Option<SharedString>,
+        notices: SettingsNotices,
         cx: &mut Context<Self>,
     ) {
-        let mut changed =
-            self.audio_status.as_ref() != status.as_str() || self.control_error != control_error;
+        let mut changed = self.audio_status.as_ref() != status.as_str() || self.notices != notices;
         if self.controls.is_none() && controls.is_some() && source.is_some() {
             self.initialize_controls(source.as_deref(), controls);
             changed = true;
@@ -144,7 +149,7 @@ impl SettingsView {
         }
         if changed {
             self.audio_status = status.into();
-            self.control_error = control_error;
+            self.notices = notices;
             cx.notify();
         }
     }
@@ -161,6 +166,15 @@ impl Render for SettingsView {
             .p_6()
             .child(Heading::h2("設定"));
 
+        if let Some(status) = &self.notices.persistence {
+            content = content.child(
+                div()
+                    .id("persistence-status")
+                    .role(Role::Label)
+                    .aria_label(status.clone())
+                    .child(Paragraph::new(status.clone())),
+            );
+        }
         if let (Some(registry), Some(controls)) = (&self.registry, &self.controls) {
             let display_target = self.receipt.map_or(controls.manual_target, |receipt| {
                 controls.display_target(receipt.ack_manual_revision, receipt.display_dominant)
@@ -455,7 +469,7 @@ impl Render for SettingsView {
             ));
         }
         content = content.child(Paragraph::new(self.audio_status.clone()));
-        if let Some(error) = &self.control_error {
+        if let Some(error) = &self.notices.control {
             content = content.child(Paragraph::new(format!("設定を変更できません: {error}")));
         }
         content = content

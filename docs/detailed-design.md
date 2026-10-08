@@ -577,7 +577,7 @@ AppKit Adapter が collectionBehavior の既存 bits から FullScreenPrimary／
 
 ### screen、outer、content、top-left
 
-P01 の現存 Adapter は [`src/platform/macos.rs`](../src/platform/macos.rs) の `prepare_window(WindowRole, DisplayId) -> Result<PreparedWindow, WindowGeometryError>` と `constrain_window(&Window, &PreparedWindow) -> Result<(), WindowGeometryError>` である。`PreparedWindow` は GPUI の bounds と display ID、error は main-thread required／display unavailable／invalid geometry／native handle unavailable を区別する。GPUI の f32 dimensions が workarea を超えて丸められないよう縮小側に表現し、相対 outer top-left も外枠の収まる表現可能範囲へ補正する。保存 UUID と画面変更通知を伴う `WindowPlacement` は P11 の計画 Interface であり、現在の保存・復元 API ではない。基準 content は SPEC、saved width／height を任意サイズとして採らない。
+現存 Adapter は [`src/platform/macos.rs`](../src/platform/macos.rs) の `prepare_window(WindowRole, DisplayId, Option<&WindowPlacement>) -> Result<PreparedWindow, WindowGeometryError>`、`capture_placement(&Window) -> Result<(WindowPlacement, DisplayId), WindowGeometryError>`、`constrain_window(&Window, &PreparedWindow) -> Result<(), WindowGeometryError>`。`WindowPlacement` は所有 screen 相対 outer top-left と logical content 寸法、保存 UUID を持つ。capture は同じ借用 NSWindow／NSScreen から位置と実 display ID を読み、main が display 変更時だけ UUID を解決する。GPUI の display list を drag ごとに確保しない。saved size は現在の固定基準として採らず、現在の workarea と AppKit の実 frame/content conversion で補正する。GPUI の f32 dimensions は縮小側へ、outer top-left は外枠の収まる表現可能範囲へ丸める。画面変更通知・外観・accessibility は P11 の別 gate。
 
 1. 現在 displays の UUID を保存 UUID と照合し、無ければ現在 primary display。UUID の取得失敗を一致と扱わない。display 未取得は最後に確認した finite geometry／制約を維持し、架空の無限領域を作らない。初回から有効 display が無い場合は窓生成を延期して明示失敗とし、取得後に通常 fit を行う。
 2. AppKit NSScreen の global bottom-left `frame` と `visibleFrame` を取得する。GPUI の display bounds／visible_bounds は display 内 top-left 論理座標なので区別する。[GPUI MacDisplay 変換](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/display.rs#L112-L150)
@@ -614,12 +614,12 @@ clamp は global visibleFrame で外枠全体について行い、最後に相�
 
 ### 読取Interfaceと正規化
 
-**計画 Interface**：`StateDocument` は元 `serde_json::Value` を保持する。`LoadedState` は Registry 解決済み control 端点と `WindowPlacement`、`WritePolicy` は `Writable` または `ReadOnly(reason)`。
+**現存 Interface**：[`src/persistence.rs`](../src/persistence.rs) の `StateDocument` は元 `serde_json::Value` を worker 内だけで保持する。`LoadedState` は Registry 解決済み control 端点と `Option<WindowPlacement>`、`WritePolicy` は `Writable` または `ReadOnly(reason)`。`SaveStartup { settings, notice }` を bounded channel で最初の stream／窓より前に main が受け取り、復元した volume／mute／last／knobs を最初の sample から渡す。metadata Registry は起動時に一度構築し、音声 worker の声準備と保存 worker が共有する。追加の direct 依存は既存解決版 `serde_json = "=1.0.151"` だけ。
 
 ```rust
 pub enum LoadOutcome {
     Loaded { settings: LoadedState, document: StateDocument,
-             write_policy: WritePolicy },
+             write_policy: WritePolicy, notice: Option<String> },
     Defaults { reason: LoadReason, document: StateDocument,
                write_policy: WritePolicy },
 }
@@ -637,11 +637,11 @@ known 値だけを元 object に上書きする。unknown top-level key、未知
 
 ### 保存世代、I/O、flush
 
-SaveWorker は単一の直列 worker。`in-flight=1` と `latest pending<=1` で、過去 snapshot を全部 queue にしない。App の保存 generation は control の settings revision と落ち着いた窓位置変更を含む一意 Revision とし、audio ack の control revision と意味を区別して receipt へ結び付ける。autosave debounce の初回実装値は500ms。端点／位置が落ち着いた後に snapshot を作り、flush は debounce を飛ばす。audio から保存を呼ばない。
+SaveWorker は単一の直列 worker。`in-flight=1` と `latest pending<=1` で、過去 snapshot を全部 queue にしない。App の保存 generation は control の settings revision、再開対象の離散変更、有限窓位置変更から発行し、audio ack の制御 revision と意味を区別する。main の autosave debounce は500ms、一つの取消可能 Task を差し替え、落ち着いた後だけ `SaveSnapshot { controls, resume_target, window }` を作る。window bounds observer は閉じる前の最新位置も保持し、元 window ID と現在の scene handle を照合して退役通知を捨てる。flush は debounce を取消し、明示 retry として新しい保存世代を発行して最新 snapshot を submit する。audio から保存を呼ばない。
 
 保存は同 directory 内の一意 temp を create_new→write_all→file.sync_all→rename(temp, state.json)→parent directory sync。rename 成功前に old file を消さない。temp の衝突は別名、失敗は `CreateTemp`／`Write`／`SyncFile`／`Replace`／`SyncDirectory`／`ReadOnly` の段階を含む SaveError。rename 後の directory sync failure は「置換されたが durability 未確認」という結果であり成功 receipt にしない。error cleanup は temp のみ、old や backup を消さない。
 
-`SaveReceipt { revision, result }` は実 I/O 完了後に返す。旧 in-flight 完了と最新 pending 完了を混ぜず、flush は要求した **最新 generation の置換成功**を待つ。古い成功で最新保存失敗を消さない。通常 autosave failure は音を止めずメニュー／設定へ。次の明示変更／flush で現在端点を再保存できるが、ReadOnly を無断解除しない。SaveWorker 自身の終了は必要な flush の receipt 後。
+`SaveReceipt { revision, result }` は実 I/O 完了後に latest mailbox と bounded-one notification で返す。submit は同一 process で厳密増加の revision を要求する。flush は指定した pending／in-flight／保持済み generation の実完了を待ち、上書きされた pending・未提出・失効した世代は `UnknownRevision`、重複／逆順 submit は `InvalidRevision` を返して無期限に待たない。待機済み flush はその generation の completion を所有する。main は最新世代と一致した receipt だけを扱い、古い成功で最新保存失敗を消さない。通常 failure は音を止めず、詳細を既存設定窓へ表示する menu action と設定冒頭の semantic label に通知する。通常の有効 control edit では保存通知を消さない。GPUI/macOS の menu validation は action availability を返すため、保存通知に無効 flag や no-op action を使わない。次の明示変更／flush で再保存できるが ReadOnly を解除しない。終了は worker を join し、thread panic／startup channel loss／停止を明示失敗にする。最新 flush と audio shutdown は接続済みだが、終了 veto／fade／更新の調停は P12 以後の gate。
 
 保存 snapshot は knobs の端点、volume／mute／wander／時間、resume_target の ID、安定した矩形だけ。world／DSP 位相／粒／gains は書かない。unknown を保持する StateDocument は読み込み後に一度だけ SaveWorker へ所有移譲し、以後 worker が正規化した既知 field を merge する。毎 snapshot に元 JSON 全体を clone せず、main は端点と矩形だけを渡す。document を callback に渡さない。atomic replace は POSIX の rename と sync の契約に従う設計で、電源断を含む万能な durability や新 version の解釈成功を主張しない。
 

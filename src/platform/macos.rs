@@ -38,6 +38,16 @@ pub(crate) struct PreparedWindow {
     pub(crate) display_id: DisplayId,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WindowPlacement {
+    // Owning-screen-relative outer top-left, followed by logical content dimensions.
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    pub(crate) display_uuid: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WindowGeometryError {
     MainThreadRequired,
@@ -174,6 +184,7 @@ fn fit_geometry(
     visible: Option<NSRect>,
     baseline: NSSize,
     metrics: FrameMetrics,
+    saved: Option<&WindowPlacement>,
 ) -> Result<Placement, WindowGeometryError> {
     let visible = visible.ok_or(WindowGeometryError::DisplayUnavailable)?;
     if !valid_rect(screen) || !valid_rect(visible) || !valid_size(baseline) || !metrics.valid() {
@@ -190,8 +201,32 @@ fn fit_geometry(
     let outer_size = metrics
         .frame_for_content(NSRect::new(NSPoint::new(0.0, 0.0), content_size))
         .size;
-    let outer = centered_outer(visible, outer_size)?;
-    let top_left = relative_top_left(screen, outer)?;
+    let top_left = if let Some(saved) = saved {
+        if !saved.x.is_finite()
+            || !saved.y.is_finite()
+            || !valid_size(NSSize::new(saved.width, saved.height))
+        {
+            return Err(WindowGeometryError::InvalidGeometry);
+        }
+        let minimum = relative_top_left(screen, visible)?;
+        let maximum = NSPoint::new(
+            minimum.x + visible.size.width - outer_size.width,
+            minimum.y + visible.size.height - outer_size.height,
+        );
+        if !maximum.x.is_finite()
+            || !maximum.y.is_finite()
+            || minimum.x > maximum.x
+            || minimum.y > maximum.y
+        {
+            return Err(WindowGeometryError::InvalidGeometry);
+        }
+        NSPoint::new(
+            saved.x.clamp(minimum.x, maximum.x),
+            saved.y.clamp(minimum.y, maximum.y),
+        )
+    } else {
+        relative_top_left(screen, centered_outer(visible, outer_size)?)?
+    };
     // Exercise the same inverse used by the native adapter, rejecting overflow before opening.
     outer_from_top_left(screen, top_left, outer_size)?;
     Ok(Placement {
@@ -257,9 +292,30 @@ fn coordinate_pixels(
     Ok(px(represented))
 }
 
+fn placement_from_geometry(
+    screen: NSRect,
+    outer: NSRect,
+    content: NSRect,
+    display_uuid: Option<String>,
+) -> Result<WindowPlacement, WindowGeometryError> {
+    if !valid_rect(content) || !valid_rect(outer) || !FrameMetrics::measured(outer, content).valid()
+    {
+        return Err(WindowGeometryError::InvalidGeometry);
+    }
+    let top_left = relative_top_left(screen, outer)?;
+    Ok(WindowPlacement {
+        x: top_left.x,
+        y: top_left.y,
+        width: content.size.width,
+        height: content.size.height,
+        display_uuid,
+    })
+}
+
 pub(crate) fn prepare_window(
     role: WindowRole,
     display_id: DisplayId,
+    saved: Option<&WindowPlacement>,
 ) -> Result<PreparedWindow, WindowGeometryError> {
     let mtm = MainThreadMarker::new().ok_or(WindowGeometryError::MainThreadRequired)?;
     let screens = NSScreen::screens(mtm);
@@ -289,7 +345,7 @@ pub(crate) fn prepare_window(
         return Err(WindowGeometryError::InvalidGeometry);
     }
     let metrics = FrameMetrics::measured(visible, available_content);
-    let placement = fit_geometry(screen, Some(visible), role.content_size(), metrics)?;
+    let placement = fit_geometry(screen, Some(visible), role.content_size(), metrics, saved)?;
     let content_size = size(
         content_pixels(placement.content_size.width)?,
         content_pixels(placement.content_size.height)?,
@@ -328,6 +384,43 @@ pub(crate) fn prepare_window(
         bounds: Bounds::new(origin, content_size),
         display_id,
     })
+}
+
+pub(crate) fn capture_placement(
+    window: &gpui::Window,
+) -> Result<(WindowPlacement, DisplayId), WindowGeometryError> {
+    let _mtm = MainThreadMarker::new().ok_or(WindowGeometryError::MainThreadRequired)?;
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|_| WindowGeometryError::NativeHandleUnavailable)?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err(WindowGeometryError::NativeHandleUnavailable);
+    };
+    // SAFETY: WindowHandle guarantees this NSView for the borrowed GPUI Window.
+    // AppKit access is on the main thread and neither view nor getter-owned native
+    // objects escape this synchronous scope. Capture performs no native mutations.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let native = view
+        .window()
+        .ok_or(WindowGeometryError::NativeHandleUnavailable)?;
+    let screen = native
+        .screen()
+        .ok_or(WindowGeometryError::DisplayUnavailable)?;
+    let description = screen.deviceDescription();
+    let number = description
+        .objectForKey(ns_string!("NSScreenNumber"))
+        .ok_or(WindowGeometryError::DisplayUnavailable)?;
+    let number = number
+        .downcast_ref::<NSNumber>()
+        .ok_or(WindowGeometryError::DisplayUnavailable)?;
+    let display_id = DisplayId::new(u64::from(number.unsignedIntValue()));
+    let outer = native.frame();
+    let placement = placement_from_geometry(
+        screen.frame(),
+        outer,
+        native.contentRectForFrameRect(outer),
+        None,
+    )?;
+    Ok((placement, display_id))
 }
 
 pub(crate) fn constrain_window(
@@ -401,12 +494,215 @@ mod tests {
         }
     }
 
+    fn saved(x: f64, y: f64, width: f64, height: f64) -> WindowPlacement {
+        WindowPlacement {
+            x,
+            y,
+            width,
+            height,
+            display_uuid: None,
+        }
+    }
+
+    #[test]
+    fn preparing_off_main_thread_fails_before_native_access() {
+        let rejected = std::thread::spawn(|| {
+            matches!(
+                prepare_window(WindowRole::Scene, DisplayId::new(0), None),
+                Err(WindowGeometryError::MainThreadRequired),
+            )
+        })
+        .join()
+        .unwrap();
+        assert!(rejected);
+    }
+
+    #[test]
+    fn capture_preserves_actual_offscreen_position_then_restore_uses_current_viewport() {
+        let old_screen = rect(-1920.0, -700.0, 1920.0, 1080.0);
+        let content = rect(-2000.0, 400.0, 414.0, 259.0);
+        let outer = metrics().frame_for_content(content);
+        let captured = placement_from_geometry(old_screen, outer, content, None).unwrap();
+        assert_eq!((captured.x, captured.y), (-83.0, -308.0));
+        let screen = rect(0.0, 0.0, 1440.0, 900.0);
+        let visible = rect(10.0, 20.0, 1420.0, 850.0);
+        let restored = fit_geometry(
+            screen,
+            Some(visible),
+            WindowRole::Scene.content_size(),
+            metrics(),
+            Some(&captured),
+        )
+        .unwrap();
+        assert_eq!(restored.top_left, NSPoint::new(10.0, 30.0));
+        assert_eq!(restored.content_size, WindowRole::Scene.content_size());
+        assert_ne!(
+            restored.content_size,
+            NSSize::new(captured.width, captured.height),
+        );
+    }
+
+    #[test]
+    fn saved_outer_top_left_restores_on_a_negative_screen() {
+        let screen = rect(-1920.0, -700.0, 1920.0, 1080.0);
+        let visible = rect(-1910.0, -680.0, 1900.0, 1030.0);
+        let saved = saved(220.0, 140.0, 720.0, 480.0);
+        let placement = fit_geometry(
+            screen,
+            Some(visible),
+            WindowRole::Settings.content_size(),
+            metrics(),
+            Some(&saved),
+        )
+        .unwrap();
+        assert_eq!(placement.top_left, NSPoint::new(saved.x, saved.y));
+        assert_eq!(placement.content_size, WindowRole::Settings.content_size());
+        let frame = metrics()
+            .frame_for_content(NSRect::new(NSPoint::new(0.0, 0.0), placement.content_size));
+        let outer = outer_from_top_left(screen, placement.top_left, frame.size).unwrap();
+        assert_eq!(outer.origin, NSPoint::new(-1700.0, -151.0));
+    }
+
+    #[test]
+    fn offscreen_saved_positions_clamp_to_current_workarea_edges() {
+        let screen = rect(-1920.0, 200.0, 1920.0, 1080.0);
+        let visible = rect(-1910.0, 220.0, 1900.0, 1030.0);
+        for (x, y, expected) in [
+            (-f64::MAX, -f64::MAX, NSPoint::new(10.0, 30.0)),
+            (f64::MAX, f64::MAX, NSPoint::new(1424.0, 669.0)),
+        ] {
+            let saved = saved(x, y, f64::MAX, f64::MAX);
+            let placement = fit_geometry(
+                screen,
+                Some(visible),
+                WindowRole::Settings.content_size(),
+                metrics(),
+                Some(&saved),
+            )
+            .unwrap();
+            assert_eq!(placement.top_left, expected);
+            let frame = metrics()
+                .frame_for_content(NSRect::new(NSPoint::new(0.0, 0.0), placement.content_size));
+            let outer = outer_from_top_left(screen, placement.top_left, frame.size).unwrap();
+            assert!(outer.origin.x >= visible.origin.x);
+            assert!(outer.origin.y >= visible.origin.y);
+            assert!(max_x(outer) <= max_x(visible));
+            assert!(max_y(outer) <= max_y(visible));
+        }
+    }
+
+    #[test]
+    fn restored_size_uses_current_fixed_role_and_available_content() {
+        let screen = rect(-1300.0, -400.0, 800.0, 600.0);
+        let visible = rect(-1290.0, -380.0, 420.0, 290.0);
+        for saved in [
+            saved(100.0, 100.0, 1.0, 1.0),
+            saved(100.0, 100.0, 8000.0, 6000.0),
+        ] {
+            for role in [WindowRole::Scene, WindowRole::Settings] {
+                let placement = fit_geometry(
+                    screen,
+                    Some(visible),
+                    role.content_size(),
+                    metrics(),
+                    Some(&saved),
+                )
+                .unwrap();
+                assert_eq!(placement.content_size, NSSize::new(414.0, 259.0));
+                assert_eq!(placement.top_left, NSPoint::new(10.0, 290.0));
+            }
+        }
+    }
+
+    #[test]
+    fn captured_geometry_keeps_outer_coordinates_and_logical_content_size() {
+        let screen = rect(-1920.0, -700.0, 1920.0, 1080.0);
+        let content = rect(-1700.0, -300.0, 480.25, 360.5);
+        let outer = metrics().frame_for_content(content);
+        let uuid = Some("owning-display".to_owned());
+        let placement = placement_from_geometry(screen, outer, content, uuid.clone()).unwrap();
+        let expected = relative_top_left(screen, outer).unwrap();
+        assert_eq!(placement.x, expected.x);
+        assert_eq!(placement.y, expected.y);
+        assert_eq!(placement.width, content.size.width);
+        assert_eq!(placement.height, content.size.height);
+        assert_ne!(placement.height, outer.size.height);
+        assert_eq!(placement.display_uuid, uuid);
+        assert_eq!(
+            outer_from_top_left(screen, NSPoint::new(placement.x, placement.y), outer.size,)
+                .unwrap(),
+            outer,
+        );
+        assert!(
+            placement_from_geometry(screen, outer, content, None)
+                .unwrap()
+                .display_uuid
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn nonfinite_saved_fields_and_nonpositive_dimensions_fail_explicitly() {
+        let screen = rect(0.0, 0.0, 1440.0, 900.0);
+        for saved in [
+            saved(f64::NAN, 20.0, 480.0, 360.0),
+            saved(20.0, f64::INFINITY, 480.0, 360.0),
+            saved(20.0, 20.0, 0.0, 360.0),
+            saved(20.0, 20.0, 480.0, -1.0),
+            saved(20.0, 20.0, f64::INFINITY, 360.0),
+            saved(20.0, 20.0, 480.0, f64::NAN),
+        ] {
+            assert_eq!(
+                fit_geometry(
+                    screen,
+                    Some(screen),
+                    WindowRole::Settings.content_size(),
+                    metrics(),
+                    Some(&saved),
+                ),
+                Err(WindowGeometryError::InvalidGeometry),
+            );
+        }
+    }
+
+    #[test]
+    fn capture_rejects_invalid_native_content_and_coordinate_overflow() {
+        let screen = rect(0.0, 0.0, 1440.0, 900.0);
+        let outer = rect(20.0, 20.0, 486.0, 391.0);
+        for content in [
+            rect(23.0, 22.0, 480.0, 0.0),
+            rect(23.0, 22.0, f64::NAN, 360.0),
+            rect(23.0, 22.0, 480.0, f64::INFINITY),
+            rect(19.0, 22.0, 480.0, 360.0),
+        ] {
+            assert_eq!(
+                placement_from_geometry(screen, outer, content, None),
+                Err(WindowGeometryError::InvalidGeometry),
+            );
+        }
+        assert_eq!(
+            placement_from_geometry(
+                rect(-1e308, 0.0, 1e300, 900.0),
+                rect(1e308, 0.0, 480.0, 360.0),
+                rect(1e308, 0.0, 480.0, 360.0),
+                None,
+            ),
+            Err(WindowGeometryError::InvalidGeometry),
+        );
+    }
+
     #[test]
     fn narrow_negative_screen_fits_the_entire_outer_frame() {
         let screen = rect(-1300.0, -400.0, 800.0, 600.0);
         let visible = rect(-1290.0, -380.0, 420.0, 290.0);
-        let placement =
-            fit_geometry(screen, Some(visible), NSSize::new(960.0, 600.0), metrics()).unwrap();
+        let placement = fit_geometry(
+            screen,
+            Some(visible),
+            NSSize::new(960.0, 600.0),
+            metrics(),
+            None,
+        )
+        .unwrap();
         assert_eq!(placement.content_size, NSSize::new(414.0, 259.0));
         let outer = metrics().frame_for_content(rect(
             0.0,
@@ -423,8 +719,14 @@ mod tests {
     fn roomy_workarea_keeps_baseline_content_and_centers_outer_frame() {
         let screen = rect(-1920.0, 200.0, 1920.0, 1080.0);
         let visible = rect(-1910.0, 220.0, 1900.0, 1030.0);
-        let placement =
-            fit_geometry(screen, Some(visible), NSSize::new(480.0, 360.0), metrics()).unwrap();
+        let placement = fit_geometry(
+            screen,
+            Some(visible),
+            NSSize::new(480.0, 360.0),
+            metrics(),
+            None,
+        )
+        .unwrap();
         assert_eq!(placement.content_size, NSSize::new(480.0, 360.0));
         let frame = metrics().frame_for_content(rect(0.0, 0.0, 480.0, 360.0));
         let outer = outer_from_top_left(screen, placement.top_left, frame.size).unwrap();
@@ -473,10 +775,16 @@ mod tests {
             rect(0.0, 0.0, f64::INFINITY, 100.0),
             rect(0.0, 0.0, 4.0, 20.0),
         ] {
-            let update = fit_geometry(screen, Some(visible), NSSize::new(480.0, 360.0), metrics());
+            let update = fit_geometry(
+                screen,
+                Some(visible),
+                NSSize::new(480.0, 360.0),
+                metrics(),
+                None,
+            );
             assert_eq!(update, Err(WindowGeometryError::InvalidGeometry));
         }
-        let unavailable = fit_geometry(screen, None, NSSize::new(480.0, 360.0), metrics());
+        let unavailable = fit_geometry(screen, None, NSSize::new(480.0, 360.0), metrics(), None);
         assert_eq!(unavailable, Err(WindowGeometryError::DisplayUnavailable));
     }
 
@@ -488,7 +796,8 @@ mod tests {
                 rect(0.0, 0.0, 0.0, 900.0),
                 Some(screen),
                 NSSize::new(480.0, 360.0),
-                metrics()
+                metrics(),
+                None,
             )
             .is_err()
         );
@@ -497,7 +806,8 @@ mod tests {
                 rect(f64::MAX, 0.0, f64::MAX, 900.0),
                 Some(screen),
                 NSSize::new(480.0, 360.0),
-                metrics()
+                metrics(),
+                None,
             )
             .is_err()
         );
@@ -507,18 +817,36 @@ mod tests {
             NSSize::new(480.0, f64::NAN),
             NSSize::new(f64::INFINITY, 360.0),
         ] {
-            assert!(fit_geometry(screen, Some(screen), size, metrics()).is_err());
+            assert!(fit_geometry(screen, Some(screen), size, metrics(), None).is_err());
         }
         let invalid = FrameMetrics {
             top: f64::NAN,
             ..metrics()
         };
-        assert!(fit_geometry(screen, Some(screen), NSSize::new(480.0, 360.0), invalid).is_err());
+        assert!(
+            fit_geometry(
+                screen,
+                Some(screen),
+                NSSize::new(480.0, 360.0),
+                invalid,
+                None
+            )
+            .is_err()
+        );
         let negative = FrameMetrics {
             left: -1.0,
             ..metrics()
         };
-        assert!(fit_geometry(screen, Some(screen), NSSize::new(480.0, 360.0), negative).is_err());
+        assert!(
+            fit_geometry(
+                screen,
+                Some(screen),
+                NSSize::new(480.0, 360.0),
+                negative,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

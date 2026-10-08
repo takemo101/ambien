@@ -94,14 +94,24 @@ final class Candidate {
     let app: AXUIElement
     let pid: pid_t
     let errorsURL: URL
+    let homeURL: URL
     private let errors: FileHandle
 
-    init(executable: URL, artifacts: URL) throws {
+    init(executable: URL, artifacts: URL, home: URL? = nil) throws {
+        let root = artifacts.standardizedFileURL.resolvingSymlinksInPath()
+        homeURL = (home ?? root.appendingPathComponent("home-\(UUID().uuidString)", isDirectory: true))
+            .standardizedFileURL.resolvingSymlinksInPath()
+        try require(homeURL.path.hasPrefix(root.path + "/"), "Candidate HOME must remain in the private run")
+        try FileManager.default.createDirectory(at: homeURL, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
         errorsURL = artifacts.appendingPathComponent("candidate-\(UUID().uuidString).log")
         let fd = open(errorsURL.path, O_RDWR | O_CREAT | O_EXCL, 0o600)
         guard fd >= 0 else { throw Failure("Cannot create private candidate log: errno=\(errno)") }
         errors = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         process.executableURL = executable
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = homeURL.path
+        process.environment = environment
         process.standardOutput = errors
         process.standardError = errors
         try process.run()
@@ -236,9 +246,10 @@ func minimizeRestore(_ window: AXUIElement) throws {
     try require(result == .success, "Cannot restore minimized native window")
     try waitFor("window restores") { (try attribute(window, "AXMinimized") as? Bool) == false }
 }
-func withCandidate(_ executable: URL, artifacts: URL, _ scenario: (Candidate) throws -> Void) throws {
+func withCandidate(_ executable: URL, artifacts: URL, home: URL? = nil,
+                   _ scenario: (Candidate) throws -> Void) throws {
     try requireSession()
-    let candidate = try Candidate(executable: executable, artifacts: artifacts)
+    let candidate = try Candidate(executable: executable, artifacts: artifacts, home: home)
     do {
         try require(AXUIElementSetMessagingTimeout(candidate.app, 1) == .success,
                     "Cannot bound candidate AX messages")
@@ -1840,14 +1851,279 @@ final class Checks {
     }
 }
 
+func persistence(_ executable: URL, artifacts: URL) throws -> String {
+    var evidence: [String] = []
+    let manager = FileManager.default
+    let unknown: [String: Any] = ["nested": [["value": 7]]]
+    let initial: [String: Any] = [
+        "version": 1, "volume": 0.8, "mute": true, "wander": false,
+        "wander_min_minutes": 20, "wander_max_minutes": 10, "transition_seconds": 2.6,
+        "last": "rock",
+        "window": ["x": 200, "y": 100, "width": 9999, "height": 9999, "display_uuid": NSNull()],
+        "situations": [
+            "rain": ["amount": -2, "wind": 2, "removed_knob": ["kept": true]],
+            "rock": ["amount": 0.9, "size": 0.25, "hardness": 0.1],
+            "removed_situation": ["kept": 7],
+        ],
+        "retained_unknown": unknown,
+    ]
+    func encoded(_ object: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+    func fixture(_ name: String, _ bytes: Data) throws -> (URL, URL, URL) {
+        let home = artifacts.appendingPathComponent("persistence-\(name)", isDirectory: true)
+        try require(mkdir(home.path, 0o700) == 0, "Cannot create owned persistence HOME: errno=\(errno)")
+        let directory = home.appendingPathComponent("Library/Application Support/Ambien", isDirectory: true)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+        let state = directory.appendingPathComponent("state.json")
+        try privateFile(bytes, at: state)
+        return (home, state, directory)
+    }
+    func document(_ state: URL) throws -> [String: Any] {
+        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: state)) as? [String: Any] else {
+            throw Failure("Saved document is not an object")
+        }
+        return value
+    }
+    func scalar(_ value: Any?) -> Double { (value as? NSNumber)?.doubleValue ?? .nan }
+    func retained(_ value: [String: Any], times: (Double, Double, Double) = (1, 1, 1)) throws {
+        guard let extra = value["retained_unknown"],
+              let situations = value["situations"] as? [String: Any],
+              let rain = situations["rain"] as? [String: Any],
+              let removed = situations["removed_situation"] as? [String: Any] else {
+            throw Failure("Unknown document/situation fields were removed")
+        }
+        try require(try encoded(extra) == encoded(unknown) &&
+                    scalar(removed["kept"]) == 7 && rain["removed_knob"] is [String: Any],
+                    "Unknown nested values were changed")
+        try require(scalar(rain["amount"]) == 0 && scalar(rain["wind"]) == 1,
+                    "Known saved knobs were not clamped")
+        try require(scalar(value["wander_min_minutes"]) == times.0 &&
+                    scalar(value["wander_max_minutes"]) == times.1 &&
+                    scalar(value["transition_seconds"]) == times.2,
+                    "Saved normalized/edited time endpoints did not round-trip")
+    }
+    func restored(_ candidate: Candidate, _ window: AXUIElement,
+                  target: String, volume: Double, muted: Bool, point: CGPoint,
+                  times: (Double, Double, Double) = (1, 1, 1), wandering: Bool = false) throws {
+        try expectReceipt(candidate, window, settings: 0, manual: 0)
+        try waitFor("restored production controls and menu") {
+            try observeOwnedSettings(candidate, window) {
+                guard let main = try line(window, prefix: "現在の設定:") else { return false }
+                return try main.hasPrefix("現在の設定: \(target) /") &&
+                    abs(number(slider(window, label: "アプリの音量")) - volume) < 0.001 &&
+                    number(mute(window)) == (muted ? 1 : 0) &&
+                    menuMarked(candidate) == muted &&
+                    menuMarked(candidate, title: "ひとりで移る") == wandering &&
+                    abs(number(slider(window, label: "最小滞在時間")) - times.0) < 0.001 &&
+                    abs(number(slider(window, label: "最大滞在時間")) - times.1) < 0.001 &&
+                    abs(number(slider(window, label: "自動切り替え時間")) - times.2) < 0.001
+            } == true
+        }
+        let scene = try candidate.scene()
+        try require(try windowSize(scene) == CGSize(width: 960, height: 600),
+                    "Saved arbitrary dimensions replaced the current fixed scene size")
+        let actual = try position(scene)
+        try require(abs(actual.x - point.x) < 1 && abs(actual.y - point.y) < 1,
+                    "Saved native scene position not restored: \(actual), expected \(point)")
+        evidence.append("pid=\(candidate.pid), restored \(target), volume=\(volume), mute=\(muted), times=\(times), wander=\(wandering), scene=\(try bounds(scene)), fresh receipt0/0")
+    }
+    let worldExpression = try NSRegularExpression(pattern: "受理通知時点の世界時刻 ([0-9]+(?:\\.[0-9]+)?) 秒")
+    func world(_ window: AXUIElement) throws -> Double {
+        guard let receipt = try line(window, prefix: "音声側の受理:"),
+              let match = worldExpression.firstMatch(in: receipt, range: NSRange(receipt.startIndex..<receipt.endIndex, in: receipt)),
+              let range = Range(match.range(at: 1), in: receipt), let value = Double(receipt[range]) else {
+            throw Failure("Current audio world receipt is missing")
+        }
+        return value
+    }
+    let (home, state, _) = try fixture("roundtrip", encoded(initial))
+    try withCandidate(executable, artifacts: artifacts, home: home) { candidate in
+        try candidate.menu("設定…"); try candidate.expectWindows(2)
+        let window = try candidate.settings()
+        try restored(candidate, window, target: "岩", volume: 80, muted: true,
+                     point: CGPoint(x: 200, y: 100), times: (10, 20, 3))
+        try foreground(candidate, window)
+        try focus(slider(window, label: "アプリの音量")); try key(candidate, window, code: 115)
+        try expectReceipt(candidate, window, settings: 1, manual: 0)
+        try focus(slider(window, label: "大きさ")); try key(candidate, window, code: 115)
+        try expectReceipt(candidate, window, settings: 2, manual: 1)
+        for (offset, label) in ["最小滞在時間", "最大滞在時間", "自動切り替え時間"].enumerated() {
+            try focus(slider(window, label: label)); try key(candidate, window, code: 115)
+            try expectReceipt(candidate, window, settings: 3 + offset, manual: 1)
+        }
+        try candidate.menu("消音"); try expectReceipt(candidate, window, settings: 6, manual: 1)
+        var point = CGPoint(x: 250, y: 150)
+        guard let value = AXValueCreate(.cgPoint, &point) else { throw Failure("Cannot create owned scene position") }
+        try require(AXUIElementSetAttributeValue(try candidate.scene(), "AXPosition" as CFString, value) == .success,
+                    "Cannot move the owned scene")
+        try waitFor("actual settled state.json save") {
+            let value = try document(state)
+            guard let situations = value["situations"] as? [String: Any],
+                  let rock = situations["rock"] as? [String: Any],
+                  let geometry = value["window"] as? [String: Any] else { return false }
+            return scalar(value["volume"]) == 0 && value["mute"] as? Bool == false &&
+                scalar(rock["size"]) == 0 && scalar(geometry["x"]) == 250 &&
+                scalar(geometry["y"]) == 150 && scalar(geometry["width"]) == 960 &&
+                scalar(geometry["height"]) == 600 && geometry["display_uuid"] is String
+        }
+        try retained(document(state))
+        try candidate.menu("終了"); try candidate.expectExit()
+        evidence.append("Settled production edit/position save, independent mute=false at volume0, unknown nested fields retained; normal menu Quit pid=\(candidate.pid)")
+    }
+    try withCandidate(executable, artifacts: artifacts, home: home) { candidate in
+        try candidate.menu("設定…"); try candidate.expectWindows(2)
+        let window = try candidate.settings()
+        try restored(candidate, window, target: "岩", volume: 0, muted: false, point: CGPoint(x: 250, y: 150))
+        try require(try number(slider(window, label: "大きさ")) == 0, "Saved rock knob did not restore")
+        try candidate.menu("消音"); try expectReceipt(candidate, window, settings: 1, manual: 0)
+        try foreground(candidate, window)
+        try focus(slider(window, label: "アプリの音量")); try key(candidate, window, code: 124)
+        try expectReceipt(candidate, window, settings: 2, manual: 0)
+        try candidate.menu("深海"); try expectReceipt(candidate, window, settings: 3, manual: 1)
+        try candidate.menu("終了"); try candidate.expectExit()
+        let value = try document(state)
+        try require(value["last"] as? String == "deep" &&
+                    abs(scalar(value["volume"]) - 0.01) < 0.000001 && value["mute"] as? Bool == true,
+                    "Quit did not flush the latest endpoint/manual target")
+        try retained(value)
+        evidence.append("Immediate normal Quit during latest explicit 岩→深海 crossing flushed volume1%/mute=true/last=deep; pid=\(candidate.pid)")
+    }
+    try withCandidate(executable, artifacts: artifacts, home: home) { candidate in
+        try candidate.menu("設定…"); try candidate.expectWindows(2)
+        let window = try candidate.settings()
+        try restored(candidate, window, target: "深海", volume: 1, muted: true, point: CGPoint(x: 250, y: 150))
+        try retained(document(state))
+        let started = DispatchTime.now().uptimeNanoseconds
+        try candidate.menu("ひとりで移る")
+        try expectReceipt(candidate, window, settings: 1, manual: 0)
+        var automatic: (String, String)?
+        let choices = ["rain": "雨", "rock": "岩"]
+        while Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000 <= 95 {
+            try requireSession()
+            try require(candidate.alive(), "Candidate exited while waiting for automatic saved last")
+            if let saved = try document(state)["last"] as? String, let label = choices[saved] {
+                let coherent = try observeOwnedSettings(candidate, window) {
+                    guard let main = try line(window, prefix: "現在の設定:"),
+                          let receipt = try line(window, prefix: "音声側の受理:") else { return false }
+                    return try main.hasPrefix("現在の設定: \(label) /") &&
+                        receipt.contains("表示対象 \(label)") &&
+                        generations(main) == (1, 0) && generations(receipt) == (1, 0) &&
+                        menuMarked(candidate, title: label) && menuMarked(candidate, title: "ひとりで移る")
+                } == true
+                if coherent {
+                    automatic = (saved, label)
+                    break
+                }
+            }
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.2))
+        }
+        guard let automatic else { throw Failure("Automatic current-excluding last was not saved within95 wall seconds") }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+        try require(elapsed >= 60, "Automatic saved last appeared before the production minimum dwell")
+        try retained(document(state))
+        evidence.append("Automatic 深海→\(automatic.1), actual state.json last=\(automatic.0), unchanged receipt1/0, audio world=\(try world(window)), \(elapsed) wall seconds; no time-shortening hook")
+        try candidate.menu("終了"); try candidate.expectExit()
+        evidence.append("Automatic saved target normal Quit pid=\(candidate.pid)")
+    }
+    guard let savedAutomatic = try document(state)["last"] as? String,
+          let automaticLabel = ["rain": "雨", "rock": "岩"][savedAutomatic] else {
+        throw Failure("Saved automatic target is not registered/current-excluding")
+    }
+    try withCandidate(executable, artifacts: artifacts, home: home) { candidate in
+        try candidate.menu("設定…"); try candidate.expectWindows(2)
+        let window = try candidate.settings()
+        try restored(candidate, window, target: automaticLabel, volume: 1, muted: true,
+                     point: CGPoint(x: 250, y: 150), wandering: true)
+        try require(try world(window) < 5, "Restart replayed the old world clock instead of fresh staying")
+        try retained(document(state))
+        try candidate.menu("終了"); try candidate.expectExit()
+    }
+    var future = initial
+    future["version"] = 2
+    let corrupt = Data("{broken owned state".utf8)
+    let fixtures: [(String, Data, Bool, Bool, Bool)] = [
+        ("future", try encoded(future), false, false, false),
+        ("corrupt", corrupt, false, false, true),
+        ("unreadable", try encoded(initial), false, true, true),
+        ("backup-failed", corrupt, true, false, false),
+        ("save-failed", try encoded(initial), true, false, false),
+    ]
+    for (name, original, readonlyParent, unreadable, backupExpected) in fixtures {
+        let (fixtureHome, fixtureState, directory) = try fixture(name, original)
+        if unreadable { try require(chmod(fixtureState.path, 0o000) == 0, "Cannot protect owned unreadable fixture") }
+        if readonlyParent { try require(chmod(directory.path, 0o500) == 0, "Cannot protect owned readonly-parent fixture") }
+        defer {
+            if readonlyParent && chmod(directory.path, 0o700) != 0 { fputs("Cannot restore owned fixture directory mode\n", stderr) }
+        }
+        try withCandidate(executable, artifacts: artifacts, home: fixtureHome) { candidate in
+            try candidate.menu("設定…"); try candidate.expectWindows(2)
+            let window = try candidate.settings()
+            var revision = 0
+            if try !menuMarked(candidate) {
+                try candidate.menu("消音"); revision += 1
+            }
+            try expectReceipt(candidate, window, settings: revision, manual: 0)
+            let before = try world(window)
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.1))
+            try foreground(candidate, window)
+            try focus(slider(window, label: "アプリの音量")); try key(candidate, window, code: 115)
+            revision += 1
+            try expectReceipt(candidate, window, settings: revision, manual: 0)
+            let after = try world(window)
+            try require(after > before + 0.8, "Audio world stopped across protected load/save failure")
+            let prefix = backupExpected ? "保存状態:" : "状態を保存できません:"
+            var notice: String?
+            try waitFor("explicit settings and actionable-menu persistence notice") {
+                try observeOwnedSettings(candidate, window) {
+                    guard let value = try line(window, prefix: prefix) else { return false }
+                    let raw = try attribute(candidate.app, "AXMenuBar")
+                    guard let item = try findMenu(raw as! AXUIElement, title: value) else { return false }
+                    try require((try attribute(item, "AXEnabled") as? Bool) == true,
+                                "Persistence notice cannot open settings details")
+                    notice = value
+                    return true
+                } == true
+            }
+            guard let notice else { throw Failure("Persistence notification was not retained") }
+            try candidate.menu(notice)
+            try candidate.expectWindows(2)
+            try require(CFEqual(try candidate.settings(), window),
+                        "Persistence notification duplicated the settings window")
+            try require(try number(mute(window)) == 1 && candidate.alive(),
+                        "Persistence failure changed mute or terminated audio host")
+            try candidate.menu("終了"); try candidate.expectExit()
+            evidence.append("\(name): actionable UI/menu=\(notice); audio world \(before)→\(after), accepted revision\(revision)/0, normal menu Quit pid=\(candidate.pid)")
+        }
+        if backupExpected {
+            let files = try manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent != "state.json" }
+            try require(files.count == 1, "Expected one protected original backup, got \(files)")
+            let backup = files[0].appendingPathComponent("state.json")
+            try require(try manager.contentsOfDirectory(atPath: files[0].path) == ["state.json"],
+                        "Unique backup reservation does not contain exactly the original")
+            if unreadable { try require(chmod(backup.path, 0o600) == 0, "Cannot inspect owned unreadable backup") }
+            try require(try Data(contentsOf: backup) == original, "Original backup bytes changed")
+            try require((try document(fixtureState))["version"] as? Int == 1, "Writable defaults were not saved after backup")
+            evidence.append("\(name): original byte-identical in \(files[0].lastPathComponent)/state.json, new version1 state saved")
+        } else {
+            try require(try Data(contentsOf: fixtureState) == original, "Protected original was overwritten")
+            evidence.append("\(name): original state.json remains byte-identical")
+        }
+    }
+    return evidence.joined(separator: "\n")
+}
+
 let usage = """
-Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|mixing|wandering|presentation|visual|all] [--artifacts PARENT_DIR]
+Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|mixing|wandering|presentation|persistence|visual|all] [--artifacts PARENT_DIR]
        /usr/bin/swift scripts/native-e2e.swift --help
 
 Default case: all. Each run creates a unique private directory (0700) under
 PARENT_DIR (default target/native-e2e), with report.json (0600), candidate logs,
-and authorized own-window PNG/helper measurements. No permission prompts,
-desktop captures, image uploads, or production test hooks.
+isolated private HOME trees and authorized own-window PNG/helper measurements.
+Persistence alone reuses its own HOME across restarts; user state is never used.
+No permission prompts, desktop captures, image uploads, or production test hooks.
 
 Exit: 0 every selected case passed; 1 any failure; 77 prerequisites blocked
 when no failure. Missing capture permission blocks visual/situations/deep/mixing/presentation image stages;
@@ -1867,6 +2143,12 @@ then exercises an owned opaque full-cover fixture, application hide/show and
 scene close/recreation. Each of three restoration stages captures own PNG3/two
 interior comparisons. UI/world receipts and images do not measure scene task/fps,
 old particle identity, audible continuity, RT or physical synchronization.
+Persistence verifies the production state.json path in isolated HOME: restored
+controls and fixed scene position, actual settled saves and final Quit flush,
+unknown-field retention, normalization, protected future/corrupt/unreadable files
+and real create-temp/backup failures with UI/menu notices and progressing audio
+receipts. It does not establish physical silence, subjective quality or update/
+quit-veto choreography, which has a separate lifecycle acceptance gate.
 """
 
 struct Options {
@@ -1890,7 +2172,7 @@ struct Options {
                         "Unknown, duplicate, or incomplete argument: \(option)\n\(usage)")
             let value = arguments[index + 1]
             if option == "--case" {
-                try require(["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "presentation", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
+                try require(["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "presentation", "persistence", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
                 selected = value
             } else {
                 try require(!value.isEmpty && !value.hasPrefix("--"), "Invalid artifacts parent\n\(usage)")
@@ -1946,7 +2228,7 @@ do {
     let nativeReady = checks.checks.last?.status == "pass" && binaryReady
     let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
         .deletingLastPathComponent().appendingPathComponent("native-screenshot.swift")
-    for selected in ["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "presentation", "visual"] where options.selected == "all" || options.selected == selected {
+    for selected in ["lifecycle", "controls", "situations", "deep", "mixing", "wandering", "presentation", "persistence", "visual"] where options.selected == "all" || options.selected == selected {
         let expected: String
         switch selected {
         case "lifecycle":
@@ -1963,6 +2245,8 @@ do {
             expected = "Fresh owned candidate; actual menu mute; visible focused production time sliders and exact next-application descriptions; paired min/max correction both directions; time/volume/mute preserve wander/manual revision; menu/settings on/off, explicit menu/settings selection and knob turn disable wander; final dwell1/1min/transition1sec and staying off→on starts fresh; within95 wall seconds observe a different registered automatic menu/settings/audio-receipt display, not before60 wall seconds; retain that display another60s on and require a second actual automatic change within95s of the first, then65s off at latest destination while muted; observed monotonic main revisions and exact accepted receipts recorded per real command; menu Quit normal0. No capture prerequisite; not generated-sample count, actual gains, uniform PRNG, physical-audio synchronization or audible proof."
         case "presentation":
             expected = "Production focused time sliders set dwell1/1min and transition1sec, muted wander on6/0; keep owned scene minimized until a coherent current-excluding automatic menu/radio/main/audio display within60..95 wall seconds; unchanged manual0 and progressing receipt world; restore same fixed scene and PNG3/two cropped-interior changes; runner-owned noninteractive opaque full-cover3s, own app hide3s/unhide and second PNG3/two pairs; scene close leaves settings/world/wander alive, actual time1→2 receipt7/0 latest retained; recreate fixed scene and third PNG3/two pairs; real menu Quit normal0. Not generated-sample counts, old particle identity, task/fps measurement, audible continuity, RT or physical synchronization."
+        case "persistence":
+            expected = "Isolated private HOME only; four normal roundtrip launches restore normalized/edited times, independent mute/volume, saved knobs and fixed scene position; settled save and immediate Quit flush retain unknown fields/latest explicit crossing last; real >=60..95s automatic last agrees with coherent main/audio1/0 and is restored with wander/fresh world; future-version and failed-backup documents remain byte-identical; corrupt/unreadable backups retain original bytes in the unique reservation's state.json leaf; genuine readonly-parent create-temp failure is visible in actionable menu/settings notices while audio receipts/world progress; all nine candidates menu Quit normal0."
         default:
             expected = "Authorized actual owned scene-window PNGs; real menu mute; stable CG owner/bounds; three spaced captures; two cropped-interior nonblank/nontransparent pixel-change comparisons; retained PNGs and measurements; menu Quit normal0"
         }
@@ -1976,6 +2260,7 @@ do {
             case "mixing": return try mixing(options.executable, helper: helper, artifacts: artifacts)
             case "wandering": return try wandering(options.executable, artifacts: artifacts)
             case "presentation": return try presentation(options.executable, helper: helper, artifacts: artifacts)
+            case "persistence": return try persistence(options.executable, artifacts: artifacts)
             default: return try visual(options.executable, helper: helper, artifacts: artifacts)
             }
         }

@@ -1,6 +1,6 @@
 ---
 name: verifying-ambien
-description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・短い連続選択・ひとりで移ると時間設定・音量・消音の受理、予定表示・非表示と再表示、または固有の検証コマンドと受け入れ条件を確認するとき。
+description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・短い連続選択・ひとりで移ると時間設定・音量・消音の受理、予定表示・非表示と再表示、保存・再起動・未来版や破損の保護、または固有の検証コマンドと受け入れ条件を確認するとき。
 ---
 
 # Ambien 固有の検証レシピ
@@ -26,11 +26,12 @@ description: Use when Ambien の native E2E、実行元の権限不足・許可�
 | 三環境の短い連続選択・既に鳴る対象・独立mute／volume | `mixing` | 「切り替えと途中操作」「設定窓」／実menu雨→岩→深海→岩→深海→選択済み深海の開始間隔を各2秒未満で観測（入力cadenceのみ）。実settings pointerで雨→岩→深海→選択済み深海、観測depthの1段編集、消音中volume0→10→20→19→18、実viewport scroll後もfocused volume identity／receipt17/11不変、settings pointer解除18%→19→20とmenu再消音、最新深海22/12。各操作のexact main/audio receipt・排他radio／menu mark・独立mute、所有`mixing-muted` PNG3枚／2比較、設定再生成後の最新値、実menu Quit正常0。DSP settle待ちを置かず、captureが交差中か到着後かは保証しない。receipt・入力間隔・画像は実gain／最大三声RT／再入場tail／波形peak・RMS・click／物理同期を証明しない |
 | 自動移動・時間の対補正・手動介入 | `wandering` | 「体験」「時間設定」「切り替えと途中操作」／実menuと設定pointerのon/off、menu岩・settings雨・雨ノブ1段がoff、消音volume1段と時間だけの編集はon保持、main/audio世代・排他menu/radio。focused Home／Right／Leftからmin1→2でmax1→2、max2→1でmin2→1、最終1/1分・自動1秒、実説明「次の滞在から適用」「次の自動切り替えから適用」。最終雨19/4・2.3秒setup分離・on20/4、wall60〜95秒内の別表示と60秒保持、最初の変更からwall60〜95秒内の二回目の別表示、off21/4後65秒最新対象保持、正常Quit0。capture不要、時間短縮hook・仮想時計なし。main／receipt／menuを前後照合し、5秒内にcoherentな排他表示が得られなければFAIL。wall・AX・receiptを生成sample数、gain／到着、PRNG一様性、RT、可聴無音・品質、物理同期の証拠にしない |
 | 最小化中のworld/wander・hide/closeと復帰 | `presentation` | 「視覚イベント」「再生予定時刻」「窓」／capture必須。fresh0/0からmenu消音1/0・wander off2/0、focused Homeで滞在1/1分・自動1秒3/0→5/0、on6/0。sceneの実AX最小化を保持し、on開始からwall60〜95秒内の実別対象、unchanged6/0・manual0・排他menu/radio・finite receipt worldの進行を前後照合。最小化restore、own opaque cover3秒の除去、AXHidden=trueを実NS/AX状態で3秒観測してfalseへ、scene close2秒中のtime1→2とreceipt7/0・wander/mute on・現在のcoherent target/world進行、実menu再生成。minimize/unhide/reopenの各stageで所有PNG3枚／隣接2比較（合計9枚／6比較）と正常menu Quit0。coverはrunner自身の非対話NSWindowだけで、他appへ入力・撮影しない。UI/wall/PNGはsample数・old particle同定・Task停止/maxfps・RT・可聴品質・物理同期の証拠にしない |
+| 保存・正常再起動・元ファイル保護 | `persistence` | 「保存」「復元」「ボリューム設定」「時間設定」／private HOME の production state.json。初回fixtureの岩80%／mute on、reversed20/10→10/20・2.6秒→3、範囲外ノブclamp、保存過大sizeを採らない固定位置200,100。実volume Home0・岩size Home0・time3本 Home1・menu消音offとscene移動250,150をsettled保存、nested unknown／外したknob／未知situation保持。別processでvolume0／mute off／time1/1/1／knob／位置復元、実再消音・volume1%・深海選択の交差中に正常Quitし最新last=deepをflush。次回深海から実wander on、wall60〜95秒内のcurrent-excluding自動対象をactual JSON last／coherent main/audio1/0・menuで確認し、正常Quit後また別processで自動last／wander on／fresh worldへ復元。future版／backup不能／save不能は元bytes不変、corrupt／unreadableは一意backup directoryのstate.json leafが元bytes同一。実POSIX modeでowned directoryのtemp-create／backup-renameを失敗させ、menu通知の実actionが既存設定を開くこと、独立muteと別の制御受理後のaudio world進行、各候補の正常menu Quit0を観測。capture不要、時間短縮hookなし。receipt／wall／JSONを物理的無音・音質・gain同率・PRNG一様性・RT・P12終了veto/fade・更新gateの証拠にしない |
 | 消音中の実シーン窓 frame 変化 | `visual` | 「音と絵」「検証条件」／所有窓 PNG と内部 pixel 比較。背景透過の変化も含み得る |
 | 上記すべて | `all`（省略時） | 選択した全ケースの証拠 |
-| 値・時間・状態・容量・callback 境界 | `cargo test --locked` | 現存 `src/controls.rs`、`src/audio/`、`src/platform/` の対応試験。native smoke の代わりにしない |
+| 値・時間・状態・容量・callback 境界 | `cargo test --locked` | 現存 `src/controls.rs`、`src/audio/`、`src/platform/`、`src/persistence.rs` の対応試験。native smoke の代わりにしない |
 
-`--case` の値を上記から選ぶ。保存／復旧／更新を、未実装の追加 case 名で案内しない。
+`--case` の値を上記から選ぶ。全候補の HOME は今回の private run 内へ隔離する。`persistence` の正常再起動だけ同じ fixture HOME を再利用し、通常 HOME／元 state に故障を入れない。未実装の復旧／更新 case 名を発明しない。
 
 ## 権限準備と未完ケースへの復帰
 
@@ -53,6 +54,7 @@ falseなら取得APIや未完の`visual`／`situations`／`deep`／`mixing`／`p
 
 `presentation` のAXHiddenはpublic AX setterの成功と実NS/AX hidden状態を両方確認する。hide/unhideの便利APIのreturnだけを状態の証拠にしない。新sceneのAX boundsとCG frameはOS開窓animation中に一致しない場合があるため、同じowned window／foreground／固定AX boundsと一意のexact CG matchを既存5秒内で観測してから最初のcaptureを開始する。幅・位置の許容差を広げず、その後は同じID/boundsを毎回確認する。自動対象の更新でretireされたowned AX virtual descendantは既存のPID／同じsettings window検査でsnapshot全体を破棄する。入力・captureのguardはcatchせず、安定した不一致・重複世代を通さない。scopeの異なる一般retryやfake clockは導入しない。
 
+`persistence` は保存例の数値を品質presetとして採らず、fixtureの復元と実production inputの結果を比較する。backupは一意directoryをcreate_dirで予約し、その中の `state.json` へ原本をrenameする。directory自体をDataとして読まず、leafのbytesと新しいdefaultsの保存を区別する。read-onlyなfuture／backup不能と通常write failureでも、正常なcontrol editが通知を消さず音声receiptが進むことを確認する。menu通知は詳細を設定singletonへ開く意味のあるactionであり、GPUI/macOSのaction validationに無効flag／no-opで対抗しない。失敗時cleanupを正常Quitにせず、各正常process終了と新しい0/0の復元を観測する。productionの最短自動滞在を待ち、時間短縮hook／途中DSP再演を使わない。
 
 ## runner 固有の証拠契約
 
