@@ -578,6 +578,660 @@ mod tests {
     }
 
     #[test]
+    fn actual_three_voice_callback_keeps_latest_arc_and_dsp_history_through_silent_edits() {
+        use crate::controls::ControlEdit;
+
+        for rate in [8_000, 44_100, 48_000, 96_000] {
+            let registry = Arc::new(Registry::new().unwrap());
+            let rain = registry.resolve("rain").unwrap();
+            let rock = registry.resolve("rock").unwrap();
+            let deep = registry.resolve("deep").unwrap();
+            let count = registry.definitions().len();
+            let epoch = StreamEpoch::new(20).unwrap();
+            let mut reference_controls = ControlState::new(&registry);
+            reference_controls.knobs.fill(Normalized::ONE);
+            reference_controls
+                .apply(ControlEdit::Volume(Normalized::ONE))
+                .unwrap();
+            let mut edited_controls = reference_controls.clone();
+            let reference_visuals = Arc::new(VisualRing::new(EVENT_CAPACITY, count));
+            let edited_visuals = Arc::new(VisualRing::new(EVENT_CAPACITY, count));
+            let reference_engine = PreparedEngine::prepare(
+                registry.clone(),
+                reference_controls.clone(),
+                reference_visuals.clone(),
+                rate,
+                613,
+            )
+            .unwrap();
+            let edited_engine = PreparedEngine::prepare(
+                registry,
+                edited_controls.clone(),
+                edited_visuals.clone(),
+                rate,
+                613,
+            )
+            .unwrap();
+            let reference_mailbox = reference_engine.control_mailbox().clone();
+            let edited_mailbox = edited_engine.control_mailbox().clone();
+            let reference = EngineLease::new(reference_engine, epoch);
+            let edited = EngineLease::new(edited_engine, epoch);
+            let errors = ErrorCell::new(epoch);
+            let frames = rate as usize / 10;
+            let mut a = vec![0.0; frames * 2];
+            let mut b = vec![0.0; frames * 2];
+            let mut a_events = [None; crate::audio::transport::VISIBLE_CAPACITY];
+            let mut b_events = [None; crate::audio::transport::VISIBLE_CAPACITY];
+            let mut silent_event_observed = false;
+            let mut audible_energy = 0.0_f64;
+            let (_, heap) = crate::rt_alloc::measure(|| {
+                for block in 0..10 {
+                    if block == 5 {
+                        reference_controls.apply(ControlEdit::Select(rock)).unwrap();
+                        edited_controls.apply(ControlEdit::Select(rock)).unwrap();
+                        reference_mailbox.publish(&reference_controls);
+                        edited_mailbox.publish(&edited_controls);
+                    }
+                    let info = callback_info(block * 100_000_000);
+                    output_f32(&reference, &mut a, 2, &info, &errors);
+                    output_f32(&edited, &mut b, 2, &info, &errors);
+                    assert_eq!(a, b);
+                }
+                let mut before = [0.0; 3];
+                before.copy_from_slice(edited.try_borrow().unwrap().engine().mix.gains());
+                assert!(before[rain.get()] > 0.0 && before[rock.get()] > 0.0);
+                assert_eq!(before[deep.get()], 0.0);
+
+                // Several accepted main-thread intents before one callback must
+                // behave like receiving only the latest, not a queued itinerary.
+                for target in [rain, rock, deep] {
+                    edited_controls.apply(ControlEdit::Select(target)).unwrap();
+                    edited_mailbox.publish(&edited_controls);
+                }
+                reference_controls.apply(ControlEdit::Select(deep)).unwrap();
+                reference_mailbox.publish(&reference_controls);
+                let info = callback_info(1_000_000_000);
+                output_f32(&reference, &mut [], 2, &info, &errors);
+                output_f32(&edited, &mut [], 2, &info, &errors);
+                {
+                    let mut guard = edited.try_borrow().unwrap();
+                    let engine = guard.engine();
+                    assert_eq!(engine.mix.gains(), before);
+                    assert_eq!(engine.world().get(), 1.0);
+                    assert_eq!(engine.movement, Movement::ManualCrossing { target: deep });
+                }
+                let mut first = [0.0; 2];
+                let mut first_reference = [0.0; 2];
+                output_f32(&reference, &mut first_reference, 2, &info, &errors);
+                output_f32(&edited, &mut first, 2, &info, &errors);
+                assert_eq!(first, first_reference);
+                {
+                    let mut guard = edited.try_borrow().unwrap();
+                    let engine = guard.engine();
+                    assert!(engine.voices.iter().all(|voice| voice.contributing));
+                    for (gain, old) in engine.mix.gains().iter().zip(before) {
+                        assert!(*gain > 0.0);
+                        // Numerical one-frame continuity bound, not a listening
+                        // or correlated-waveform loudness guarantee.
+                        assert!((*gain - old).abs() <= std::f64::consts::PI / f64::from(rate));
+                    }
+                }
+                for block in 0..20 {
+                    match block {
+                        2 => {
+                            edited_controls
+                                .apply(ControlEdit::Volume(Normalized::ZERO))
+                                .unwrap();
+                        }
+                        4 => {
+                            edited_controls.apply(ControlEdit::Mute(true)).unwrap();
+                        }
+                        6 => {
+                            edited_controls
+                                .apply(ControlEdit::Volume(Normalized::ONE))
+                                .unwrap();
+                        }
+                        8 => {
+                            edited_controls.apply(ControlEdit::Mute(false)).unwrap();
+                        }
+                        _ => {}
+                    }
+                    // Re-publishing an unchanged manual revision every callback
+                    // must not restart the two-second movement.
+                    edited_mailbox.publish(&edited_controls);
+                    reference_mailbox.publish(&reference_controls);
+                    let samples = if block == 0 || block == 19 {
+                        (frames - 1) * 2
+                    } else {
+                        frames * 2
+                    };
+                    let playback = 1_000_000_000
+                        + block * 100_000_000
+                        + if block == 0 {
+                            1_000_000_000 / u64::from(rate)
+                        } else {
+                            0
+                        };
+                    let info = callback_info(playback);
+                    output_f32(&reference, &mut a[..samples], 2, &info, &errors);
+                    output_f32(&edited, &mut b[..samples], 2, &info, &errors);
+                    assert!(
+                        a[..samples]
+                            .iter()
+                            .chain(&b[..samples])
+                            .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
+                    );
+                    audible_energy += a[..samples]
+                        .iter()
+                        .map(|sample| f64::from(*sample).powi(2))
+                        .sum::<f64>();
+                    if (3..8).contains(&block) {
+                        assert!(b[..samples].iter().all(|sample| *sample == 0.0));
+                    }
+                    if block >= 9 {
+                        assert_eq!(a[..samples], b[..samples]);
+                    }
+                    let now = MachNanos::new(1_000_000_000 + (block + 1) * 100_000_000);
+                    let event_count = reference_visuals.read_live_into(epoch, now, &mut a_events);
+                    assert_eq!(
+                        edited_visuals.read_live_into(epoch, now, &mut b_events),
+                        event_count
+                    );
+                    for (a, b) in a_events.iter().zip(&b_events).take(event_count) {
+                        let a = a.unwrap();
+                        let b = b.unwrap();
+                        assert_eq!(
+                            (a.serial, a.situation, a.world, a.present),
+                            (b.serial, b.situation, b.world, b.present)
+                        );
+                        assert_eq!(
+                            (a.x, a.y, a.strength, a.radius, a.shape, a.lifetime),
+                            (b.x, b.y, b.strength, b.radius, b.shape, b.lifetime)
+                        );
+                        silent_event_observed |= (1.3..1.8).contains(&b.world.get());
+                    }
+                    let mut reference_guard = reference.try_borrow().unwrap();
+                    let mut edited_guard = edited.try_borrow().unwrap();
+                    let reference_engine = reference_guard.engine();
+                    let edited_engine = edited_guard.engine();
+                    assert_eq!(reference_engine.mix.gains(), edited_engine.mix.gains());
+                    assert_eq!(reference_engine.world(), edited_engine.world());
+                    assert!(edited_engine.voices.iter().all(|voice| voice.contributing));
+                    assert!(edited_engine.mix.is_crossing());
+                }
+                let final_info = callback_info(3_000_000_000 - 1_000_000_000 / u64::from(rate));
+                output_f32(&reference, &mut first_reference, 2, &final_info, &errors);
+                output_f32(&edited, &mut first, 2, &final_info, &errors);
+                assert_eq!(first, first_reference);
+                for lease in [&reference, &edited] {
+                    let mut guard = lease.try_borrow().unwrap();
+                    let engine = guard.engine();
+                    assert_eq!(engine.mix.gains()[deep.get()], 1.0);
+                    assert!(!engine.mix.is_crossing());
+                    assert_eq!(engine.movement, Movement::Staying { current: deep });
+                    for voice in &engine.voices {
+                        assert_eq!(voice.contributing, voice.index == deep);
+                        assert_eq!(
+                            engine.mix.gains()[voice.index.get()],
+                            if voice.index == deep { 1.0 } else { 0.0 }
+                        );
+                    }
+                    assert_eq!(engine.world().get(), 3.0);
+                }
+                output_f32(
+                    &reference,
+                    &mut a,
+                    2,
+                    &callback_info(3_000_000_000),
+                    &errors,
+                );
+                output_f32(&edited, &mut b, 2, &callback_info(3_000_000_000), &errors);
+                assert_eq!(a, b);
+                assert_eq!(
+                    edited.try_borrow().unwrap().engine().movement,
+                    Movement::Staying { current: deep }
+                );
+                for turn in 0..1_000 {
+                    let targets = [rain, rock, deep];
+                    let target = targets[turn as usize % targets.len()];
+                    before.copy_from_slice(edited.try_borrow().unwrap().engine().mix.gains());
+                    edited_controls
+                        .apply(ControlEdit::Select(
+                            targets[(turn as usize + 1) % targets.len()],
+                        ))
+                        .unwrap();
+                    edited_mailbox.publish(&edited_controls);
+                    edited_controls.apply(ControlEdit::Select(target)).unwrap();
+                    edited_mailbox.publish(&edited_controls);
+                    reference_controls
+                        .apply(ControlEdit::Select(target))
+                        .unwrap();
+                    reference_mailbox.publish(&reference_controls);
+                    let info =
+                        callback_info(3_100_000_000 + turn * 127 * 1_000_000_000 / u64::from(rate));
+                    output_f32(&reference, &mut [], 2, &info, &errors);
+                    output_f32(&edited, &mut [], 2, &info, &errors);
+                    assert_eq!(edited.try_borrow().unwrap().engine().mix.gains(), before);
+                    output_f32(&reference, &mut a[..254], 2, &info, &errors);
+                    output_f32(&edited, &mut b[..254], 2, &info, &errors);
+                    assert_eq!(a[..254], b[..254]);
+                    {
+                        let mut guard = edited.try_borrow().unwrap();
+                        let gains = guard.engine().mix.gains();
+                        assert!(gains.iter().all(|gain| gain.is_finite() && *gain >= 0.0));
+                        // Arithmetic tolerance only, not a loudness guarantee.
+                        assert!(
+                            (gains.iter().map(|gain| gain * gain).sum::<f64>() - 1.0).abs() < 1e-12
+                        );
+                    }
+                    if turn > 0 {
+                        assert!(
+                            edited
+                                .try_borrow()
+                                .unwrap()
+                                .engine()
+                                .voices
+                                .iter()
+                                .all(|voice| voice.contributing)
+                        );
+                    }
+                }
+                // The thousandth rapid intent is rain, already audible in the
+                // mix. Its 127 generated frames count toward the same arc.
+                for block in 0..20 {
+                    edited_mailbox.publish(&edited_controls);
+                    reference_mailbox.publish(&reference_controls);
+                    let samples = if block == 19 {
+                        (frames - 127) * 2
+                    } else {
+                        frames * 2
+                    };
+                    let playback = 3_100_000_000
+                        + 1_000 * 127 * 1_000_000_000 / u64::from(rate)
+                        + block * 100_000_000;
+                    let info = callback_info(playback);
+                    output_f32(&reference, &mut a[..samples], 2, &info, &errors);
+                    output_f32(&edited, &mut b[..samples], 2, &info, &errors);
+                    assert_eq!(a[..samples], b[..samples]);
+                }
+                let mut guard = edited.try_borrow().unwrap();
+                let engine = guard.engine();
+                assert_eq!(engine.movement, Movement::Staying { current: rain });
+                for voice in &engine.voices {
+                    assert_eq!(voice.contributing, voice.index == rain);
+                }
+            });
+            assert_eq!(heap, crate::rt_alloc::Counts::default(), "rate {rate}");
+            assert!(
+                audible_energy > 0.0,
+                "real three-voice DSP must generate sound"
+            );
+            assert!(
+                silent_event_observed,
+                "real particles must continue during silent crossing"
+            );
+            assert_eq!(errors.take_bits(), 0, "rate {rate}");
+        }
+    }
+
+    #[test]
+    fn real_voice_consumer_keeps_a_rounded_one_target_crossing_while_another_gain_is_positive() {
+        use crate::controls::ControlEdit;
+
+        let rate = 48_000;
+        let registry = Arc::new(Registry::new().unwrap());
+        let rain = registry.resolve("rain").unwrap();
+        let rock = registry.resolve("rock").unwrap();
+        let mut controls = ControlState::new(&registry);
+        controls.knobs.fill(Normalized::ONE);
+        let visuals = Arc::new(VisualRing::new(
+            EVENT_CAPACITY,
+            registry.definitions().len(),
+        ));
+        let mut engine =
+            PreparedEngine::prepare(registry, controls.clone(), visuals, rate, 617).unwrap();
+        // Seed only the numeric boundary via existing ramp operations, not a
+        // fake voice or a production control duration.
+        engine
+            .mix
+            .retarget(rock, Duration::from_secs(1_000_000_000_000_000));
+        engine.mix.advance_frames(1, 100_000);
+        let before = engine.mix.gains().to_vec();
+        let tiny = before[rock.get()];
+        assert_eq!(before[rain.get()], 1.0);
+        assert!(tiny > 1e-20 && tiny < 2e-20);
+        let mailbox = engine.control_mailbox().clone();
+        let epoch = StreamEpoch::new(22).unwrap();
+        let lease = EngineLease::new(engine, epoch);
+        let errors = ErrorCell::new(epoch);
+        let mut block = vec![0.0; (rate as usize - 1) * 2];
+        let mut frame = [0.0; 2];
+        controls.apply(ControlEdit::Select(rain)).unwrap();
+        mailbox.publish(&controls);
+        let (_, heap) = crate::rt_alloc::measure(|| {
+            output_f32(&lease, &mut [], 2, &callback_info(0), &errors);
+            {
+                let mut guard = lease.try_borrow().unwrap();
+                let engine = guard.engine();
+                assert_eq!(engine.mix.gains(), before);
+                assert_eq!(engine.movement, Movement::ManualCrossing { target: rain });
+                assert!(engine.mix.is_crossing());
+            }
+            output_f32(&lease, &mut frame, 2, &callback_info(0), &errors);
+            assert!(lease.try_borrow().unwrap().engine().voices[rock.get()].contributing);
+            output_f32(&lease, &mut block, 2, &callback_info(1), &errors);
+            {
+                let mut guard = lease.try_borrow().unwrap();
+                let engine = guard.engine();
+                assert!(engine.mix.is_crossing());
+                assert!(engine.voices[rock.get()].contributing);
+                assert!(engine.mix.gains()[rock.get()] > 0.0);
+                // Numerical arc tolerance only, not perceived loudness.
+                assert!((engine.mix.gains()[rock.get()] / tiny - 0.5).abs() < 1e-12);
+            }
+            output_f32(
+                &lease,
+                &mut block,
+                2,
+                &callback_info(1_000_000_000),
+                &errors,
+            );
+            assert!(lease.try_borrow().unwrap().engine().mix.is_crossing());
+            output_f32(
+                &lease,
+                &mut frame,
+                2,
+                &callback_info(2_000_000_000),
+                &errors,
+            );
+            {
+                let mut guard = lease.try_borrow().unwrap();
+                let engine = guard.engine();
+                assert_eq!(engine.movement, Movement::Staying { current: rain });
+                for voice in &engine.voices {
+                    assert_eq!(
+                        engine.mix.gains()[voice.index.get()],
+                        if voice.index == rain { 1.0 } else { 0.0 }
+                    );
+                    assert_eq!(voice.contributing, voice.index == rain);
+                }
+            }
+            // A new manual revision for an exact one-hot target is a real no-op.
+            controls.apply(ControlEdit::Select(rain)).unwrap();
+            mailbox.publish(&controls);
+            output_f32(&lease, &mut [], 2, &callback_info(2_000_000_000), &errors);
+            assert!(!lease.try_borrow().unwrap().engine().mix.is_crossing());
+        });
+        assert_eq!(heap, crate::rt_alloc::Counts::default());
+        assert_eq!(errors.take_bits(), 0);
+    }
+
+    #[test]
+    fn newly_prepared_real_rate_consumer_finishes_the_transferred_arc_in_remaining_seconds() {
+        use crate::controls::ControlEdit;
+
+        for (old_rate, new_rate) in [(48_000, 32_000), (44_100, 96_000)] {
+            let registry = Arc::new(Registry::new().unwrap());
+            let rock = registry.resolve("rock").unwrap();
+            let deep = registry.resolve("deep").unwrap();
+            let count = registry.definitions().len();
+            let mut controls = ControlState::new(&registry);
+            controls.knobs.fill(Normalized::ONE);
+            let engine = PreparedEngine::prepare(
+                registry.clone(),
+                controls.clone(),
+                Arc::new(VisualRing::new(EVENT_CAPACITY, count)),
+                old_rate,
+                619,
+            )
+            .unwrap();
+            let mailbox = engine.control_mailbox().clone();
+            let epoch = StreamEpoch::new(23).unwrap();
+            let old = EngineLease::new(engine, epoch);
+            let errors = ErrorCell::new(epoch);
+            let mut half_second = vec![0.0; old_rate as usize];
+            controls.apply(ControlEdit::Select(rock)).unwrap();
+            mailbox.publish(&controls);
+            output_f32(&old, &mut half_second, 2, &callback_info(0), &errors);
+            controls.apply(ControlEdit::Select(deep)).unwrap();
+            mailbox.publish(&controls);
+            output_f32(
+                &old,
+                &mut half_second,
+                2,
+                &callback_info(500_000_000),
+                &errors,
+            );
+            old.close();
+            let mut previous = old.try_take().unwrap();
+            let before = previous.mix.gains().to_vec();
+            assert!(before.iter().all(|gain| *gain > 0.0));
+            assert_eq!(previous.movement, Movement::ManualCrossing { target: deep });
+            let mut prepared = PreparedEngine::prepare(
+                registry,
+                controls,
+                Arc::new(VisualRing::new(EVENT_CAPACITY, count)),
+                new_rate,
+                619,
+            )
+            .unwrap();
+            // Test-only off-callback ownership transfer of the actual ramp.
+            // No whole-world/DSP checkpoint or P10 device-recovery API is claimed.
+            std::mem::swap(&mut prepared.mix, &mut previous.mix);
+            prepared.movement = previous.movement;
+            drop(previous);
+            let next = EngineLease::new(prepared, epoch);
+            let remaining_frames = new_rate as usize * 3 / 2;
+            let mut almost_remaining = vec![0.0; (remaining_frames - 1) * 2];
+            let mut last = [0.0; 2];
+            let (_, heap) = crate::rt_alloc::measure(|| {
+                output_f32(&next, &mut [], 2, &callback_info(1_000_000_000), &errors);
+                assert_eq!(next.try_borrow().unwrap().engine().mix.gains(), before);
+                output_f32(
+                    &next,
+                    &mut almost_remaining,
+                    2,
+                    &callback_info(1_000_000_000),
+                    &errors,
+                );
+                {
+                    let mut guard = next.try_borrow().unwrap();
+                    let engine = guard.engine();
+                    assert!(engine.mix.is_crossing());
+                    assert_eq!(engine.movement, Movement::ManualCrossing { target: deep });
+                    assert!(engine.voices.iter().all(|voice| voice.contributing));
+                }
+                output_f32(&next, &mut last, 2, &callback_info(2_500_000_000), &errors);
+                {
+                    let mut guard = next.try_borrow().unwrap();
+                    let engine = guard.engine();
+                    assert_eq!(engine.movement, Movement::Staying { current: deep });
+                    for voice in &engine.voices {
+                        assert_eq!(
+                            engine.mix.gains()[voice.index.get()],
+                            if voice.index == deep { 1.0 } else { 0.0 }
+                        );
+                        assert_eq!(voice.contributing, voice.index == deep);
+                    }
+                }
+            });
+            assert_eq!(heap, crate::rt_alloc::Counts::default());
+            assert_eq!(errors.take_bits(), 0, "{old_rate}->{new_rate}");
+        }
+    }
+
+    #[test]
+    fn actual_callback_reentry_with_zero_excitation_cannot_revive_departed_rain_or_rock() {
+        use crate::{controls::ControlEdit, situations::KnobIndex};
+
+        for id in ["rain", "rock"] {
+            let registry = Arc::new(Registry::new().unwrap());
+            let returning = registry.resolve(id).unwrap();
+            let deep = registry.resolve("deep").unwrap();
+            let knob_range = registry.knob_range(returning);
+            let epoch = StreamEpoch::new(21).unwrap();
+            let mut excited_controls = ControlState::new(&registry);
+            excited_controls
+                .apply(ControlEdit::Select(returning))
+                .unwrap();
+            excited_controls.knobs[knob_range.clone()].fill(Normalized::ONE);
+            let mut quiet_controls = excited_controls.clone();
+            quiet_controls.knobs[knob_range.clone()].fill(Normalized::ZERO);
+            let excited_visuals = Arc::new(VisualRing::new(
+                EVENT_CAPACITY,
+                registry.definitions().len(),
+            ));
+            let quiet_visuals = Arc::new(VisualRing::new(
+                EVENT_CAPACITY,
+                registry.definitions().len(),
+            ));
+            let excited_engine = PreparedEngine::prepare(
+                registry.clone(),
+                excited_controls.clone(),
+                excited_visuals.clone(),
+                48_000,
+                827,
+            )
+            .unwrap();
+            let quiet_engine = PreparedEngine::prepare(
+                registry,
+                quiet_controls.clone(),
+                quiet_visuals,
+                48_000,
+                827,
+            )
+            .unwrap();
+            let excited_mailbox = excited_engine.control_mailbox().clone();
+            let quiet_mailbox = quiet_engine.control_mailbox().clone();
+            let excited = EngineLease::new(excited_engine, epoch);
+            let quiet = EngineLease::new(quiet_engine, epoch);
+            let errors = ErrorCell::new(epoch);
+            let mut a = [0.0; 9_600];
+            let mut b = [0.0; 9_600];
+            let mut visible = [None; crate::audio::transport::VISIBLE_CAPACITY];
+            let mut new_excitation_energy = 0.0_f64;
+            let (_, heap) =
+                crate::rt_alloc::measure(|| {
+                    for block in 0..10 {
+                        let info = callback_info(block * 100_000_000);
+                        output_f32(&excited, &mut a, 2, &info, &errors);
+                        output_f32(&quiet, &mut b, 2, &info, &errors);
+                    }
+                    assert!(a.iter().any(|sample| sample.abs() > 0.000_001));
+                    for controls in [&mut excited_controls, &mut quiet_controls] {
+                        controls.apply(ControlEdit::Select(deep)).unwrap();
+                    }
+                    excited_mailbox.publish(&excited_controls);
+                    quiet_mailbox.publish(&quiet_controls);
+                    for block in 10..30 {
+                        let info = callback_info(block * 100_000_000);
+                        output_f32(&excited, &mut a, 2, &info, &errors);
+                        output_f32(&quiet, &mut b, 2, &info, &errors);
+                    }
+                    {
+                        let mut guard = excited.try_borrow().unwrap();
+                        let engine = guard.engine();
+                        assert_eq!(engine.mix.gains()[returning.get()], 0.0);
+                        assert!(!engine.voices[returning.get()].contributing);
+                    }
+                    // Keep the departed voice's birth knobs high for a full second:
+                    // its world still advances, but it must admit no fresh particles.
+                    for block in 30..43 {
+                        if block == 40 {
+                            for index in knob_range.clone() {
+                                excited_controls
+                                    .apply(ControlEdit::Knob(
+                                        KnobIndex::from_index(index, excited_controls.knobs.len())
+                                            .unwrap(),
+                                        Normalized::ZERO,
+                                    ))
+                                    .unwrap();
+                            }
+                            // Knob edits issue a manual command for their owner.
+                            // Coalesce the zero-excitation edit with deep selection
+                            // so this phase really leaves the returning voice inactive.
+                            excited_controls.apply(ControlEdit::Select(deep)).unwrap();
+                            quiet_controls.apply(ControlEdit::Select(deep)).unwrap();
+                            quiet_mailbox.publish(&quiet_controls);
+                            excited_mailbox.publish(&excited_controls);
+                        }
+                        let info = callback_info(block * 100_000_000);
+                        output_f32(&excited, &mut a, 2, &info, &errors);
+                        output_f32(&quiet, &mut b, 2, &info, &errors);
+                        assert_eq!(a, b, "departed {id} must not affect deep");
+                        excited_visuals.read_live_into(
+                            epoch,
+                            MachNanos::new((block + 1) * 100_000_000),
+                            &mut visible,
+                        );
+                        assert!(visible.iter().flatten().all(|event| {
+                            event.situation != returning || event.world.get() < 3.0
+                        }));
+                    }
+                    for controls in [&mut excited_controls, &mut quiet_controls] {
+                        controls.apply(ControlEdit::Select(returning)).unwrap();
+                    }
+                    excited_mailbox.publish(&excited_controls);
+                    quiet_mailbox.publish(&quiet_controls);
+                    // The deep samples are identical in both real engines. During
+                    // the whole return arc any difference therefore exposes revived
+                    // audio history, not a GainRamp-only metadata discrepancy.
+                    for block in 43..64 {
+                        let info = callback_info(block * 100_000_000);
+                        output_f32(&excited, &mut a, 2, &info, &errors);
+                        output_f32(&quiet, &mut b, 2, &info, &errors);
+                        assert_eq!(a, b, "zero-input reentry revived an old {id} tail");
+                    }
+                    assert!(a.iter().all(|sample| *sample == 0.0));
+                    {
+                        let mut guard = excited.try_borrow().unwrap();
+                        let engine = guard.engine();
+                        assert_eq!(engine.movement, Movement::Staying { current: returning });
+                        // Floating sample time is not exact decimal 6.4; this
+                        // arithmetic tolerance is not an audible timing guarantee.
+                        assert!((engine.world().get() - 6.4).abs() < 1e-12);
+                    }
+                    for index in knob_range.clone() {
+                        excited_controls
+                            .apply(ControlEdit::Knob(
+                                KnobIndex::from_index(index, excited_controls.knobs.len()).unwrap(),
+                                Normalized::ONE,
+                            ))
+                            .unwrap();
+                    }
+                    excited_mailbox.publish(&excited_controls);
+                    for block in 64..74 {
+                        output_f32(
+                            &excited,
+                            &mut a,
+                            2,
+                            &callback_info(block * 100_000_000),
+                            &errors,
+                        );
+                        assert!(
+                            a.iter()
+                                .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
+                        );
+                        new_excitation_energy += a
+                            .iter()
+                            .map(|sample| f64::from(*sample).powi(2))
+                            .sum::<f64>();
+                    }
+                });
+            assert_eq!(
+                heap,
+                crate::rt_alloc::Counts::default(),
+                "{id} departure and reentry"
+            );
+            assert!(
+                new_excitation_energy > 0.0,
+                "reentered {id} must accept fresh excitation"
+            );
+            assert_eq!(errors.take_bits(), 0);
+        }
+    }
+
+    #[test]
     fn frozen_manual_acceptance_updates_display_without_advancing_actual_mix() {
         use crate::controls::ControlEdit;
 

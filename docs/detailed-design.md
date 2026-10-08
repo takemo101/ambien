@@ -263,6 +263,10 @@ volume／mute は別端点を持つ有限長 ramp、0・1へ正確に到達す�
 
 初期設計時の親のthrowaway数学モデルはslerpのnorm／連続retargetを観測したが、当時アプリは未実装であり実波形・RT・音質の証拠ではなかった。現存P04の数学境界・実声callback・実CPALの観測と限界は [検証記録](verification.md) に分けて残す。実三環境の重なり・最大三声の統合受け入れは [実装計画のP06](implementation-plan.md#p06-現在の多声混合から手動選択へ滑らかに寄せる)、規則は [SPECの切り替え](../SPEC.md#切り替えと途中操作) に従う。
 
+P06の `render.rs` consumer試験は登録された実三声を使い、latest snapshotの一回適用、千回の短いretarget、現在vector保持、微小正寄与と終端のsample生成停止、mute中のDSP／event履歴を別に観測する。微小gainの初期vectorは現存rampの長いduration操作で数値境界だけを作り、productionの固定手動durationを変更しない。rate境界fixtureは非callbackで別rateの実engineを準備し、進行中の実 `GainRamp` と `Movement` だけを所有移譲して残り秒を消費する。これはrendererの数値契約であり、世界／DSP checkpoint、実stream再構成、P10復旧経路の実装や成功ではない。
+
+実声のprivate fixtureは離脱前に音の履歴を作り、非寄与中の論理age／PRNGと古いaudio eligibilityを保ったまま、新しい衝突／気泡を決定的に入場させる。同じ時計と乱数状態のclean-history実声との波形比較、独立した新しいdry励起のonset、実reverbのwet到来を分ける。気泡の連続低音は新しい励起の証拠にせず、f32の混合後DC出力から低音を引いた値を理想的な線形重ね合わせとして厳密比較しない。raw励起と混合後の分解能を区別し、数値試験を可聴click・物理delay・音質へ拡張しない。
+
 ## 合成とノブ曲線
 
 ### 共通世界と粒

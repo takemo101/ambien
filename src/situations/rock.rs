@@ -709,24 +709,87 @@ mod tests {
     fn reentry_invalidates_an_already_running_room_tail_without_clearing_world_lifetime() {
         let ring = VisualRing::new(8, 1);
         let knobs = [Normalized::ZERO, Normalized::ONE, Normalized::ZERO];
-        let mut voice = voice(48_000, knobs);
-        voice.grains[0].start(CollisionTone::new(1.0, 0.0), 0.9, 0.25, 0.4, 1.0, 48_000);
+        let mut reentered = voice(48_000, knobs);
+        let mut clean = voice(48_000, knobs);
+        reentered.grains[0].start(CollisionTone::new(1.0, 0.0), 0.9, 0.25, 0.4, 1.0, 48_000);
         let mut tail_energy = 0.0;
         for sample in 0..8_000 {
-            let frame = step(&mut voice, &knobs, &ring, sample);
+            let frame = step(&mut reentered, &knobs, &ring, sample);
+            assert_eq!(step(&mut clean, &knobs, &ring, sample), [0.0; 2]);
             if sample > 7_000 {
                 tail_energy += frame[0].abs() + frame[1].abs();
             }
         }
         assert!(tail_energy > 0.0);
-        let age = voice.grains[0].age;
-        voice.set_contributing(false);
-        voice.set_contributing(true);
-        assert_eq!(voice.grains[0].age, age);
-        assert!(voice.grains[0].alive());
-        for sample in 8_000..20_000 {
-            assert_eq!(step(&mut voice, &knobs, &ring, sample), [0.0; 2]);
+        assert_ne!(
+            reentered.reverb.tick([0.0; 2]),
+            [0.0; 2],
+            "the old collision has populated the actual wet room, not only the dry resonators"
+        );
+        let age = reentered.grains[0].age;
+        let random = reentered.random.state;
+        reentered.set_contributing(false);
+        assert_eq!(reentered.grains[0].age, age);
+        assert_eq!(reentered.random.state, random);
+        for sample in 8_000..8_256 {
+            assert_eq!(step(&mut reentered, &knobs, &ring, sample), [0.0; 2]);
+            assert_eq!(step(&mut clean, &knobs, &ring, sample), [0.0; 2]);
         }
+        let inactive_age = reentered.grains[0].age;
+        let inactive_random = reentered.random.state;
+        assert!(inactive_age > age);
+        reentered.set_contributing(true);
+        assert_eq!(reentered.grains[0].age, inactive_age);
+        assert_eq!(reentered.random.state, inactive_random);
+        assert_eq!(reentered.random.state, clean.random.state);
+        assert!(reentered.grains[0].alive());
+        for sample in 8_256..20_000 {
+            assert_eq!(step(&mut reentered, &knobs, &ring, sample), [0.0; 2]);
+            assert_eq!(step(&mut clean, &knobs, &ring, sample), [0.0; 2]);
+        }
+
+        // Measure the real room's impulse predelay separately: it is not the
+        // declared dry causal delay and must not postpone the fresh collision.
+        let mut room = RestartableReverb::new(48_000).unwrap();
+        let wet_predelay = (0..48_000)
+            .find(|&offset| room.tick(if offset == 0 { [1.0; 2] } else { [0.0; 2] }) != [0.0; 2])
+            .expect("the actual room eventually returns the scheduled impulse");
+        let declared_delay = reentered.prepared_delay().unwrap().get();
+        assert_eq!(declared_delay, clean.prepared_delay().unwrap().get());
+
+        // Slot one has the same untouched independent noise phase in both
+        // worlds. Only reentered has an old collision/room history; the clean
+        // reference has followed the same world clock and PRNG without it.
+        // Keep the old slot's age/eligibility intact instead of resetting the
+        // world or reseeding a generator to manufacture a matching reference.
+        let old_age = reentered.grains[0].age;
+        let random = reentered.random.state;
+        for voice in [&mut reentered, &mut clean] {
+            voice.grains[1].start(CollisionTone::new(1.0, 0.0), 0.9, 0.25, 0.4, 1.0, 48_000);
+            // Admission is age zero: the collision's intentional slope-zero
+            // attack is silent, independently of its dry routing latency.
+            assert_eq!(voice.render_sample(), [0.0; 2]);
+        }
+        assert_eq!(reentered.grains[0].age, old_age);
+        assert_eq!(reentered.random.state, random);
+        let mut onset = None;
+        for offset in 1..=12_000 {
+            let frame = step(&mut reentered, &knobs, &ring, 20_000 + offset - 1);
+            let reference = step(&mut clean, &knobs, &ring, 20_000 + offset - 1);
+            assert_eq!(
+                frame, reference,
+                "fresh dry/room output must be time-aligned and free of old tail at offset {offset}"
+            );
+            if onset.is_none() && frame != [0.0; 2] {
+                onset = Some(offset);
+            }
+        }
+        let onset = onset.expect("the explicitly scheduled real collision has an onset");
+        // One world tick moves the envelope off its intentional zero. Any
+        // further offset must be exactly the prepared dry causal delay, not a
+        // post-reentry buffer refill or the room's intentional wet predelay.
+        assert_eq!(onset as f64, 1.0 + declared_delay);
+        assert!(onset < wet_predelay);
     }
 
     #[test]

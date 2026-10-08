@@ -229,7 +229,7 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **DependsOn:** P05。**SPEC:** [切り替えと途中操作](../SPEC.md#切り替えと途中操作)、[体験](../SPEC.md#体験)、[設定窓](../SPEC.md#設定窓)。
 
-**Files:** P04 作成の `src/audio/mix.rs` と手動 consumer、P05 後の実 registry/三声を使う。Modify `src/audio/world.rs`, `src/audio/render.rs`, `src/controls.rs`, `src/ui/settings.rs`, `src/app.rs` は三環境・再入場の実統合で必要な修正だけ。Tests: `mix.rs`, `world.rs`, `render.rs` と実声 Module 内。
+**Files:** P04 作成の `src/audio/mix.rs` と手動 consumer、P05 後の実 registry/三声を使う。Modify `src/audio/world.rs`, `src/audio/render.rs`, `src/controls.rs`, `src/ui/settings.rs`, `src/app.rs` は三環境・再入場の実統合で必要な修正だけ。Tests: `mix.rs`, `world.rs`, `render.rs` と実声 Module 内。実在 `scripts/native-e2e.swift` の `mixing` caseで三環境の連続実操作・最新受理・所有窓画像・正常Quitを確認する。最大三声の実heap／時間診断は一時的なtest-only CPAL probeと既存allocator observerを使い、shipping observer hook／telemetryを残さない。
 
 **Consumes:** P04 の I05 全署名・共通手動経路・I06 manual 出力、I03 manual_target/revision、P05 後の I01 registered N、I02 prepared voices。**Produces:** 三環境の I06 manual `Movement`/`resume_target`、I07 実 gains、I11 手動表示と実 callback を接続した統合受け入れ証拠。交差を別実装へ置き換えず、未解決の実統合不具合は同じ規則で修正する。
 

@@ -958,6 +958,143 @@ func deep(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
     return evidence.joined(separator: "\n")
 }
 
+func mixing(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
+    var evidence: [String] = []
+    var stage = "candidate launch"
+    do {
+        try withCandidate(executable, artifacts: artifacts) { candidate in
+            func receipt(_ window: AXUIElement, settings: Int, manual: Int) throws {
+                stage = "receipt \(settings)/\(manual) after \(stage)"
+                try expectReceipt(candidate, window, settings: settings, manual: manual)
+            }
+            func selection(_ window: AXUIElement, label: String, muted: Bool = true) throws {
+                try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: \(label) /") == true &&
+                            (try line(window, prefix: "音声側の受理:"))?.contains("手動の表示対象 \(label)") == true,
+                            "Mixing main/audio accepted target disagrees with \(label)")
+                for choice in ["雨", "岩", "深海"] {
+                    let selected = choice == label
+                    try require((try number(try segment(window, label: choice))) == (selected ? 1 : 0) &&
+                                (try menuMarked(candidate, title: choice)) == selected,
+                                "Mixing owned radio/menu selection disagrees for \(choice)")
+                }
+                try require(try number(mute(window)) == (muted ? 1 : 0) &&
+                            menuMarked(candidate) == muted, "Mixing target operation changed mute")
+            }
+            stage = "open owned settings and observe fresh state"
+            try candidate.menu("設定…"); try candidate.expectWindows(2)
+            let window = try candidate.settings()
+            try foreground(candidate, window)
+            try receipt(window, settings: 0, manual: 0)
+            let initial = try line(window, prefix: "現在の設定:")
+            for choice in ["雨", "岩", "深海"] {
+                _ = try segment(window, label: choice)
+                _ = try menuMarked(candidate, title: choice)
+            }
+            stage = "independent menu mute"
+            try candidate.menu("消音")
+            try receipt(window, settings: 1, manual: 0)
+            try require(try number(mute(window)) == 1 && menuMarked(candidate), "Mixing menu mute not reflected")
+            var previousMenuAt: UInt64?
+            var intervals: [Double] = []
+            for (index, label) in ["雨", "岩", "深海", "岩", "深海", "深海"].enumerated() {
+                stage = "rapid menu \(index + 1) \(label)"
+                let commandAt = DispatchTime.now().uptimeNanoseconds
+                if let previousMenuAt {
+                    let interval = Double(commandAt - previousMenuAt) / 1_000_000_000
+                    intervals.append(interval)
+                    try require(interval < 2, "Native selection cadence missed the 2s interruption input window: \(interval)s")
+                }
+                previousMenuAt = commandAt
+                try candidate.menu(label)
+                try receipt(window, settings: 2 + index, manual: 1 + index)
+                try selection(window, label: label)
+            }
+            evidence.append("Fresh main state observed, not pinned: \(initial ?? "missing"). Muted menu rain2/1, rock3/2, deep4/3, already-requested rock5/4, deep6/5, selected deep7/6. Actual command-start intervals \(intervals)s each <2s; this bounds native input cadence only, not callback receipt time, actual overlap, gains or DSP arrival.")
+            for (index, label) in ["雨", "岩", "深海", "深海"].enumerated() {
+                stage = "actual settings radio \(index + 1) \(label)"
+                try click(candidate, window, try segment(window, label: label))
+                try receipt(window, settings: 8 + index, manual: 7 + index)
+                try selection(window, label: label)
+            }
+            stage = "current deep knob one-step edit"
+            let depth = try slider(window, label: "深さ")
+            let depthBefore = try number(depth)
+            let depthAfter = depthBefore < 100 ? min(100, depthBefore + 1) : depthBefore - 1
+            try focus(depth); try key(candidate, window, code: depthBefore < 100 ? 124 : 123)
+            try waitFor("owned depth knob one step") { abs(try number(depth) - depthAfter) < 0.001 }
+            try receipt(window, settings: 12, manual: 11)
+            try selection(window, label: "深海")
+            stage = "muted volume Home0"
+            let volume = try slider(window, label: "アプリの音量")
+            try focus(volume); try key(candidate, window, code: 115)
+            try waitFor("mixing volume0") { abs(try number(volume)) < 0.001 }
+            try receipt(window, settings: 13, manual: 11)
+            try selection(window, label: "深海")
+            for (index, expected) in [10.0, 20.0, 19.0, 18.0].enumerated() {
+                stage = "muted volume \(expected)"
+                try key(candidate, window, code: index < 2 ? 116 : 123)
+                try waitFor("mixing muted volume\(expected)") { abs(try number(volume) - expected) < 0.001 }
+                try receipt(window, settings: 14 + index, manual: 11)
+                try selection(window, label: "深海")
+            }
+            stage = "real settings viewport scroll without a control edit"
+            let volumeY = try position(volume).y
+            try scroll(candidate, window, amount: -220)
+            try waitFor("mixing scroll changes actual viewport") { abs(try position(volume).y - volumeY) > 1 }
+            try require((try optional(volume, "AXFocused") as? Bool) == true &&
+                        CFEqual(volume, try slider(window, label: "アプリの音量")),
+                        "Mixing viewport update lost focused volume identity")
+            try receipt(window, settings: 17, manual: 11)
+            try selection(window, label: "深海")
+            stage = "settings pointer unmute latest target at18"
+            try click(candidate, window, try mute(window))
+            try receipt(window, settings: 18, manual: 11)
+            try selection(window, label: "深海", muted: false)
+            try require(abs(try number(volume) - 18) < 0.001, "Unmute lost latest18% volume")
+            try focus(volume)
+            for (index, expected) in [19.0, 20.0].enumerated() {
+                stage = "unmuted volume \(expected)"
+                try key(candidate, window, code: 124)
+                try waitFor("mixing unmuted volume\(expected)") { abs(try number(volume) - expected) < 0.001 }
+                try receipt(window, settings: 19 + index, manual: 11)
+                try selection(window, label: "深海", muted: false)
+            }
+            stage = "menu remute latest20"
+            try candidate.menu("消音")
+            try receipt(window, settings: 21, manual: 11)
+            try selection(window, label: "深海")
+            stage = "selected latest deep menu command after volume and mute"
+            try candidate.menu("深海")
+            try receipt(window, settings: 22, manual: 12)
+            try selection(window, label: "深海")
+            evidence.append("Owned settings pointer rain8/7, rock9/8, deep10/9, selected deep11/10; observed depth \(depthBefore) → \(depthAfter) one-step12/11. Volume Home0 13/11; PageUp10 14/11, PageUp20 15/11, Left19 16/11, Left18 17/11, all muted. Settings pointer unmute18/11 at18%; Right19% 19/11, Right20% 20/11 without manual revision; menu remute21/11 and selected latest deep22/12. Every action checks exact main/audio receipts, exclusive menu/radio marks and independent mute; no older accepted target replay.")
+            stage = "close settings and capture live muted scene"
+            try press(try attribute(window, "AXCloseButton") as! AXUIElement)
+            try candidate.expectWindows(1)
+            evidence.append("No DSP-settle timer before mixing capture: images may include a crossing or later live frames. Capture/helper latency and 0.35s spacing do not establish three positive gains, exact crossing timing, one-hot arrival, no clicks, audible silence or physical synchronization.")
+            evidence.append(try sceneFrames(candidate, try candidate.scene(), executable: executable,
+                                            helper: helper, artifacts: artifacts, prefix: "mixing-muted"))
+            stage = "reopen settings and reject older intent after captures"
+            try candidate.menu("設定…"); try candidate.expectWindows(2)
+            let reopened = try candidate.settings()
+            try receipt(reopened, settings: 22, manual: 12)
+            try selection(reopened, label: "深海")
+            try require(abs(try number(try slider(reopened, label: "深さ")) - depthAfter) < 0.001 &&
+                        abs(try number(try slider(reopened, label: "アプリの音量")) - 20) < 0.001,
+                        "Mixing reopened controls lost latest depth/volume")
+            evidence.append("After three owned muted PNGs/two comparisons, recreated settings remains deep22/12, depth\(depthAfter), volume20%, muted. Receipt stability is accepted-control evidence, not actual gains, maximum-three RT work, re-entry audio tails, waveform peak/RMS/delta or subjective quality; these require separate actual audio/runtime acceptance.")
+            stage = "normal menu Quit"
+            try candidate.menu("終了"); try candidate.expectExit()
+            evidence.append("Real menu Quit; owned PID \(candidate.pid) disappeared normal exit0")
+        }
+    } catch let blocked as Blocked {
+        throw Blocked("mixing stage=\(stage); \(blocked)")
+    } catch {
+        throw Failure("mixing stage=\(stage); \(error)")
+    }
+    return evidence.joined(separator: "\n")
+}
+
 func privateFile(_ data: Data, at url: URL) throws {
     let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
     guard fd >= 0 else { throw Failure("Cannot create private artifact \(url.path): errno=\(errno)") }
@@ -1187,7 +1324,7 @@ final class Checks {
 }
 
 let usage = """
-Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|visual|all] [--artifacts PARENT_DIR]
+Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|deep|mixing|visual|all] [--artifacts PARENT_DIR]
        /usr/bin/swift scripts/native-e2e.swift --help
 
 Default case: all. Each run creates a unique private directory (0700) under
@@ -1196,10 +1333,12 @@ and authorized own-window PNG/helper measurements. No permission prompts,
 desktop captures, image uploads, or production test hooks.
 
 Exit: 0 every selected case passed; 1 any failure; 77 prerequisites blocked
-when no failure. Missing capture permission blocks visual/situations/deep image stages;
+when no failure. Missing capture permission blocks visual/situations/deep/mixing image stages;
 independent lifecycle/controls still run. Null lock metadata alone is not unlocked proof.
 Visual evidence is rendered-frame change while muted, not audible silence,
 particle identity, physical synchronization, or subjective glass/music.
+Mixing verifies rapid real commands and exact accepted-control revisions, not
+actual gains, maximum-three RT work, re-entry audio tails, waveform bounds or clicks.
 """
 
 struct Options {
@@ -1223,7 +1362,7 @@ struct Options {
                         "Unknown, duplicate, or incomplete argument: \(option)\n\(usage)")
             let value = arguments[index + 1]
             if option == "--case" {
-                try require(["lifecycle", "controls", "situations", "deep", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
+                try require(["lifecycle", "controls", "situations", "deep", "mixing", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
                 selected = value
             } else {
                 try require(!value.isEmpty && !value.hasPrefix("--"), "Invalid artifacts parent\n\(usage)")
@@ -1279,7 +1418,7 @@ do {
     let nativeReady = checks.checks.last?.status == "pass" && binaryReady
     let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
         .deletingLastPathComponent().appendingPathComponent("native-screenshot.swift")
-    for selected in ["lifecycle", "controls", "situations", "deep", "visual"] where options.selected == "all" || options.selected == selected {
+    for selected in ["lifecycle", "controls", "situations", "deep", "mixing", "visual"] where options.selected == "all" || options.selected == selected {
         let expected: String
         switch selected {
         case "lifecycle":
@@ -1290,6 +1429,8 @@ do {
             expected = "Registered rock menu/settings and owned labeled radio choices; exact accepted target revisions and menu marks; rock amount/size/hardness endpoints; settings pointer rain→rock latest selection; muted volume0/10/20 then unmute latest20 and remute; focused-other rain Space and rock Return with exact target receipts/radio/menu/main; real size100/hardness0 edits for large/soft muted capture latest16/10; three owned muted endpoint PNGs/two interior-change pairs; actual scene menu rain then rock return immediately initiating another three owned muted PNGs/two pairs; menu Quit normal0. Not actual-gain, audible, particle-only, exact crossing timing/brightness or physical-sync proof."
         case "deep":
             expected = "Registered deep and all three actual menu/settings radio choices; main/audio accepted targets and exclusive menu/radio marks while muted; menu mute1/0, deep2/1; depth Home0 exactly3/2 and air Home0 exactly4/3; air End100 exactly5/4 and depth End100 exactly6/5; menu rain7/6 then rock8/7; settings rain9/8, rock10/9, deep11/10 retaining depth100/air100; three owned muted deep PNGs/two cropped-interior-change pairs; menu Quit normal0. Candidate initials unpinned; receipts not actual-gain, audible continuity, bubble-frequency, darkness, speed or physical-sync proof."
+        case "mixing":
+            expected = "Fresh owned candidate; all three actual menu/radio choices; mute1/0; rapid menu rain2/1, rock3/2, deep4/3, rock5/4, deep6/5, selected deep7/6 with command-start intervals <2s (input cadence only); settings pointer rain8/7, rock9/8, deep10/9, selected deep11/10; observed depth one-step12/11; muted volume0 13/11,10 14/11,20 15/11,19 16/11,18 17/11; settings unmute18/11, volume19 19/11,20 20/11; menu remute21/11 and selected deep22/12; three owned mixing-muted PNGs/two cropped-interior-change pairs with crossing-or-live-frame limits; reopened latest deep/depth/20%/mute exact22/12; menu Quit normal0. Not actual gains, maximum-three RT work, audio re-entry, waveform bounds, no-click or physical-sync proof."
         default:
             expected = "Authorized actual owned scene-window PNGs; real menu mute; stable CG owner/bounds; three spaced captures; two cropped-interior nonblank/nontransparent pixel-change comparisons; retained PNGs and measurements; menu Quit normal0"
         }
@@ -1300,6 +1441,7 @@ do {
             case "controls": return try controls(options.executable, artifacts: artifacts)
             case "situations": return try situations(options.executable, helper: helper, artifacts: artifacts)
             case "deep": return try deep(options.executable, helper: helper, artifacts: artifacts)
+            case "mixing": return try mixing(options.executable, helper: helper, artifacts: artifacts)
             default: return try visual(options.executable, helper: helper, artifacts: artifacts)
             }
         }
