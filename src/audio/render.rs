@@ -155,6 +155,7 @@ pub(crate) struct PreparedEngine {
     state_interval: u32,
     state_delay: VoiceLatencyFrames,
     until_state: u32,
+    published_phase: Option<u32>,
     #[cfg(test)]
     drop_observer: Option<(std::thread::ThreadId, Arc<std::sync::atomic::AtomicU8>)>,
 }
@@ -224,6 +225,7 @@ impl PreparedEngine {
                 .expect("aggregate state tracks generated samples without a voice dry path"),
             state_interval: sample_rate.div_ceil(30),
             until_state: 0,
+            published_phase: None,
             #[cfg(test)]
             drop_observer: None,
         })
@@ -418,7 +420,8 @@ impl PreparedEngine {
                 output[0] = T::from_sample(stereo[0]);
                 output[1] = T::from_sample(stereo[1]);
             }
-            if self.until_state == 0 {
+            let phase = self.movement.phase();
+            if self.until_state == 0 || self.published_phase != Some(phase) {
                 for (position, prepared) in self.voices.iter().enumerate() {
                     self.visual_gains[position] = gains[position] as f32;
                     self.breath[position] = prepared.voice.breath_intensity().get();
@@ -432,7 +435,7 @@ impl PreparedEngine {
                     epoch: errors.epoch(),
                     world: frame.world,
                     present,
-                    phase: self.movement.phase(),
+                    phase,
                     gains: &self.visual_gains,
                     breath_intensity: &self.breath,
                 }) {
@@ -440,6 +443,7 @@ impl PreparedEngine {
                     return;
                 }
                 self.until_state = self.state_interval;
+                self.published_phase = Some(phase);
             }
             self.until_state -= 1;
             self.world.advance_sample();
@@ -617,6 +621,60 @@ mod tests {
     }
 
     #[test]
+    fn p08_phase_boundaries_publish_before_the_next_regular_visual_tick() {
+        use crate::controls::ControlEdit;
+
+        let mut engine = prepared(181);
+        let registry = Registry::new().unwrap();
+        let count = registry.definitions().len();
+        let target = registry.resolve("rock").unwrap();
+        let epoch = StreamEpoch::new(1).unwrap();
+        let errors = ErrorCell::new(epoch);
+        let mut gains = vec![0.0; count];
+        let mut breath = vec![0.0; count];
+        let mut next_gains = vec![0.0; count];
+        let mut next_breath = vec![0.0; count];
+        let mut read = |engine: &PreparedEngine| {
+            engine
+                .visuals
+                .read_state_into(
+                    epoch,
+                    MachNanos::new(u64::MAX),
+                    &mut gains,
+                    &mut breath,
+                    &mut next_gains,
+                    &mut next_breath,
+                )
+                .unwrap()
+                .current
+        };
+        engine.render_f32(&mut [0.0; 20], 2, MachNanos::new(0), &errors);
+        assert_eq!(read(&engine).phase, 0);
+        let mut controls = engine.controls.clone();
+        controls.apply(ControlEdit::Select(target)).unwrap();
+        engine.control_mailbox().publish(&controls);
+        engine.render_f32(&mut [0.0; 2], 2, MachNanos::new(208_334), &errors);
+        let crossing = read(&engine);
+        assert_eq!(crossing.phase, 1);
+        assert_eq!(crossing.present, MachNanos::new(208_334));
+        let mut remaining = vec![0.0; 95_998 * 2];
+        engine.render_f32(&mut remaining, 2, MachNanos::new(229_168), &errors);
+        assert_eq!(read(&engine).phase, 1);
+        engine.render_f32(&mut [0.0; 2], 2, MachNanos::new(2_000_187_501), &errors);
+        let arrival = read(&engine);
+        assert_eq!(arrival.phase, 0);
+        assert_eq!(arrival.present, MachNanos::new(2_000_187_501));
+        assert_eq!(gains[target.get()], 1.0);
+        assert!(
+            gains
+                .iter()
+                .enumerate()
+                .all(|(index, gain)| index == target.get() || *gain == 0.0)
+        );
+        assert_eq!(errors.take_bits(), 0);
+    }
+
+    #[test]
     fn p04_manual_selection_moves_real_gains_while_muted_without_volume_restarting_it() {
         use crate::controls::ControlEdit;
 
@@ -636,6 +694,8 @@ mod tests {
         let mut buffer = [1.0; 1_024];
         let mut gains = vec![0.0; count];
         let mut breath = vec![0.0; count];
+        let mut next_gains = vec![0.0; count];
+        let mut next_breath = vec![0.0; count];
         for block in 0..36 {
             engine.render_f32(&mut buffer, 2, MachNanos::new(block * 64_000_000), &errors);
             assert!(buffer.iter().all(|sample| *sample == 0.0));
@@ -646,6 +706,8 @@ mod tests {
                         MachNanos::new(u64::MAX),
                         &mut gains,
                         &mut breath,
+                        &mut next_gains,
+                        &mut next_breath,
                     )
                     .expect("actual callback must publish gains");
                 assert!(gains[initial.get()] > 0.0);
@@ -664,6 +726,8 @@ mod tests {
                 MachNanos::new(u64::MAX),
                 &mut gains,
                 &mut breath,
+                &mut next_gains,
+                &mut next_breath,
             )
             .unwrap();
         for (index, gain) in gains.iter().enumerate() {

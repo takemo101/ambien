@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 func selfTest() throws -> [String: Any] {
     func fixture(width: Int = 64, height: Int = 64, flat: Bool = false,
                  transparent: Bool = false, changed: Bool = false,
-                 borderOnly: Bool = false) throws -> CGImage {
+                 borderOnly: Bool = false, monochromeShape: Bool = false) throws -> CGImage {
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         for y in 0..<height {
             for x in 0..<width {
@@ -22,6 +22,13 @@ func selfTest() throws -> [String: Any] {
                     bytes[offset] = 240
                 }
                 if borderOnly && (x < 3 || y < 3) { bytes[offset] = 240 }
+                if monochromeShape {
+                    bytes[offset] = 120
+                    bytes[offset + 1] = 80
+                    bytes[offset + 2] = 20
+                    bytes[offset + 3] = (24..<32).contains(x) && (24..<32).contains(y)
+                        ? (changed ? 128 : 64) : 0
+                }
             }
         }
         guard let provider = CGDataProvider(data: Data(bytes) as CFData),
@@ -52,6 +59,8 @@ func selfTest() throws -> [String: Any] {
         ("dimension_mismatch", original, try fixture(width: 65),
          "fail", "dimension_mismatch", nil),
         ("chrome_only", original, try fixture(borderOnly: true), "fail", "unchanged", 0),
+        ("monochrome_transparent_shape", try fixture(monochromeShape: true),
+         try fixture(changed: true, monochromeShape: true), "pass", "pixels_changed", 64),
     ]
     var checks: [[String: Any]] = []
     for (id, first, second, status, reason, changedPixels) in cases {
@@ -134,8 +143,8 @@ func compareImages(_ first: CGImage, _ second: CGImage) throws -> [String: Any] 
     let cropHeight = a.height - marginY * 2
     let compared = cropWidth * cropHeight
     var visible = [0, 0]
-    var minimum = [[Int](repeating: 255, count: 3), [Int](repeating: 255, count: 3)]
-    var maximum = [[Int](repeating: 0, count: 3), [Int](repeating: 0, count: 3)]
+    var minimum = [[Int](repeating: 255, count: 4), [Int](repeating: 255, count: 4)]
+    var maximum = [[Int](repeating: 0, count: 4), [Int](repeating: 0, count: 4)]
     var changed = 0
     var deltaTotal: UInt64 = 0
     var deltaMaximum = 0
@@ -154,19 +163,12 @@ func compareImages(_ first: CGImage, _ second: CGImage) throws -> [String: Any] 
                 if delta > 0 { different = true }
                 deltaTotal += UInt64(delta)
                 deltaMaximum = max(deltaMaximum, delta)
-                if channel < 3 {
-                    // Compare unpremultiplied visible colors for the blank-image guard.
-                    if alphaA > 0 {
-                        let color = min(255, (valueA * 255 + alphaA / 2) / alphaA)
-                        minimum[0][channel] = min(minimum[0][channel], color)
-                        maximum[0][channel] = max(maximum[0][channel], color)
-                    }
-                    if alphaB > 0 {
-                        let color = min(255, (valueB * 255 + alphaB / 2) / alphaB)
-                        minimum[1][channel] = min(minimum[1][channel], color)
-                        maximum[1][channel] = max(maximum[1][channel], color)
-                    }
-                }
+                // Uniformity includes spatial coverage/alpha, not only visible RGB.
+                // A monochrome glow on transparent pixels is not a blank interior.
+                minimum[0][channel] = min(minimum[0][channel], valueA)
+                maximum[0][channel] = max(maximum[0][channel], valueA)
+                minimum[1][channel] = min(minimum[1][channel], valueB)
+                maximum[1][channel] = max(maximum[1][channel], valueB)
             }
             if different { changed += 1 }
         }

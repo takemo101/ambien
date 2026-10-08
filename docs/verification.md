@@ -753,3 +753,55 @@ P07の「menu／settings on/off・対時間補正と次回適用説明・volume/
 最終UI semantic説明・owned viewport helper・nativeのcoherent表示観測・文書／recipeの現存Interface cutoverを、同じbaseからworktreeを対象にSpecとStandardsが別々にread-only reviewした。両方correct／findings0、confidence0.90／0.91。pending manual優先、変更のconsumer到達、元のtime bound、persistent incoherence FAIL、所有／hit／session guardと離散menu更新が整合すると判定した。旧44.913秒の原因はなお未確定であり、current PASSからの因果主張やproof limit拡張はない。reviewerによるchecks／launch／編集は行っていない。
 
 parentの最終 `npm run check:docs` はPASS（全体0.42秒／本体67ms、本行追加前）。これはLat参照／graphの検査であり、製品受け入れではない。`No init version recorded` 警告は保持し、init／hooks／設定変更はしていない。
+
+## P08 予定視覚のbracket・非表示復帰・直接Task観測
+
+対象はP07 merge `f88d5cde9f39f408e86a6b82d5ff69b3097ccebc` からのworktree。環境はDarwin27 arm64、Rust1.95、Swift6.4。製品要件はSPECの視覚イベント／再生予定時刻／窓／高DPI、物理同期と最大負荷の全体受け入れはP18と区別する。
+
+### 実consumerと整合境界
+
+既存checked `presentation_time`／`MachClock`、atomic event/state slots、epoch、GPUI visibility observerを再利用した。I07は一回のpublished serialからeligible currentと最短futureを選び、同phaseだけの `WorldVisualBracket` をcaller4scratchへ整合読取する。mainはg²と息を補間し、future birthをlive cacheへ前倒ししない。phaseが変わるactual sampleにもstateを公開する。Noneは受け入れ済み色・粒・fade時刻を保持する。capacityは既存固定値を維持、bounded scan／事前確保でhistory全配列の毎frameコピーはない。最新finite viewport・論理円radius・clipだけを描画に使う。
+
+変更前のactual `cargo test --locked p08_` は2件runtime RED（3.34秒／exit101）：t100/200のpower補間でt150の粒opacity0.28125とfuture birth非採用、regular tick直後のmanual phase変更sampleが即phase1になる条件。実装後のparent chainは141件PASS（test39.54秒）、fmt／fmt check／all-targets Clippy `-D warnings`／locked build PASS（全体47.62秒）。nearest/tie/out-of-order／phase・epoch／selected slot rewrite／future payload不正、g²と息・外挿禁止・frozen frame・live-only restore、zero/nonfinite/current viewport・円形radiusを実consumerと境界の試験で確認した。既存のstep-hold implementation testは削除し、変更後の実装へre-pinしていない。
+
+### 実nativeの失敗を残した観測修正
+
+以下4回はshipping SHA256 `9162386997fb208987d5d00ef7e9865fd9fdcaa98ce4f8049bf10b3f0402297c`。部分画像とworld/wanderの成功を全case成功・正常Quitへ書き換えない。
+
+- `run-7638E83A-1F62-4BBE-8B92-FA63308AE0EA`（75.74秒／exit1）：最小化中onから60.676秒で雨→深海6/0、world進行とfirst PNG3／2比較まで成功、`NSRunningApplication.hide()` falseでFAIL。限定所有診断（3.41秒、`run-763BE3C0-FCA3-445C-9114-E146898521C1`）ではfalseでもNSHidden／AXHidden trueを観測し、AXHidden=false後正常Quit0。便利APIのreturnをhidden状態の証拠にせず、public AX setter成功と実NS/AX状態を確認する経路へ移した。
+- `run-084C3412-FFAB-443B-A56E-BD549E35580C`（85.94秒／exit1）：hide復帰画像、scene close後7/0とworld進行まで成功、新sceneの即時CG/AX一致がなくFAIL。限定所有診断（8.16秒、`run-243536B5-162D-4007-AC7D-B12AED52EE3D`）ではAX960×600に対し開窓直後CG952×594、50ms後にexact同一boundsと正常Quit0。OS開窓animationを区別し、既存5秒内でowned foreground／同じAX bounds／一意CG matchを観測してからcapture開始する。位置・寸法の許容差、capture後のID/bounds guardを緩めない。
+- `run-D4DD3B50-52D7-4F6D-A62F-23A47FC0F0AA`（64.31秒／exit1）：自動表示更新時のvirtual AXRoleが -25202でFAIL。既存P07のowned descendant invalidation規則を `observeOwnedSettings` へ共有し、PID／同じsettings windowを確認したsnapshot全体だけを破棄する。安定した不一致・root window失敗・menu/input/captureのguardはcatchせず、fake clockや入力再送はない。
+- `run-1144F40F-A4C0-4483-B986-F12E8CEF2437`（91.93秒／exit1）：9PNG取得後reopen比較のuniform判定でFAIL。helperはvisible RGBだけを見て透明background上のmonochrome shapeをblank扱いしていた。実frameはvisible13248／crop1290240 pixels、隣接差分13080 pixelsで、interior全RGBAはuniformではない。PNG encode/decodeを通る新shape regressionはruntime RED（旧6項目PASS、新1項目blank FAIL、0.65秒）。全cropped premultiplied RGBAのuniformityへ修正後7項目PASSと同じ実frame pair PASS（chain2.49秒）。全透明／uniformRGBA／不変／寸法不一致／chrome-onlyの拒否は保持した。alpha差のPASSを可視品質・粒運動へ広げない。
+
+限定診断の初回にはhelper prefixに含まれないprivate directory関数によるcompile失敗と、settings未作成のwindow-count失敗があった。Task probeの初回にもSwiftのthrowing expression／diagnostics呼出のcompile失敗があり、いずれも修正前の成功証拠ではない。上記失敗の再確認だけのunchanged再実行はせず、識別できる仮説と変更した観測経路で次の結果を得た。
+
+### 修正後shipping nativeの実経路
+
+`/usr/bin/swift scripts/native-e2e.swift ... --case presentation` は95.98秒／exit0、report `target/native-e2e/run-0CAED54E-35F0-416E-BAB5-90FF1031806F/report.json`、SHAは上記916238...、所有PID97892。消音1/0・wander off2/0、production focused Homeで滞在1/1分・自動1秒3/0→5/0、on6/0のworld2.299秒を受理した。sceneを最小化のまま、on command後60.64416秒で雨→岩、unchanged6/0／manual0、排他menu/radio/main/audioとworld62.81秒を観測。実minimize restore、runner自身の非対話opaque cover3秒→除去、実AX/NS hide3秒→show、scene close2秒中の実time1→2・receipt7/0／wander/mute on／最新岩・world86.494秒、実menu再生成と固定sizeを続けた。minimize/unhide/reopenの各stageは所有PNG3枚／隣接2比較、合計9枚／6比較すべてPASS。最後の実menu Quitは正常exit0。
+
+parentは保存済みowned restore画像を開いて実surfaceを確認した。透過coverageとalphaも差分に含まれるため、画像は物理的な明るさ／音質／old particleの同定／Task停止／maxfps／可聴無音／RT／物理同期の証拠ではない。権限・OS設定・全体音量変更、他app／desktop capture、画像外部送信はない。
+
+### temporary直接counterとsource attachment除去
+
+実main-thread scene timerのtick count／最短intervalと、restore直後のaccepted live cacheをtemporaryに記録した。RT/audioにはinstrumentationを追加していない。diagnostic binary SHA256 `a2672d08840fd9f5e0db1d285ebdde0ef12a75a8a7960a156f8bab70ebcd4e07`、独立bounded run31.92秒、private directory `target/native-e2e/run-AB85C486-908D-482D-9121-67655161AA1A`、所有PID8527正常menu Quit0。
+
+- 最小化stop→restore startはticks101不変、gap3.6731095秒。
+- opaque full-cover stop→除去後startはticks190不変、gap3.061476792秒。
+- 実hide stop→show startはticks279不変、gap3.109238209秒。
+- closeでは旧entityのTaskをdropしてticks365、3秒のclosed保持後、新entityがticks0から開始した。
+- 可視timer tickの最短intervalは33596792ns（30Hz interval以上）。再生成entityは33769417ns。startup／restoreの一回refreshとOSのdiscrete repaintはtimer tickと別であり、GPU実present／全frame cost／高DPI負荷をこのcounterへ含めない。
+- 各restore直後のaccepted cacheは0／0／2／3件、future／expired／wrong_epochはすべて0。current accepted Mach時刻を更新してから描画し、隠れていた期間のexpired backlogを一括描画しなかった。この有限Rain runだけで全密度・音声pool・物理同期を保証しない。
+
+counter field／logging／Drop実装とprivate Swift scaffold3本は実測後に除去、private failure report／PNG／候補logだけを保持した。除去後fmt／fmt check／all-targets Clippy／locked build PASS（3.31秒）、rebuilt shipping SHA256 `9c04d5670f727f59597c65df02c162bed69fd751d47fee12cfabfd8a1b11412f`。temporary診断を配布sourceやproduction test hookに残していない。
+
+除去後のshipping SHA9c04...で同じproduction `presentation` を再実行し96.54秒／exit0、report `target/native-e2e/run-13DF0865-3E17-4418-A673-2EF2CFFF0F34/report.json`。on6/0世界2.032秒から最小化のまま60.697089209秒後に雨→深海／world62.543秒、cover／hide／close→time1→2・7/0のworld86.401秒、3組9PNG／6比較すべてPASS、所有PID20652は実menu Quit正常0。temporary counterを除いた実経路での成功であり、上記別binaryの直接Task観測とは区別する。
+
+### 固有recipeの同一課題での参照評価
+
+P08の「最小化中の実自動移動、hide/close中のworld/wander、再表示所有画像、正常Quit、receipt／時間／画像契約と不足前提」を、変更前後の実recipeだけにtools／履歴なしcompletionで同じ課題文を渡した。beforeは専用caseと複合契約が不足、既存lifecycle/wandering/visualを代用品として補わなかった。afterはpresentation、0/0→6/0、wall60〜95秒とmanual0／world進行、own cover3秒・AXHidden3秒・close2秒／time1→2／7/0、9PNG／6比較、exact CG readinessの5秒、正常Quit0を取得した。共通skill／SPEC／実施権限／実権限・session・buildの未確認を不足とし、実行結果を作らず、UI/wall/PNGをsample数・old particle・Task/fps・RT・音質・物理同期へ拡張しなかった。これはreference retrievalのみで、自然遵守率・実native合格の試験ではない。
+
+### 最終独立レビュー
+
+同じbaseからcomplete P08 worktreeを、Spec／Standardsが別々にread-only reviewした。両方correct、actionable findingsなし、confidence0.90／0.91。Specはactual consumerのbracket／g²・息／epochとphase・bounded cache・viewport・visibility、owned native契約とevidence限界が対象要件に整合すると判定。Standardsはatomic last-current再検査、None scratch非採用、資源／Task所有、pinned GPUI visibility、settings notify抑制、AX/CG/input/capture guard、RGBA regressionとscaffold除去を確認した。saved source／report／counter logを読むレビューで、reviewer自身のchecksやapp launchはない。耳／物理同期／maxDPI／GPU cost／普遍的RTを独立検証したとの主張はしない。
+
+parentの `npm run check:docs` はPASS（全体0.41秒／本体102ms、本行追加前）。Latの参照／graph検査であり、製品受け入れではない。既存 `No init version recorded` 警告は保持し、init／hook／認証設定を変更していない。

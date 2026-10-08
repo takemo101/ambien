@@ -435,7 +435,7 @@ worker は stream とは独立の CoreAudio property listener を所有し、def
 
 ## 三つの時計と再生予定時刻
 
-**計画 Interface** として `WorldSeconds`、epoch 内の sample frame、`MachNanos` を分離する。
+現存 [`timing.rs`](../src/audio/timing.rs) が `WorldSeconds`、epoch内sample offset、`MachNanos` を分離する。`presentation_time` はactual rateでframe offsetとdeclared dry delayを検査してCPAL playbackへ加え、`MachClock` は起動時に準備したtimebaseをmainで使う。物理同期やP10の復旧checkpointを、これらのsource存在から保証しない。
 
 | 時計 | 進行／比較できる範囲 |
 |---|---|
@@ -461,7 +461,7 @@ CPAL の playback は device buffer／latency／safety offset に基づく推定
 
 ### packet と固定slot
 
-以下は **計画 Interface**。
+以下は現存I07の代表断片。実visibility cacheとraw atomic historyの所有を分ける。
 
 ```rust
 pub struct VisualEvent {
@@ -481,13 +481,15 @@ pub struct VisualEvent {
 // VisualRing::new(event_capacity, registry_count)
 // push_event(event) / push_state(WorldVisualState)
 // read_live_into(epoch, now, &mut preallocated_cache)
+// read_state_into(epoch, now, gains, breath, next_gains, next_breath)
+//     -> Option<WorldVisualBracket { current, next }>
 ```
 
 VisualRing は queue を reader が空けるまで producer が待つ方式にしない。固定 slot を serial modulo capacity で上書きし、**全 payload atomic＋各 slot sequence＋global publish serial** を SeqCst で公開する。state の N 配列も開始前確保した atomic slots。reader は slot の before／payload／after が同一 even、かつ必要な serial・epoch に一致する場合だけ採用する。slot 読取中の上書きは視覚だけ省略。unsafe な plain-data seqlock は使わない。
 
-callbackがstateを公開するcadenceはworld sampleで数え、timerではない。現存P04のmain cacheは、今のMach時刻以下で受け入れた最新のeligible stateと生存eventを保持する。粒opacityは同じcacheの所属voice gainをraw strengthと寿命fadeへ掛け、gain0ならfade／半径／GPU paint計算前に省く。global volume／muteは掛けず、凍結では既に受け入れたgainsとfade時刻を保持する。未来stateしかなければ最後のeligible state（無ければ空）を保持し、未到来stateを先に見せない。
+callbackのstate cadenceはworld sampleで数え、通常の視覚間隔または移動phase変更sampleで公開する。全sampleのstate queueはない。`read_state_into` は一回捕捉したglobal serial範囲とepochで、最大eligible `present <= now` と最も近いfuture `present > now` を選ぶ。同時刻は最新serial、futureの最短packetが違うphaseならcurrentだけを返し、その先の同phaseを探さない。選んだraw gain／breath配列はcallerの4本の事前確保scratchへ単発整合読取し、currentを最後にも再検査する。途中上書き／不正payloadならbracket全体Noneで、partially changed scratchは採用しない。
 
-P08の **計画拡張** では、視覚cadenceまたはphase変更時にstateを公開し、全sampleをqueueにせず、mainのstate historyで現在時刻の前後を持つ。同epoch／連続phaseの時刻でg²寄与と息を補間し、phaseを跨いだ選択は数値補間しない。状態を外挿して新しい粒や世界を作らない。現存P04のeligible最新cacheを、この補間の実装済み証拠とは呼ばない。
+mainの `VisibleParticles` はcomplete bracketだけを採用し、同phaseの前後時刻からg²の寄与と息を線形補間する。amplitudeを先に混ぜて二乗せず、phase境界・未来だけのstateを先取りせず、最後のpacketの先へ外挿しない。粒opacityと薄い色はこの寄与を使い、global volume／muteは掛けない。寄与0はfade／GPU計算前に省く。bracket欠落は受け入れ済みの色・粒・fade時刻を保持し、freezeでも同じframeを維持する。未来birthはevent ringに保持して到来までlive cacheへ入れない。viewportが空・ゼロ・非有限ならpaintを休み、現在boundsでnormalized位置と論理的な円形radiusを計算してclipする。世界や音声資源を再構築しない。
 
 ### 初回実装容量とfullの意味
 
@@ -496,7 +498,7 @@ P08の **計画拡張** では、視覚cadenceまたはphase変更時にstateを
 | 保持物 | 初回容量／full時 |
 |---|---|
 | event ring | 2048 slot、old slot 上書き。音を待たせない |
-| state history | 128、old state 上書き、時刻の整合読取失敗は視覚省略 |
+| state history | 128 atomic slot、old state上書き。mainはbounded scanで前後を選び、registry-sized4本のscratchから採用。history全N配列を毎frameコピーしない |
 | VisibleParticles | 512、期限切れを先に解放、その後弱い順に採用を減らす |
 | 音粒 pool | rain64／rock32／deep16、各楽器の新規発声採用を停止。visual overflow と無関係 |
 | registry／knob 配列 | N／総ノブ数に応じて起動前確保。callback resize 無し |
@@ -505,7 +507,7 @@ P08の **計画拡張** では、視覚cadenceまたはphase変更時にstateを
 
 ### hiddenと復帰
 
-scene hidden／最小化／完全 occlusion／close では scene Task を止め、audio は上書き公開を続ける。復帰時は cursor の古い差分を全 drain せず、現在 epoch の保持済み slots を bounded に走査し、`present <= now < present+lifetime` の生存 event だけ cache に採用する。未来 event は保持して時刻到来まで表示しない。ring の世代差が容量を越えたら古い serial を欠落として扱う。古い epoch は捨てる。
+scene hidden／最小化／完全occlusion／closeではowned scene Taskを止め、audioは上書き公開を続ける。GPUIの `is_visible`／visibility observerはpinned macOS hostの `NSWindow.occlusionState` を使う。visibleかつRunningのsceneだけが上限intervalのtimerを持ち、receiptだけのaudio更新はscene notifyにしない。復帰時はtimerの最初のpaint前にrefreshし、古いcursor差分を全drainせず、現epochのslotをbounded scanして `present <= now < present+lifetime` のlive eventだけを採用する。futureはringに保持、古いepochは捨てる。Task取消や30fpsの実測はUI/PNGから推定せず、対象経路の観測と区別する。
 
 同じ world event を再読しても serial で重複表示しない。UI close 後の再作成も同じ規則。出力 Frozen 中は直前の描画状態を静止し、Mach 経過で粒が勝手に消えた世界を作らない。復旧の新 epoch では旧 event を消し、新時刻 state から再開する。mute／volume0は world を進めるので Frozen と区別する。
 

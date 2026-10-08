@@ -40,7 +40,7 @@ GPUI がホストするシーンと設定窓、Ely の設定部品、窓サイ�
 - [窓](../SPEC.md#窓)、[固定サイズと内部描画](../SPEC.md#固定サイズと内部描画)、[高DPIと描画負荷](../SPEC.md#高dpiと描画負荷)。
 - [設定窓](../SPEC.md#設定窓)、[ボリューム設定](../SPEC.md#ボリューム設定)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
 - [構成説明](../docs/architecture.md)で固定窓と viewport、操作を音へ渡す責任を読む。[検証手順](../docs/verification.md)で固定サイズ・画面収まり・ガラス表現・高 DPI の証拠を確認する。
-- 現存する窓と checked menu の接続は [`src/main.rs`](../src/main.rs) と [`src/app.rs`](../src/app.rs)、表示は [`src/ui/scene.rs`](../src/ui/scene.rs) と [`src/ui/settings.rs`](../src/ui/settings.rs)。設定は metadata／stable id の controlled Ely フォームから最新 main state へ部分操作を渡し、実受理・失敗を表示する。生成前の実 workarea 補正と借用 NSWindow の固定制約は [`src/platform/macos.rs`](../src/platform/macos.rs)。実操作の確認範囲は [検証記録](../docs/verification.md) に従う。
+- 現存する窓とchecked menuは [`src/main.rs`](../src/main.rs) と [`src/app.rs`](../src/app.rs)、シーンのfixed cache・g²/息の予定時刻補間・visibility Task・最新viewportの円形clipは [`src/ui/scene.rs`](../src/ui/scene.rs)、atomic event/state bracketは [`src/audio/transport.rs`](../src/audio/transport.rs)。設定は [`src/ui/settings.rs`](../src/ui/settings.rs) のcontrolled Elyフォームから最新main stateへ部分操作を渡す。既存checked Mach/dry delayは [`src/audio/timing.rs`](../src/audio/timing.rs)、workarea／borrowed NSWindow制約は [`src/platform/macos.rs`](../src/platform/macos.rs)。source・実UI画像・task/fps診断・物理同期の確認範囲は [検証記録](../docs/verification.md) で区別する。
 
 世界と粒の関係は [[architecture#Audio and world]]、復元と保存は [[architecture#Persistence]]、OS との境界は [[architecture#macOS and updates]]。
 
