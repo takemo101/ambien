@@ -1,3 +1,4 @@
+mod deep;
 mod rain;
 mod rock;
 mod synthesis;
@@ -146,7 +147,11 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Result<Self, VoicePreparationError> {
-        Self::validate(vec![rain::definition(), rock::definition()])
+        Self::validate(vec![
+            rain::definition(),
+            rock::definition(),
+            deep::definition(),
+        ])
     }
 
     fn validate(definitions: Vec<SituationDefinition>) -> Result<Self, VoicePreparationError> {

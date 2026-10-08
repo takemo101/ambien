@@ -26,7 +26,7 @@ GPUI がアプリの実行ループを持ち、シーンと設定はその上の
 
 現存経路は、[`src/main.rs`](../src/main.rs) が GPUI を起動し、[`src/app.rs`](../src/app.rs) の global root が窓 handles、close・外観・音声更新・quit の subscriptions と Task、音声 controller、整合した制御 state を所有する。窓の close と音声停止は分離し、GPUI の quit observer では worker の停止・DSP 回収・join を明示的に待つ。設定の再表示は既存窓を前面へ出し、action は active window の借用後に適用する。[`src/ui/`](../src/ui/) は登録された声の固定視覚キャッシュを直接 paint するシーンと、登録 metadata に基づく controlled Ely フォーム・出力／受理状態の表示、[`src/platform/macos.rs`](../src/platform/macos.rs) は実 workarea 補正と借用 NSWindow の固定制約を扱う。menu とフォームは最新 main state へ同じ部分操作を適用し、viewport を音声 intent にしない。終了 fade／保存調停・OS 更新の仮実装は置かない。
 
-[`src/situations/`](../src/situations/) が登録と雨／岩固有の声・粒・揺らぎ・残響を持ち、[`src/audio/`](../src/audio/) のworkerが標準Deviceとconfig、声・固定配列・N声gain vectorを準備してstreamを開始する。callbackは単発lease借用の間だけengineとsample世界時計を進め、共通手動slerp、数値制御・受理通知・視覚リング・epoch専用error bitsetに触れる。混合後の音量と消音は独立して追従し、世界やシーンを停止しない。UIはDSPを所有しない。workerは受理mailboxを読み、出力・手動の表示対象・受理世代・失敗の離散変更だけを非RTの `AudioShared` とbounded wake経路で渡し、callbackからchannelへ送らない。実寄与gainsは時刻付き視覚stateで別に配送する。出力失敗時はworkerがgateを閉じてengineを回収し、凍結中も最新設定を受理できるが世界は進めない。シーンは既に受け入れたキャッシュとfade時刻を保持する。非可視シーンの更新は止め、復帰時は現在の生存イベントを読み直してからtimerを開始する。
+[`src/situations/`](../src/situations/) が登録と雨／岩／深海固有の声・粒・揺らぎ・残響を持ち、[`src/audio/`](../src/audio/) のworkerが標準Deviceとconfig、声・固定配列・N声gain vectorを準備してstreamを開始する。callbackは単発lease借用の間だけengineとsample世界時計を進め、共通手動slerp、数値制御・受理通知・視覚リング・epoch専用error bitsetに触れる。混合後の音量と消音は独立して追従し、世界やシーンを停止しない。UIはDSPを所有しない。workerは受理mailboxを読み、出力・手動の表示対象・受理世代・失敗の離散変更だけを非RTの `AudioShared` とbounded wake経路で渡し、callbackからchannelへ送らない。実寄与gainsは時刻付き視覚stateで別に配送する。出力失敗時はworkerがgateを閉じてengineを回収し、凍結中も最新設定を受理できるが世界は進めない。シーンは既に受け入れたキャッシュとfade時刻を保持する。非可視シーンの更新は止め、復帰時は現在の生存イベントを読み直してからtimerを開始する。
 
 ## 操作から音と絵まで
 
