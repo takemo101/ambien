@@ -931,7 +931,7 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 
 新shipping SHA256は `2c2dbd50e647846bf1e6235cb1438f6a99052a5c91a82a961a7658f8bed3cddd`。同SHAの実GPUI `lifecycle` 7.08秒PASS、`target/native-e2e/run-C44CEEA0-8DA6-4B91-A4FB-AAABE3189E36/report.json` に所有menu／minimize／zero-window再生成／3正常Quit40118・40274・40280 exit0を記録。native lifetime read-only review1分17秒findings0／confidence0.95、recovery consumer review1分32秒findings0／confidence0.94。reviewerは検査・起動・編集なし。
 
-是正後の本人による実出力切替は、次節のユーザー報告で問題なしと確認された。実rate変更・再接続・出力不可からの復旧、sleepに関するworld／消音／シーン保持と可聴復帰の未観測条件は別に残す。過去の実失敗や限定成功を全面成功に書き換えず、確認済みの切替を同じ失敗の再確認のために繰り返さない。PR12はDraftのまま、受け入れ後の通常merge・but同期・Mikan反映を最後に停止し、P11へ進まない。
+是正後の本人による実出力切替とsleep復帰は、次節のユーザー報告で問題なしと確認された。実rate変更・再接続・出力不可からの復旧、world／消音／シーン保持の個別測定と可聴復帰の未観測条件は別に残す。過去の実失敗や限定成功を全面成功に書き換えず、確認済みの切替やsleepを同じ結果の再確認のために繰り返さない。PR12はDraftのまま、受け入れ後の通常merge・but同期・Mikan反映を最後に停止し、P11へ進まない。
 
 ### 修正版の実出力切替についてのユーザー成功報告
 
@@ -939,5 +939,7 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 
 受領後のread-only OS metadataは唯一のlive Ambien PID35400、起動2026-10-09 06:39:41 local、native executableは現存 `target/debug/ambien`。そのpathの現在のbytesは上記shipping SHA256 `2c2dbd…` と一致する。画像にPIDやbinary hashが埋め込まれているとは主張しない。AI-owned private候補62621は、それ以前の2026-10-08T21:39:00ZにProcessのnormal exit0で終了、private stderrは0bytes、終了操作の種類は未観測である。終了済みhuman helperを除去して、private fixtureと観測証拠を保持した。現在のユーザー起動appへAIの入力・終了・HOME／音量変更は行っていない。
 
-次の未完観測は修正版での実sleep/wake、寝る直前のworld／残り滞在・交差からの再開、消音onの保持、シーン再開と古い光の一斉再生がないこと。さらに実再接続／rate変更／出力使用不能を作れる範囲と滑らかな可聴復帰を個別に判定する。出力切替の成功報告だけでP10全体を受け入れ・通常mergeしない。
+続いてユーザーは「スリープからの復帰も問題ありませんでした」と報告した。修正版の実sleep/wakeで問題なしという本人観測を受け入れる。sleep期間、前後のworld／残り滞在・交差、消音on、出力世代増加の数値・画像は未報告であり、測定したとは主張しない。後から準備したread-only power observer PID45545の取得済みログはreadyのみで、本人のsleepについてwillSleep／didWakeの時刻は記録されていない。これを本人の成功報告の否定や未実施の根拠にせず、再度sleepを求めない。不要になったobserverは停止済みで実appを終了していない。
+
+受領時のread-only `system_profiler SPAudioDataType -json` は0.18秒成功、Creative Stage SE miniのBluetooth／44100Hzが現在default、Mac miniのスピーカー／Display／HDMIは48000Hzで利用可能。入力機器は列挙metadataのみで選択・録音していない。残る具体的な新条件は消音onでCreativeの機器接続だけを切断し、48000Hzの出力への復旧、Creative再接続後の44100Hzへの復旧を通した消音保持・シーン継続と古い光が一斉に出ないこと。world／残り秒の個別観測、実出力使用不能を作れる範囲、滑らかな可聴復帰は別に判定する。成功した通常切替・sleepを繰り返さず、未確認条件をP10全体の合格へ広げない。
 
