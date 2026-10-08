@@ -661,3 +661,55 @@ native終了後に実 `AudioController::start` とworker／CPAL callback／contr
 これにより今回P05のnative／CPAL前提待ちは実観測で解消した。P06最大三声RT／再入統合、P08物理同期、P13試聴／係数・initial確定、下限OS・高DPI負荷・配布の別gateへ一般化しない。現時点では通常PR merge／同期／Issue completionをまだ実施していない。
 
 今回native／CPAL追記の最終bounded Spec／Standards evidence reviewもcorrect・findings0、confidence0.95／0.97。unchanged sourceと実report／artifact1154の整合、過去BLOCKED保持、P06／P08／P13と物理的な未測定範囲の区別を確認し、reviewerによるchecks／launch／edit／source再監査はない。追記後のparent docs検査は0.45秒／本体109msでPASS（この結果行の追加前）、Latのinit警告は保持した。
+
+## P06 三実声の手動交差・再入場・実callback診断
+
+対象baseはP05通常merge `1bb610829c873ceee10faeb5d9b88d5c1206886c`、専用branch `feat/amb-008-three-voice-acceptance`。Darwin27／arm64、既存Rust1.95.0／Swift6.4を使用した。P04の最終共通交差を置き換えず、productionの声・reducer・mix・renderer・UIは変更していない。実consumerと実声privateのbehavior試験、実native `mixing`、既存文書／recipeを受け入れ対象として追加した。
+
+### 実consumer試験とfixtureの訂正
+
+新しい実三声試験は8k／44.1k／48k／96kで、二声途中の第三声、coalesced latest intent、retarget前後vector、manual revisionの一回消費、独立volume／muteと復帰後の同一DSP／event履歴、指定frameでの正確one-hotと非targetの生成停止を確認する。短いretargetを実consumerで千回行い、各回のfinite／nonnegative／Σg²を1e-12の数値検査値で確認し、最後の雨だけへ到着する。これは聴感一定や相関波形のpeak保証ではない。千回へ拡張後の対象試験は34.47秒／全体36.33秒でPASSした。
+
+最初のaggregateは115PASS／1FAIL（25.31秒、artifact1169）。非寄与中にzeroノブへ変更するfixtureが、実reducerの「ノブownerへ手動選択」を見落とし雨へ戻っていた。zero編集と最新deep選択を同一公開へまとめ、比較側もdeep選択を受理するよう訂正した。次の対象実行はworld6.4に対し実値6.3999999999999995のexact比較でFAIL（artifact1172）。十進時刻のbinary表現を製品不具合とせず、時計の数値比較だけ1e-12へ訂正した。その後116tests（25.19秒）、fmt／all-targets Clippy／buildがPASS、全体29.80秒（artifact1175）。二つの失敗をproduction修正や交差不具合のREDとして扱わない。
+
+独立Spec reviewは微小正寄与、rate残り秒、新しい励起／dry delayのconsumer証拠に三件のP2不足を指摘した（confidence0.96、production defect未確立）。微小vectorは既存rampの長いduration操作で作り、targetが1へ丸められても別声の約1.57e-20正寄与を実consumerが維持し、固定2秒後に正確one-hot／生成停止、exact one-hotへの新manual選択が不要交差にならないことを確認する。rate境界は48k→32k／44.1k→96kで別rateの実engineを非callback準備し、進行中の実ramp／Movementだけを移譲して残り1.5秒を消費する。これは合成したownership境界のrenderer証拠で、世界／DSP checkpoint保持・実device再構成・P10復旧の証拠ではない。
+
+岩は実衝突で旧roomを励起し、非寄与中のage／PRNG保持と旧尾失効を確認後、同期したclean-history実声と同じ未使用slotへ新しい衝突を決定的に入場させる。12,000frameのstereo波形がexact一致、新onsetは意図したage-zero attackから1world tick＋prepared dry delay、別測定したwet到来より前である。深海は48k／worker準備8kで同じ時計のdirty／clean声とlow-bed baselineを使い、200msの各full波形をexact比較し、新気泡の独立raw／dry励起と混合後の1e-7分解能のonsetをwet到来前に照合する。raw励起frame1と、low-bedのf32分解能より小さいconsumer最初のnonzeroを同一証拠にしない。量や低音のeventual energyだけを新しい気泡の証拠にしない。
+
+この追加後のaggregateは118PASS／新深海試験1FAIL（37.58秒、artifact1190）。sample235でbubble-minus-bed −0.0011440609と独立dry −0.0011440598が旧1e-9境界を超えた。実DSPはf32でbed＋bubbleを丸めてからDC処理するため、出力の差と単独bubbleのDC処理は理想的な線形重ね合わせではない。任意のtolerance拡大やDSP変更はせず、誤った振幅oracleを削除し、独立onsetと同じ条件のexact clean-history波形を保持した。訂正後119testsすべてPASS（37.69秒、artifact1195）。続くClippyは新fixtureのrange loopで停止しbuild未実行だった。二channelの実比較をzipへ訂正後、該当深海試験PASS0.37秒、fmt／all-targets Clippy／buildもPASS、全体6.05秒。これらもfixture／lintの訂正で、productionの遅延不具合を観測したとはしない。
+
+### native mixingのsafe BLOCKEDと実viewport訂正後PASS
+
+追加前の実CLIは `--case mixing` を `Unknown case mixing`、exit1で拒否した。これは検証caseの欠落であり、アプリ音のREDではない。追加後の実Swift `--help` はmixingの入口・capture制約・receiptと実gainの違いを表示した。
+
+最初の実mixing runは `target/native-e2e/run-FD457F84-1C69-48B5-B7BD-60E2FD05992B/report.json`、2026-10-08T05:07:22Z→05:07:28Z、全体7.14秒／exit77。binary／sessionはPASSだが、settings pointer解除前に消音switchが現在のviewport外でsafe BLOCKED、入力未送信、failure cleanupを正常Quitにしなかった。既存controls caseと同じ実scrollを追加し、focused volumeのAX identityとreceipt17/11不変を確認してからpointer解除する。guardの抑制・AXPress代用・permission変更・入力retryはしていない。
+
+訂正後reportは `target/native-e2e/run-887ED652-50EF-49E2-86F7-2CB676B88A40/report.json`、2026-10-08T05:09:57Z→05:10:10Z、全体13.76秒／PASS。実binary SHA256 `d6b2133a3c1faf5a7c50bc4561d3346a2af332ec825c39ac87e7817bedc831dc`、own console・login完了・UID一致・awake／active display・non-loginwindow foregroundが揃い、positive lockなし（nilだけで解除認定せず）、AX／event／capture=true。OS／TCC／認証設定は変更していない。
+
+実menu雨→岩→深海→岩→深海→選択済み深海の開始間隔は0.226601541／0.264252375／0.232373542／0.259199458／0.234323375秒。実settings pointer雨→岩→深海→選択済み深海、観測depth68.00000071525574→69.00000071525574、消音中volume0→10→20→19→18、実scroll後のidentity／receipt保持、settings解除18%→19→20、menu再消音と最新深海22/12、設定再生成後の最新値がPASS。各操作のexact main／音声receipt・排他radio／menu mark・独立muteを確認した。開始間隔は入力cadenceであって、callback受理時刻・三正gain・2秒到着の実測ではない。
+
+DSP settle待ちなしの所有PID40183／CGWindowID10775、1920×1200の `mixing-muted` PNG3枚／隣接2比較がPASS。crop1536×840／1290240pixelsで変化7380pixels（fraction0.0057198660714285711）と64pixels（0.000049603174603174603）。parentも二枚目を読み青い円形の光を観測したが、第二比較の小さいpixel変化を粒の運動・三声重なり・品質の証明にしない。capture時点が交差中か到着後かは未保証、透過背景の影響も残る。実menu QuitでPID40183が正常exit0。directory0700／reportとPNG3枚0600を実確認、画像はlocalのみ。
+
+### 実CPAL最大三声のscope付き診断
+
+native終了後、実標準出力44100Hz／2channel／F32で、実Registryと同じ `output_f32`／EngineLease／control・visual transportのtemporary test-only probeを動かした（artifact1179、1test PASS8.14秒／全体8.51秒）。app volume18%、全ノブ上端（depthだけ0）、二声途中のdeep、短いrock／deep／rain／deep、mute中のcoalesced latest deep・volume変更／解除、deep→rain→deepの正確one-hotを実headerで観測した。Mac本体／他アプリの音量は変更していない。
+
+684callback、うち244callbackで三正gainのcoherent transport headerを読み、application `output_f32` 区間のRust-global-allocator allocation／deallocation／reallocationはすべて0。実headerは30Hzなので、この244件の各sampleが三声とは断定しない。最大application時間6.8885ms、三正gain header時の最大も6.8885ms、実callbackのframe期間に対する最大比0.593325。instrumentationのTLS／timer overheadを含む区間であり、区間外のsample集計やCPAL／framework内部の全時間・確保を測った値ではない。
+
+出力buffer700416sampleのpeak0.034132350／RMS0.002707961／最大隣接delta0.016143650、driver error／invalid sampleは0。これらは今回の18%・seed911・bounded実経路の値で、全波形のpeak保証・聴感一定・no-click判定・物理録音ではない。lease close後stream pause／drop、非RT test ownerがengineを回収／破棄した。probeとaudio moduleのcfg attachmentは実測後に除去し、通常testsがignored target sourceや物理streamに依存しない。
+
+独立Standards source reviewはcorrect／findings0／confidence0.96。application callbackの正常経路は準備済snapshot swap、bounded mix／実声scalar tickとlazy validity、bounded atomic publication、ownershipだけを返すguardであり、normal-path heap release・待ち・file／network I/O・UI呼出を見つけなかった。これはsource auditと上記の実allocator／時間観測を組み合わせた診断で、syscall traceやCPAL依存内部まで測定した無wait／無I/O保証ではない。三件のSpec証拠補完後の最終レビューと短いユーザー耳／光smokeはまだ必要であり、P06の通常PR merge／but同期／completed、P08物理同期、P13音質／initial確定をこの節で宣言しない。
+
+### 固有recipeの同一課題での参照評価
+
+P06の「短い三環境menu／選択済み対象・settingsノブ・独立mute／volume・latest保持・所有PNG／Quit・capture／lockとproof limits」課題を、既存recipeだけをsystem参照とするtools／履歴なしのfresh-context completionへ変更前後で適用した。baselineは専用caseと統合操作列が未記載で、近接situations／deepやallでは不足を補えないと回答した。変更後はmixing、menu開始間隔2秒未満、実pointer／depth1段・消音volume0→18／実scroll17/11・解除18→20／再消音・latest22/12、PNG3枚／2比較／正常Quit0、captureとlockのBLOCKEDを取得した。未記載の個々のreceiptや実行結果を推測せず、入力間隔／receipt／画像をmax-three／RT／tail／waveform／no-click／物理同期へ拡張しなかった。
+
+最初の変更後評価はEval待ち60秒でtimeout／VM resetとなり、回答は取得できなかった。保存された実transcriptから正確な元課題とbaseline回答を回収し、reset後の適正なasync呼出で上記の変更後回答を取得した。失敗した呼出を成功結果へ数えない。これはpure-reference retrieval／application gapの観測、5-rep wording microtestはN/A、pressure／自然遵守率・実native成功の試験ではない。
+
+### 最終独立レビューとユーザー耳／光smoke
+
+三件のP2補完とstable文書のbounded follow-upはSpec／Standardsともcorrect、findings0、confidence0.97。微小正寄与・実rate consumer残り秒・決定的fresh collision／bubbleの不足解消と、fixture／lint失敗・native／CPAL scope・P10／P13の限界が整合すると判定した。reviewerによるchecks／launch／editやunchanged productionの広い再監査はない。parentの `npm run check:docs` もPASS（全体0.37秒／本体71ms、この結果行追加前）、Latの `No init version recorded` 警告は保持し、init／hooks／設定変更をしていない。
+
+parentはtemporaryな所有manual-smoke hostで現binary SHA256 `d84bd407f6747a0f63c003f2a697295d6aff36683c095901f9c82bf777edb0c8` を実起動し、同じsession／foreground／AX guardと実menu／focused sliderでapp volume20%・解除、receipt5/0を確認してシーンを前面へ置いた。所有PID2638、private evidence directory `target/native-e2e/human-90E6630B-878F-4B77-94D9-E047283352B4`。OS音量・TCC変更・画像取得はしていない。userへmenu雨→岩→深海の約0.5秒間隔と深海再選択、settings三択で同じ選択、消音中選択→解除の最新deep、操作時のclick／音切れ／不意な増音と消音中の光、最後の実menu Quitを具体的に依頼した。
+
+ユーザーは「異常なし」（音の切替と最新対象、消音中の光を確認できた）を選択した。これは今回の短い耳／光の受け入れ報告で、個々の操作時刻／物理delay／全波形／P13の音色とinitialを計測・確定したとはしない。hostは4分52秒の所有process lifetime後、`P06_HUMAN_EXIT owned_pid=2638 normal_exit=0`／service exit0を返し、timeout cleanupではない正常Quitを確認した。temporary hostは終了後に除去し、shippingの観測hookや通常testsへの依存を残していない。これで今回の耳／光gateは解消した。通常PR merge／but同期／mikan completionの実結果はIssue Reportへ記録し、未実施の統合をこの行で済んだとはしない。

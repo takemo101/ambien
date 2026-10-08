@@ -925,20 +925,175 @@ mod behavioral_tests {
         assert_eq!(leaving.depth.value(), 1.0);
         assert_eq!(leaving.air.value(), 1.0);
         leaving.set_contributing(true);
-        let mut energy = 0.0;
-        let mut births = 0;
-        for sample in 800..16_800 {
-            energy += step(&mut leaving, &[Normalized::ONE; 2], &ring, sample)
-                .into_iter()
-                .map(f32::abs)
-                .sum::<f32>();
-            births += leaving
+        assert!(leaving.contributing);
+        assert!(
+            leaving
                 .grains
                 .iter()
-                .filter(|grain| grain.alive() && grain.age == 0.0)
-                .count();
+                .filter(|grain| grain.alive())
+                .all(|grain| !grain.audio_eligible)
+        );
+    }
+
+    #[test]
+    fn fresh_bubble_after_reentry_matches_dry_onset_without_low_bed_or_old_tail() {
+        let ring = VisualRing::new(8, 1);
+        let off = [Normalized::ZERO; 2];
+        // Exercise both fixed-storage reentry and worker-prepared rate change.
+        for prepared_rate in [None, Some(8_000)] {
+            // Dirty bubble/baseline and clean-history bubble/baseline share the
+            // exact world and continuous low bed. Only the first pair has heard
+            // an old bubble; subtracting their baselines alone could hide its
+            // stale tail, so complete outputs must also match the clean pair.
+            let mut voices: [DeepVoice; 4] = std::array::from_fn(|_| voice(48_000, off));
+            for voice in &mut voices[..2] {
+                voice.grains[0].start(DepthTone::new(0.0), 0.9, 0.3, 0.4, 1.0, 48_000);
+            }
+            let mut old_bubble_peak = 0.0_f32;
+            for sample in 0..8_000 {
+                let output = voices
+                    .each_mut()
+                    .map(|voice| step(voice, &off, &ring, sample));
+                for (dirty, clean) in output[0].iter().zip(output[2]) {
+                    old_bubble_peak = old_bubble_peak.max((dirty - clean).abs());
+                }
+            }
+            assert!(
+                old_bubble_peak > 1e-6,
+                "fixture must actually dirty audio history"
+            );
+            let old_age = voices[0].grains[0].age;
+            for voice in &mut voices {
+                voice.set_contributing(false);
+            }
+            for sample in 8_000..12_800 {
+                for voice in &mut voices {
+                    assert_eq!(step(voice, &off, &ring, sample), [0.0; 2]);
+                }
+            }
+            assert!(voices[0].grains[0].age > old_age);
+            assert!(voices[0].grains[0].alive());
+            for voice in &mut voices {
+                if let Some(rate) = prepared_rate {
+                    voice.prepare_rate(rate).unwrap();
+                }
+                voice.set_contributing(true);
+            }
+            let rate = voices[0].sample_rate;
+            let delay = voices[0].prepared_delay().unwrap().get();
+            assert_eq!(delay, 0.0);
+            let random = voices[0].random.state;
+            let tone = voices[0].tone;
+            for voice in &voices {
+                assert_eq!(voice.random.state, random);
+                assert_eq!(voice.modulation.breath(), voices[0].modulation.breath());
+                assert_eq!(voice.modulation.weather(), voices[0].modulation.weather());
+            }
+            assert!(!voices[0].grains[0].audio_eligible);
+
+            // Slot 1 has not consumed excitation noise. A separately prepared
+            // real Bubble provides its dry source waveform, including the
+            // intentional 9 ms attack and descending resonator, without any
+            // voice history or low sound that could satisfy the onset check.
+            let mut source = voice(rate, off);
+            for index in [0, 2] {
+                voices[index].grains[1].start(tone, 0.9, 0.3, 0.4, 1.0, rate);
+            }
+            source.grains[1].start(tone, 0.9, 0.3, 0.4, 1.0, rate);
+            let mut dry_dc: [DCBlock<f64>; 2] = std::array::from_fn(|_| DCBlock::new(8.0));
+            for dc in &mut dry_dc {
+                prepare_node(dc, rate);
+            }
+            let mut wet_reference = RestartableReverb::new(rate).unwrap();
+            assert_eq!(wet_reference.tick([0.0; 2]), [0.0; 2]);
+            assert_eq!(
+                source.grains[1].render(),
+                [0.0; 2],
+                "age-zero attack is silent"
+            );
+            let at_birth = voices.each_mut().map(DeepVoice::render_sample);
+            assert_eq!(at_birth[0], at_birth[1]);
+            assert_eq!(at_birth[0], at_birth[2]);
+            assert_eq!(at_birth[1], at_birth[3]);
+
+            // Very early attack samples can be below f32 low-bed resolution.
+            // Match the independent source's resolvable dry-onset frame before
+            // wet arrival, then require exact dirty/clean consumer waveforms.
+            // Do not compare DC(bubble) to DC(bed+bubble)-DC(bed) amplitudes:
+            // the voice rounds bed+bubble to f32 before filtering, so those
+            // paths have different quantized inputs despite ideal linearity.
+            let onset_threshold = 1e-7_f32;
+            let mut source_onset = None;
+            let mut raw_dry_onset = None;
+            let mut expected_dry_onset = None;
+            let mut audible_onset = None;
+            let mut wet_onset = None;
+            for sample in 1..=rate as usize / 5 {
+                source.grains[1].advance(1.0 / f64::from(rate));
+                let excitation = source.grains[1].render();
+                if excitation.iter().any(|value| *value != 0.0) {
+                    source_onset.get_or_insert(sample);
+                }
+                let expected_dry: [f32; 2] = std::array::from_fn(|channel| {
+                    dry_dc[channel].tick(&[excitation[channel]].into())[0]
+                });
+                if expected_dry.iter().any(|value| *value != 0.0) {
+                    raw_dry_onset.get_or_insert(sample);
+                }
+                let expected_wet = wet_reference.tick(expected_dry);
+                if expected_wet.iter().any(|value| *value != 0.0) {
+                    wet_onset.get_or_insert(sample);
+                }
+                let output = voices
+                    .each_mut()
+                    .map(|voice| step(voice, &off, &ring, 12_800 + sample));
+                assert_eq!(
+                    output[0], output[2],
+                    "old history polluted fresh output at {sample}"
+                );
+                assert_eq!(
+                    output[1], output[3],
+                    "old history polluted low bed at {sample}"
+                );
+                assert_eq!(voices[0].random.state, voices[2].random.state);
+                let bubble: [f64; 2] = std::array::from_fn(|channel| {
+                    f64::from(output[0][channel]) - f64::from(output[1][channel])
+                });
+                if wet_onset.is_none() {
+                    if expected_dry
+                        .iter()
+                        .any(|value| value.abs() > onset_threshold)
+                    {
+                        expected_dry_onset.get_or_insert(sample);
+                    }
+                    if bubble
+                        .iter()
+                        .any(|value| value.abs() > f64::from(onset_threshold))
+                    {
+                        audible_onset.get_or_insert(sample);
+                    }
+                }
+            }
+            assert_eq!(
+                source_onset,
+                Some(1),
+                "only age-zero envelope silence precedes excitation"
+            );
+            assert_eq!(raw_dry_onset, source_onset);
+            let expected_dry_onset =
+                expected_dry_onset.expect("real bubble must clear the low-bed resolution");
+            assert_eq!(
+                audible_onset,
+                Some(expected_dry_onset),
+                "fresh dry onset acquired extra delay; declared {delay} frames"
+            );
+            assert!(
+                wet_onset.expect("real reverb must receive the new bubble") > expected_dry_onset,
+                "wet predelay must not be mistaken for dry causal delay"
+            );
+            assert!(source.grains[1].center < source.grains[1].start_center);
+            assert!(voices[0].grains.iter().skip(2).all(|grain| !grain.alive()));
         }
-        assert!(energy > 0.0 && births > 0);
     }
 
     #[test]

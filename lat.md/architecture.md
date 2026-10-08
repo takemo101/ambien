@@ -71,7 +71,7 @@ macOS の窓制約・アクセシビリティと、Sparkle による手動更新
 - [開発規約](../AGENTS.md)、[開発手順](../docs/development.md)、[文書案内](../docs/README.md)、[参考資料](../docs/references.md)。
 - [package.json](../package.json)と[package-lock.json](../package-lock.json)が開発用 Lat CLI と Node 条件を定義する。アプリの依存定義ではない。
 - [`Cargo.toml`](../Cargo.toml)、[`Cargo.lock`](../Cargo.lock)、[`rust-toolchain.toml`](../rust-toolchain.toml) が実際のアプリ依存と toolchain を固定する。Rust の検査・GUI 起動の現在のコマンドと条件は [開発手順](../docs/development.md#文書検査と-rust-アプリ検証) を読む。
-- [macOS 共通検証スキル](../.agents/skills/verifying-macos-apps/SKILL.md) と [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) で実操作・画像・証拠判定を現存ケースへ対応付ける。専用scriptを他アプリへ流用せず、条件と実施権限は SPEC を参照する。
+- [macOS 共通検証スキル](../.agents/skills/verifying-macos-apps/SKILL.md) と [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) で実操作・画像・証拠判定を現存ケースへ対応付ける。三環境の連打・最新対象・独立mute／volumeは `mixing`、実gain／RT／再入場と耳の受け入れは別証拠を読む。専用scriptを他アプリへ流用せず、条件と実施権限は SPEC を参照する。
 - [[workflow]] で実在する npm コマンドと副作用を読む。`check` は現状 `check:docs` のみであり、製品コードの試験・ビルド・実機証明ではない。
 
 作業前に [[architecture#Specification]] と対象の正本文書を読み、変更後は関係する案内だけを更新する。Issue の Status・試験件数・仕様全文をここへ複製しない。
