@@ -1307,7 +1307,9 @@ mod tests {
         assert!(!mailbox.try_read_into(&mut scratch));
         assert_controls_coherent(&committed);
         mailbox.sequence.store(2, Ordering::SeqCst);
-        mailbox.manual_target.store(1, Ordering::SeqCst);
+        mailbox
+            .manual_target
+            .store(registry.definitions().len() as u64, Ordering::SeqCst);
         assert!(!mailbox.try_read_into(&mut scratch));
         assert_controls_coherent(&committed);
         assert_eq!(scratch.knobs.as_ptr(), pointer);

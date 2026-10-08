@@ -1,23 +1,27 @@
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use cpal::{FromSample, SizedSample};
 
 use crate::{
-    controls::{ControlState, Normalized},
+    controls::ControlState,
     situations::{
         Registry, SituationIndex, Voice, VoiceFrame, VoiceLatencyFrames, VoicePreparation,
         VoicePreparationError,
     },
 };
 
+#[cfg(test)]
+use crate::controls::Normalized;
+
 use super::{
     lease::EngineLease,
+    mix::GainRamp,
     timing::{MachNanos, StreamEpoch, WorldSeconds, presentation_time},
     transport::{
         ControlMailbox, ControlReceipt, ErrorCell, StatusMailbox, VisualRing, VisualWriter,
         WorldVisualState,
     },
-    world::WorldClock,
+    world::{Movement, WorldClock},
 };
 
 pub(crate) fn output_f32(
@@ -67,6 +71,8 @@ fn callback_playback(info: &cpal::OutputCallbackInfo, errors: &ErrorCell) -> Opt
 // An implementation constant, not a new product timing control. The two
 // independent output ramps finish in 20 ms and preserve exact endpoint zeros.
 const OUTPUT_RAMP_MILLISECONDS: u32 = 20;
+
+const MANUAL_CROSSFADE: Duration = Duration::from_secs(2);
 
 struct OutputRamp {
     current: f32,
@@ -123,6 +129,7 @@ struct PreparedVoice {
     index: SituationIndex,
     knobs: Range<usize>,
     delay: VoiceLatencyFrames,
+    contributing: bool,
     voice: Box<dyn Voice>,
 }
 
@@ -139,7 +146,9 @@ pub(crate) struct PreparedEngine {
     volume_gain: OutputRamp,
     mute_gain: OutputRamp,
     world: WorldClock,
-    gains: Box<[f32]>,
+    movement: Movement,
+    mix: GainRamp,
+    visual_gains: Box<[f32]>,
     breath: Box<[f32]>,
     state_interval: u32,
     state_delay: VoiceLatencyFrames,
@@ -161,7 +170,10 @@ impl PreparedEngine {
             return Err(VoicePreparationError::InvalidParameters);
         }
         let mut voices = Vec::with_capacity(count);
-        let mut gains = vec![0.0; count];
+        let mix = GainRamp::new(count, controls.manual_target);
+        let movement = Movement::Staying {
+            current: controls.manual_target,
+        };
         for (position, definition) in registry.definitions().iter().enumerate() {
             let index = SituationIndex::from_index(position, count)
                 .ok_or(VoicePreparationError::InvalidDefinition)?;
@@ -176,16 +188,11 @@ impl PreparedEngine {
             let delay = voice.prepared_delay()?;
             let contributing = index == controls.manual_target;
             voice.set_contributing(contributing);
-            gains[position] = if contributing {
-                Normalized::ONE
-            } else {
-                Normalized::ZERO
-            }
-            .get();
             voices.push(PreparedVoice {
                 index,
                 knobs: registry.knob_range(index),
                 delay,
+                contributing,
                 voice,
             });
         }
@@ -204,7 +211,9 @@ impl PreparedEngine {
             volume_gain,
             mute_gain,
             world: WorldClock::new(sample_rate)?,
-            gains: gains.into_boxed_slice(),
+            movement,
+            mix,
+            visual_gains: vec![0.0; count].into_boxed_slice(),
             breath: vec![0.0; count].into_boxed_slice(),
             state_delay: VoiceLatencyFrames::new(0.0)
                 .expect("aggregate state tracks generated samples without a voice dry path"),
@@ -228,34 +237,33 @@ impl PreparedEngine {
         if !self.mailbox.try_read_into(&mut self.scratch) {
             return false;
         }
-        let changed = self.controls.settings_revision != self.scratch.settings_revision
-            || self.controls.manual_revision != self.scratch.manual_revision;
+        let manual_changed = self.controls.manual_revision != self.scratch.manual_revision;
+        let changed =
+            self.controls.settings_revision != self.scratch.settings_revision || manual_changed;
         // A fault after acceptance must not leave the previous revision acknowledged.
         self.receipt_published &= !changed;
         std::mem::swap(&mut self.controls, &mut self.scratch);
         self.volume_gain.retarget(self.controls.volume.get());
         self.mute_gain
             .retarget(if self.controls.mute { 0.0 } else { 1.0 });
+        if manual_changed {
+            self.mix
+                .retarget(self.controls.manual_target, MANUAL_CROSSFADE);
+            self.movement
+                .select_manual(self.controls.manual_target, self.mix.is_crossing());
+        }
         changed
     }
 
     fn publish_receipt(&mut self, epoch: StreamEpoch) -> bool {
-        // Current P03 registration has one voice. Read actual situation gains,
-        // independent of output volume/mute, rather than echoing an endpoint.
-        let mut dominant = 0;
-        let mut power = self.gains[0] * self.gains[0];
-        for (position, gain) in self.gains.iter().enumerate().skip(1) {
-            let candidate = gain * gain;
-            if candidate > power {
-                dominant = position;
-                power = candidate;
-            }
-        }
+        // Manual display/resume selection changes at acceptance, even when a
+        // frozen engine has not yet generated any of the newly selected audio.
+        // Audio movement is represented separately by the actual mixer gains.
         let published = self.receipts.publish(ControlReceipt {
             epoch,
             ack_revision: self.controls.settings_revision,
             ack_manual_revision: self.controls.manual_revision,
-            display_dominant: self.voices[dominant].index,
+            display_dominant: self.movement.target(),
             world: self.world.now(),
         });
         self.receipt_published |= published;
@@ -312,13 +320,20 @@ impl PreparedEngine {
         self.accept_controls();
         let rate = self.world.sample_rate();
         let delta_seconds = 1.0 / f64::from(rate);
+        self.mix.prepare_interval(rate);
         for (frame_offset, output) in data.chunks_exact_mut(channels).enumerate() {
+            let was_crossing = self.mix.is_crossing();
+            self.mix.advance_frames(1, rate);
+            if was_crossing && !self.mix.is_crossing() {
+                self.movement.arrive();
+            }
+            let gains = self.mix.gains();
             let frame = VoiceFrame {
                 world: self.world.now(),
                 delta_seconds,
                 sample_rate: rate,
             };
-            let mut stereo = [0.0_f32; 2];
+            let mut stereo = [0.0_f64; 2];
             for (position, prepared) in self.voices.iter_mut().enumerate() {
                 let Ok(present) = presentation_time(playback, frame_offset, prepared.delay, rate)
                 else {
@@ -332,7 +347,11 @@ impl PreparedEngine {
                     frame.world,
                     present,
                 );
-                let contributing = self.gains[position] > 0.0;
+                let contributing = gains[position] > 0.0;
+                if prepared.contributing != contributing {
+                    prepared.voice.set_contributing(contributing);
+                    prepared.contributing = contributing;
+                }
                 writer.set_contributing(contributing);
                 prepared.voice.advance_world(
                     frame,
@@ -345,11 +364,11 @@ impl PreparedEngine {
                 }
                 if contributing {
                     let sample = prepared.voice.render_sample();
-                    stereo[0] += sample[0] * self.gains[position];
-                    stereo[1] += sample[1] * self.gains[position];
+                    stereo[0] += f64::from(sample[0]) * gains[position];
+                    stereo[1] += f64::from(sample[1]) * gains[position];
                 }
             }
-            let gain = self.volume_gain.advance() * self.mute_gain.advance();
+            let gain = f64::from(self.volume_gain.advance() * self.mute_gain.advance());
             stereo[0] *= gain;
             stereo[1] *= gain;
             if stereo
@@ -359,6 +378,7 @@ impl PreparedEngine {
                 errors.report_invalid_sample();
                 return;
             }
+            let stereo = [stereo[0] as f32, stereo[1] as f32];
             if channels == 1 {
                 output[0] = T::from_sample((stereo[0] + stereo[1]) * 0.5);
             } else {
@@ -367,6 +387,7 @@ impl PreparedEngine {
             }
             if self.until_state == 0 {
                 for (position, prepared) in self.voices.iter().enumerate() {
+                    self.visual_gains[position] = gains[position] as f32;
                     self.breath[position] = prepared.voice.breath_intensity().get();
                 }
                 let Ok(present) = presentation_time(playback, frame_offset, self.state_delay, rate)
@@ -378,8 +399,8 @@ impl PreparedEngine {
                     epoch: errors.epoch(),
                     world: frame.world,
                     present,
-                    phase: 0,
-                    gains: &self.gains,
+                    phase: self.movement.phase(),
+                    gains: &self.visual_gains,
                     breath_intensity: &self.breath,
                 }) {
                     errors.report_timing_fault();
@@ -438,6 +459,163 @@ mod tests {
             registry.definitions().len(),
         ));
         PreparedEngine::prepare(registry, controls, visuals, 48_000, seed).unwrap()
+    }
+
+    #[test]
+    fn p04_manual_selection_moves_real_gains_while_muted_without_volume_restarting_it() {
+        use crate::controls::ControlEdit;
+
+        let registry = Arc::new(Registry::new().unwrap());
+        let target = registry.resolve("rock").expect("rock must be registered");
+        let count = registry.definitions().len();
+        let initial = registry.first_index();
+        let mut controls = ControlState::new(&registry);
+        controls.apply(ControlEdit::Mute(true)).unwrap();
+        let visuals = Arc::new(VisualRing::new(EVENT_CAPACITY, count));
+        let mut engine =
+            PreparedEngine::prepare(registry, controls.clone(), visuals.clone(), 8_000, 137)
+                .unwrap();
+        controls.apply(ControlEdit::Select(target)).unwrap();
+        engine.control_mailbox().publish(&controls);
+        let errors = ErrorCell::new(StreamEpoch::new(1).unwrap());
+        let mut buffer = [1.0; 1_024];
+        let mut gains = vec![0.0; count];
+        let mut breath = vec![0.0; count];
+        for block in 0..36 {
+            engine.render_f32(&mut buffer, 2, MachNanos::new(block * 64_000_000), &errors);
+            assert!(buffer.iter().all(|sample| *sample == 0.0));
+            if block == 15 {
+                visuals
+                    .read_state_into(
+                        StreamEpoch::new(1).unwrap(),
+                        MachNanos::new(u64::MAX),
+                        &mut gains,
+                        &mut breath,
+                    )
+                    .expect("actual callback must publish gains");
+                assert!(gains[initial.get()] > 0.0);
+                assert!(gains[target.get()] > 0.0);
+                let power: f32 = gains.iter().map(|gain| gain * gain).sum();
+                assert!((power - 1.0).abs() < 1e-5);
+                controls
+                    .apply(ControlEdit::Volume(Normalized::new(0.2).unwrap()))
+                    .unwrap();
+                engine.control_mailbox().publish(&controls);
+            }
+        }
+        visuals
+            .read_state_into(
+                StreamEpoch::new(1).unwrap(),
+                MachNanos::new(u64::MAX),
+                &mut gains,
+                &mut breath,
+            )
+            .unwrap();
+        for (index, gain) in gains.iter().enumerate() {
+            assert_eq!(*gain, if index == target.get() { 1.0 } else { 0.0 });
+        }
+        assert_eq!(errors.take_bits(), 0);
+    }
+
+    #[test]
+    fn actual_callback_crossfade_retargets_and_contribution_boundaries_do_not_touch_heap() {
+        use crate::controls::ControlEdit;
+
+        let registry = Registry::new().unwrap();
+        let initial = registry.first_index();
+        let target = registry.resolve("rock").expect("rock must be registered");
+        let epoch = StreamEpoch::new(18).unwrap();
+        let engine = prepared(613);
+        let mailbox = engine.control_mailbox().clone();
+        let mut controls = engine.controls.clone();
+        let lease = EngineLease::new(engine, epoch);
+        let errors = ErrorCell::new(epoch);
+        let mut output = [0.0; 1_024];
+        let (_, heap) = crate::rt_alloc::measure(|| {
+            for turn in 0..12 {
+                controls
+                    .apply(ControlEdit::Select(if turn % 2 == 0 {
+                        target
+                    } else {
+                        initial
+                    }))
+                    .unwrap();
+                mailbox.publish(&controls);
+                output_f32(
+                    &lease,
+                    &mut output,
+                    2,
+                    &callback_info(turn * 11_000_000),
+                    &errors,
+                );
+            }
+            controls.apply(ControlEdit::Select(target)).unwrap();
+            mailbox.publish(&controls);
+            for block in 0..188 {
+                output_f32(
+                    &lease,
+                    &mut output,
+                    2,
+                    &callback_info(200_000_000 + block * 11_000_000),
+                    &errors,
+                );
+            }
+            controls.apply(ControlEdit::Select(initial)).unwrap();
+            mailbox.publish(&controls);
+            output_f32(
+                &lease,
+                &mut output,
+                2,
+                &callback_info(2_300_000_000),
+                &errors,
+            );
+        });
+        assert_eq!(heap, crate::rt_alloc::Counts::default());
+        let engine = lease.try_take().unwrap();
+        assert!(engine.mix.gains()[initial.get()] > 0.0);
+        assert!(engine.mix.gains()[target.get()] > 0.0);
+        assert_eq!(errors.take_bits(), 0);
+    }
+
+    #[test]
+    fn frozen_manual_acceptance_updates_display_without_advancing_actual_mix() {
+        use crate::controls::ControlEdit;
+
+        let registry = Registry::new().unwrap();
+        let initial = registry.first_index();
+        let target = registry.resolve("rock").expect("rock must be registered");
+        let epoch = StreamEpoch::new(19).unwrap();
+        let errors = ErrorCell::new(epoch);
+        let mut engine = prepared(719);
+        let mut controls = engine.controls.clone();
+        controls.apply(ControlEdit::Select(target)).unwrap();
+        engine.mailbox.publish(&controls);
+        let mut output = vec![0.0; 144_000];
+        engine.render_f32(&mut output, 2, MachNanos::new(0), &errors);
+        assert!(engine.mix.gains()[target.get()] > engine.mix.gains()[initial.get()]);
+        let gains = engine.mix.gains().to_vec();
+        let frozen_world = engine.world();
+        controls.apply(ControlEdit::Select(initial)).unwrap();
+        engine.mailbox.publish(&controls);
+        assert!(engine.sync_frozen_controls(epoch));
+        assert!(engine.sync_frozen_controls(epoch));
+        assert_eq!(engine.mix.gains(), gains);
+        assert_eq!(engine.world(), frozen_world);
+        let receipt = engine.status_mailbox().try_read().unwrap();
+        assert_eq!(receipt.display_dominant, initial);
+        assert_eq!(receipt.world, frozen_world);
+        assert_eq!(engine.movement.target(), initial);
+        engine.render_f32(&mut output, 2, MachNanos::new(1_500_000_000), &errors);
+        engine.render_f32(
+            &mut output[..48_000],
+            2,
+            MachNanos::new(3_000_000_000),
+            &errors,
+        );
+        for (position, gain) in engine.mix.gains().iter().enumerate() {
+            assert_eq!(*gain, if position == initial.get() { 1.0 } else { 0.0 });
+        }
+        assert_eq!(errors.take_bits(), 0);
     }
 
     #[test]

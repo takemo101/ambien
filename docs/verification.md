@@ -518,3 +518,96 @@ parentの最終 `cargo fmt --all -- --check`、`cargo test --locked --offline`�
 以前の検証用panel終了に伴う前面遷移と別のfocus変更を区別する仮説を立て、1回だけ追加観測を持つ限定診断を行った。実runnerの同じ最終宣言・全controls assertionとCLIを一時copyへ使い、実際に生成・所有する `Candidate` へAXFocusedWindowChanged／AXWindowCreatedとWorkspace activation observer、各key直前の読取りsnapshotだけを追加した。既存guard・値・待ち・必須条件を変更していない。4.68秒・exit0、`target/native-e2e/run-9E7AC785-D446-4AB7-9F2E-A5C7E9D3F96D/report.json` はbinary／session／controlsすべてPASS、PID21148の実menu Quit正常0まで成立した。8回のkey前で前面PID21148・期待AX focused windowとの一致を観測し、設定窓生成／再生成のidentity変更、正常Quit後のloginwindowへのactivationを記録した。
 
 この診断では喪失が再現せず、先のFAILの原因を特定・修正したとはしない。診断copyの成功を、未計測の通常run成功や全case同時実行へ書き換えない。最新guardの実成功と実runnerの既存controls／lifecycle／visual成功、同binaryのユーザー聴感は、それぞれの条件と限界を保持してP03の独立証拠とする。一時probeと診断copyは削除し、永久の重複runnerや新しいdiagnostic flagを追加しない。
+
+## P04 岩と最終手動多声交差の限定検証
+
+対象は `feat/amb-006-rock-manual-mix` の未commit worktree、共通base `fe945dbc7a7df01eefe4182e0ebe3395500c3971`。SPEC document-state17でユーザーが選択したP04拡張（実岩voiceと、現在gainから割込み可能な2秒equal-power共通N-voice手動交差）を対象にする。最終commit／PRはこの記録時点では未確定。P06の三実環境・再入場・最大三声RT受け入れやP13の音質／preset採用を完了扱いにしない。
+
+現存sourceでは `src/situations/mod.rs` が岩moduleを登録し、`rock.rs` のdefinitionは量・大きさ・硬さを持つ実RockVoice factoryへ接続される。衝突excitation・共鳴・左右panとvisual eventを持ち、単なる登録stubではない。`src/audio/mix.rs` のGainRampは準備済みN要素のcurrent／origin／tangentでunit-vector arcを扱い、`render.rs` のmanual世代受理だけが `Duration::from_secs(2)` でretargetする。receiptの手動表示対象と実mixer gainは別状態である。これは実装経路のsource確認であり、callback全経路のallocation計測・知覚品質・native操作の成功を推定しない。
+
+### Rust・実factory波形・実CPAL
+
+初回feature REDは岩未登録で2試験失敗・exit101（session artifact1018）。統合途中のcast括弧不足によるcompile失敗を修正し、次の104試験中101成功／3失敗は登録数fixtureを更新して解消した。parentの `cargo test --locked --offline` は104成功・14.48秒（artifact1031）。production `cargo build --locked --offline` はexit0、build表示1.16秒／wall1.25秒、warningsなし。Swift `--help` はthrowing boolean-expressionの訂正後、実実行exit0・1.29秒。これらはRust試験・build・CLI成立の証拠で、実操作や試聴の成功ではない。
+
+後の独立レビューが示したP2（光のowner gain未反映）に対して、実Scene／VisualRing consumerのregression `particle_brightness_uses_presented_crossover_gains_and_hides_departed_voice` は変更前に0.45000002対期待0でRED（artifact1076）。光のhelperをpresented owner gain×strength×fadeとし、zero gainでは描画を早期skipした。app volume／muteは光に掛けない。修正後のparent aggregateは105試験／fmt／strict Clippy／buildすべてPASS（artifact1078）。独立Spec／Standardsのbounded再レビューも修正を正しいとし、残る指摘なし。ただしsource／regression／build／レビューの証拠であり、新候補のnative最終承認や物理同期を示さない。
+
+production factoryを使う使い捨て波形／CPAL smokeは1試験成功・12.56秒／wall16.35秒（artifact1033）。48kHz・5秒生成、RMSは最後の3秒、dry delay0で測定した：
+
+| voice／候補ノブ | peak | RMS |
+|---|---:|---:|
+| 雨候補 | 0.166777626 | 0.010071152 |
+| 雨all1 | 0.237679243 | 0.020071973 |
+| 岩候補(0.27,0.61,0.18) | 0.018213162 | 0.003903708 |
+| 岩(1,0,0) | 0.024622219 | 0.003738747 |
+| 岩all1 | 0.028469594 | 0.007910246 |
+| 岩(1,1,0) | 0.034252387 | 0.009738408 |
+
+観測したvoice別peak和0.271931618は当該波形の値で、任意条件の上限や知覚上の音量一致ではない。候補初期値はpublic採用未承認で、P13の校正・主観判断を残す。
+
+実標準Device／CPALは44,100Hz・2ch・F32・epoch1。消音中world0.533333秒でphase1、雨／岩gain `[0.9524935,0.30455896]`、world2.166667秒でphase0 `[0,1]` を観測した。途中volume編集は2秒交差を再始動しなかった。消音中の実RockImpactはserial22、world3.804263、x0.7334362／y0.43643302、strength0.8900345、radius4.933726、life733.101283ms。雨への出発world4.1秒のgain `[0.11053086,0.9938727]` から岩へ割込み、world6.266667秒に `[0,1]`、latest manual4へ到達。app volume0.2で解除後world6.533333秒も `[0,1]`／Running、再消音後owned workerを正常joinした。これは実consumerのgain・世界・event・制御受理であり、物理可聴無音、試聴、OS allocation、物理同期、全native RT境界の証明ではない。使い捨て `target/p04-smoke.rs` とmainのcfg-test接続は除去され、恒久testing hookは残さない。
+
+### 新候補のnative初回：失敗も保持
+
+実 `--case all` は16.17秒・exit1、総合FAIL。`target/native-e2e/run-237D3EB8-0B87-4D21-A877-51372A70D25D/report.json` は2026-10-08T01:43:58Z〜01:44:13Z、binary SHA256 `a4a2dee150356992b4e5bb61a30b64bae39b4ffa689463f6ed572df580de64b6`。binary／sessionはPASS（AX／event／capture=true、OS／許可変更なし）。lifecycleは所有PID61322／61643／61649の実menu／両窓⌘Q・正常exit0までPASS。controlsはPID61662、situationsはPID61819で `Owned selector label missing: 雨` によりFAIL。failure cleanupは正常Quitの証拠ではなく、岩3ノブ・選択・岩の消音画像を成功にしない。
+
+独立visualはPID61965／window10147、1920×1200の所有シーンPNG3枚・隣接2組の内部変化・実menu Quit正常exit0までPASS。これは初期シーンの画像契約成立であり、失敗したsituationsの岩画像、粒だけの運動、音と光の物理同期、ガラスの主観品質ではない。画像はローカルのみ、失敗runと保存済み証拠を保持する。selectorの追加読取り診断／修正／限定再開は新しい観測が得られた場合に別記し、このFAILを上書きしない。
+
+native担当の追加確認では、初回run directory0700／report0600／20 artifactsすべて0600。visualのcropはx192／y180／1536×840、1,290,240pixel中の変化は9,151（0.0070924789）／18,404（0.0142640129）。実PNGの目視ではnative信号ボタン3つ、位置／半径が変わる疎なcyan／blueの同心円光、中央〜下側に残る大きなpurple円形と薄い水平形、viewer上の黒／透明領域を観測した。形のすべてを粒に帰属させたり、ガラス／音質の合格としない。
+
+selector failureの追加読取りは `target/native-e2e/diagnosis-AE3CCD0E-63C5-4DBE-B005-B6BA3344FC0B` のPID65125ではreceipt準備前のnative chromeだけを得たため、別の有限診断でreceipt0/0を明示的に待った。`target/native-e2e/diagnosis-BC5A2D36-DE70-4FB2-A4D9-DBADA703946E/owned-settings-ax.json` は所有設定窓にlabel付きAXGroup「シチュエーション」はあるがselector childrenが0であることを示した。対応するEly segment source141–186にrole／aria_labelがなく、per-segmentの所有boundsを得るrunner-only回避では安全契約を満たさないと判断した。PID66657は実menu Quit正常0。これは診断の成立であってcontrols／situations受け入れではない。permission／focus／ownership guardやthresholdは変更していない。この診断時点では、UIの所有された選択surfaceの修正と新証拠に基づく未完ケースを統合担当へ引き継いだ。
+
+### 所有RadioButton修正後の限定再開
+
+parentのUI修正・rebuild後のbinary SHA256は `5a11c39acb161999e00d4427bb9113731ec670dcd2ce5d7cc23d6c74c16e9f43`。receipt準備後の `target/native-e2e/diagnostic-5C0D2216-4EA9-44D2-A473-0FF726C4B58B/owned-settings-ax.json` で雨／岩の実AXRadioButton labelとboundsを検証し、PID16348は実menu Quit正常0。runnerは実AXRadioButtonを取得するhelperへ変更し、既存の所有／前面／focus guardを保持した。situationsは再消音後のfocused-other選択（雨Space、receipt13/7 → 岩Return、14/8）も観測対象に加えた。
+
+通常 `--case controls` は4.48秒・exit0、`target/native-e2e/run-0CE9E41F-F396-4268-9063-B0206B87F251/report.json` にPASS、PID18929の実menu Quit正常0。通常 `--case situations` は2.78秒・exit1、`target/native-e2e/run-55E10A18-830D-42EC-A72B-D5B2E89CEAAD/report.json` にFAIL、PID19288の `AX children: -25202`。candidate logは空、PNGなし、正確な停止段階とroot causeは未特定。cleanupを正常Quitへ変更せず、このFAILを保持する。
+
+新しい段階観測を持つ1回の有限診断は `target/native-e2e/diagnostic-935B6F07-2A09-4B03-965E-F9F49857C672/stage-observations.log`。13.268秒で既存situations全assertion、14/8までのexact receipts、pointer／keyboard／menu／mute、実PNG3枚と隣接2比較、PID23695／CGWindow10260の実menu Quit正常0まで成立した。これは段階traceを追加した診断であり、通常の選択case PASSや `all` 成功実行に読み替えない。cropはx192／y180／1536×840、変化508（0.0003937252）／308（0.0002387153）、maximum channel delta1。native担当が実3枚を目視すると、native信号ボタンと下側中央の大きなgray円、残りはviewer上で黒／透明、個々の岩粒の変化は明瞭に見えなかった。ごく微細な数値pixel変化は現存比較契約の証拠であるが、知覚的な岩粒の運動、音の質、ガラス、物理同期の証明にはしない。follow-upのdirectory0700／全files0600を確認し、画像はローカルのみ。既存失敗とsource／CPAL／native／主観の証拠境界を保持する。
+
+### 岩captureノブを実変更した通常situations成功
+
+見えにくかった消音画像について、比較thresholdを弱めず、既存のsize0／hardness100／amount100端点受理は保持したまま、capture前に実size End100（receipt15/9）、hardness Home0（16/10）へ変更した。これは主観品質の採用値ではなく実入力による今回の検証条件。parentの意味的に同等なiterator修正・rebuild後のbinary SHA256は `161b406bdbc4f03033801a4e64a242883f2372fbcac164cb81ec2a515a0807bd`。runnerにはaction／receipt／capture段階の恒久failure contextを追加したが、blocked／fail区別を維持し、retry／追加sleep／threshold／focus／ownership guardは変更していない。先のAX -25202の正確なroot causeはなお未確認で、この成功を原因修正の証拠にしない。
+
+実 `--case situations` は14.94秒・exit0、`target/native-e2e/run-82805739-177B-40EA-B710-CFC6C15AA183/report.json` はschema1／selected_case situations、2026-10-08T02:07:25Z〜02:07:38Z。binary／session／situationsすべてPASS、AX／event／capture=true、PID56824／CGWindow10280の実menu Quit正常0。既存3ノブ端点、pointer雨→岩7/6、消音volume0／10／20・解除20%後再消音12/6、focused-other雨Space13/7→岩Return14/8、追加のcaptureノブ16/10、最新岩と消音状態、所有PNG3枚・隣接2比較まで実観測した。directory0700、reportと全15files0600を確認した。
+
+実1920×1200 PNG3枚をnative担当が目視し、persistentな中央gray円／native信号ボタン以外にも、異なる位置・半径の疎なgray／white同心円状impact-like形が明瞭に見えることを確認した。一部edge clippingと薄い水平形もあった。cropはx192／y180／1536×840、隣接変化53,998（0.04185112847）／71,910（0.05573381696）、maximum channel delta197。画像だけの限定観測であり、個々の粒の厳密identity、音、ガラスの質、物理同期やP13採用値の証拠ではない。画像はローカルのみ。
+
+初回all FAIL、通常situationsのAX failure、微細変化だけだったbounded diagnosticを別証拠としてすべて保持する。controls PASSは前のSHA256 `5a11c39…`、lifecycle／visual PASSは初回 `a4a2dee…` であり、最終hashで `all` を成功実行したとはしない。最終commit／PR、ユーザー聴感、P06／P13と他のRT・負荷・配布gateはそれぞれ必要な証拠へ分ける。
+
+### gain修正後の新候補：receipt段階でFAIL
+
+parentのgain修正後のbinary SHA256 `e87797b28d18bc8159b05da3c27c26ae08558e65cd9512ed01db72182a89cfba` で、更新した通常 `--case situations` を1回実行した。5.52秒・exit1、`target/native-e2e/run-FAE4CC9D-E143-449F-BA84-C07907761C6E/report.json` はschema1、2026-10-08T02:29:44Z〜02:29:49Z、binary／session PASS（AX／event／capture=true）、situations FAIL。恒久stage contextにより、所有PID44295のfocused非選択雨Space後、receipt13/7確認中の `AX children: -25202`（invalidUIElement）まで停止箇所を限定した。root causeは未特定。candidate logのIMK CFRunLoopWakeUpReliable mach-port messageも原因と確定しない。
+
+今回のrunnerは端点PNG3枚に加え、実sceneの雨を2.3秒後に岩へ選択し直した直後の `rock-crossing-muted` PNG3枚／2比較を準備したが、このbinaryの実行は端点／交差どちらのcaptureにも到達せず、PNGなし・正常Quitなし。owned failure cleanupのみ。directory0700／reportとcandidate log0600を確認した。追加capture手順を書いたことを実交差frame成功にせず、過去の別hashのPASS／FAIL／診断はversion固有証拠のまま保持する。retry／guard弱化／エラー抑制による再実行は行っていない。
+
+同じSHA256の厳密なAX寿命診断は `target/native-e2e/diagnosis-17E4F4DA-08F2-426E-A1BD-DDAEA0426F9B/ax-lifetime-observations.json`、2.32秒・FAIL、PID64051。予定したfocused岩→雨Spaceより前、雨→岩setupのreceipt2/1で最初のinvalidに停止した。invalid path0/0/1、CFHash1668309234は、それ以前の実読取りでrole AXGroup／title「雨の量」、親はunnamed AXGroup CFHash1668309138。同じidentityは初回読取り成功後、role／title／value／childrenが-25202となった。一方、所有設定root AXWindow／「設定」CFHash1668309122／PID64051は最初と最後のwalkで読取り可能だった。これは非atomicなAX tree観測中に除去された雨ノブdescendantが無効になった証拠であり、権限不足・focusやroot喪失の証拠ではない。UI全体の故障、正常Quit、選択case成功を示さず、全3files0600／directory0700、cleanupのみ・PNGなし。parentのAccessKit tree／remove semantics確認と根本対応判断は別に扱い、過去reportを変更しない。
+
+別の1回のretained-descendant discriminatorは `target/native-e2e/diagnosis-533B9B1D-61EC-41AE-9CD4-13B52F128C75/retained-descendant-observations.json`、2.41秒・exit0、同じe87797…binary、PID71014の実menu Quit正常0。focused雨Space前に実所有の岩「量／大きさ／硬さ」group／slider計6nodeを保持し、切替後は除去された6nodeすべてのAXChildrenが1回の読取りで-25202となった。同時に同じ所有設定window CFHash1668316085・PID・bounds・前面focusは有効、安定したmain／audio labelはexact雨3/2と消音、fresh雨ノブgroup／sliderは有効、menuは雨checked／岩uncheckedだった。これは実virtual descendantの正当なstalenessと全UI／focus喪失を区別した診断証拠。エラーretry／抑制はなく、full smoke／capture／選択case PASSではない。directory0700／全3files0600。receiptだけの限定再サンプルの設計判断はparentへ渡し、以前のFAILは保持する。
+
+この実staleness証拠を受け、parentはtyped `AXReadFailure` と `ReceiptObservation`（waiting／exact／invalidated）を導入し、receipt待ちだけにfresh owned-window snapshotの再観測を限定した。同じwindowとinvalid node PIDを検証し、既存5秒deadline内で待つ。最後の150msで安定した値不一致はFAIL、input／menu／capture guardの例外はcatchしない。これは確認済みのAX descendant寿命を扱う観測修正であり、入力再送／focus自動回復／権限回避ではない。修正直後はnative成功未観測として保持し、以下の新規実行を旧hash成功から推定せず別記する。
+
+### typed AX観測修正後の同一候補all成功
+
+修正後の通常 `--case all` は1回、37.08秒・exit0。`target/native-e2e/run-0D90E497-F697-4377-A653-BFB5489866F2/report.json` はschema1／selected_case all、2026-10-08T02:40:59Z〜02:41:35Z、binary SHA256 `e87797b28d18bc8159b05da3c27c26ae08558e65cd9512ed01db72182a89cfba`、binary／session／lifecycle／controls／situations／visualすべてPASS。実menu／⌘Q正常exit0のPIDはlifecycle75485／75643／75657、controls75662、situations75894、visual76810。過去のFAIL／診断／異なるhash成功を上書きせず、これを新しい同一候補のall証拠とする。
+
+今回の実stdoutには1回 `OBSERVE invalidated owned AX descendant (AXRole); discard receipt snapshot 6/5` があり、receipt-only invalidation処理を実行した後、exact receiptsを受理した。抜粋はrun内 `receipt-invalidated-observation.txt`0600、full transcript保存とはしない。situationsは0/0から16/10までの端点・focused-other・captureノブを成立させ、実scene雨→2.3秒後の岩再選択直後のcaptureも実行した。situationsは同じPID75894／window10458でPNG6枚／4比較、visualはPID76810／window10483でPNG3枚／2比較、計9枚すべて1920×1200。
+
+| 画像組 | crop x／y／width／height | 隣接変化pixel（割合） |
+|---|---|---|
+| 岩端点 | 192／180／1536／840 | 26,954（0.020890687）／59,374（0.046017795） |
+| 雨→岩選択直後 | 同上 | 45,109（0.034961713）／19,290（0.014950707） |
+| 雨visual | 同上 | 2,133（0.001653181）／1,441（0.001116846） |
+
+native担当は実PNG9枚すべてを目視し、端点では位置／半径が異なるgray／white同心円状の形とpersistent中央gray円、交差組の最初ではcyan／blueとgray／white双方の形、その後はgray形、雨visualでは異なる位置のcyan／blue形とpurple中央円を観測した。edge clippingと薄い水平形もあり、背景か粒かをすべて帰属させない。これは実窓frameの限定観測であり、exact gain／phase／brightness、可聴音、ガラス品質、物理同期を画像から証明しない。run0700、reportと初期46 artifactsすべて0600、追加抜粋を含む47filesもprivateであることを確認。画像はローカルのみ。source regression／実CPAL／native操作／画像／ユーザー聴感／P13採用と、P06の三実環境RTなど未完gateの境界を維持する。
+
+最終のbounded Native Spec／Standards再レビューはそれぞれconfidence0.97、correct／findings0。承認対象はreceipt-onlyのAX寿命区別とsourceのguard境界で、実native all成功は上記の別観測に基づく。最終Swift `--help` は実実行0.92秒・PASS。parentも今回reportの6checksがPASSでcurrent hash一致を直接読取り確認した。これらを試聴・P06／P13・物理同期・配布gateや未知のcommit／PRへ拡張しない。最終native追記前のdocs検査は0.42秒／本体96msでPASSだったが、今回の文書内容を含む最終docs検査の証拠ではない。
+
+### 固有レシピの参照欠落：fresh-context前後評価
+
+既存recipeだけをsystem参照として、tools／履歴なしのstateless completionへ「Rock3ノブ・menu選択・消音frame検証を探し、記載範囲とproof limitsを回答。不足を推定しない」という同一課題を変更前後に各1回実行した。baselineは `controls` の雨／風／音量と `visual` しか見つけられず、「Rock-specific runner、knob identities、menu items、acceptance contractがない」「only lifecycle/controls/visual/all」と回答し、岩を別appと誤解する欠落も露呈した。
+
+最小更新として既存case表に `situations` を追加し、capture不足はvisualだけでなくsituations画像段階もblocked、独立lifecycle／controlsは継続、receiptは実gain／可聴出力ではないと対応付けた。変更後のfresh-context回答は `--case situations`、量／大きさ／硬さ、雨→岩の最新対象とmenu mark、消音volume0／10／20→解除20%→再消音、PNG3枚／2比較／正常Quitを取得し、実gain・音・粒だけ・同期・P13候補値の限界も区別した。画像間隔／閾値などrecipe単独にない実装細部は未記載として報告した。これはpure-reference retrieval gapの実前後評価であり、5-rep wording microtestはN/A、agent-pressure／自然遵守率や実native成功の試験ではない。新docs／runner／discipline redesignは追加していない。
+
+最終caseのfocused-other keyboard選択とcaptureノブを既存rowへ反映後、同じ課題をrecipeだけのfresh-context stateless completionへもう1回適用した。`situations`、3ノブ、menu／最新対象、消音制御、雨Space→岩Return、実size100／hardness0、PNG3枚／2比較／正常Quitを取得し、capture値を品質採用値やreceiptを実gain／可聴出力にしなかった。未記載の閾値／実装細部／実行結果は推定せず不足として報告した。前後各1回に加えた最終更新後1回のpure-reference評価であり、pressure試験や5-rep wording実験ではない。
+
+交差capture追加の参照評価も変更前後に各1回、recipeだけのfresh-context completionで実行した。同じRock3ノブ／menu／消音frame課題に「実雨→岩交差の独立capture段階と枚数」を加えたbaselineは「separate crossing-frame stageは未記載、3PNG／2比較は対象／markとは別で交差証拠にできない」と回答した。既存case rowへ独立`rock-crossing-muted`段階を追記後は、雨選択から2.3秒後の岩再選択直後、追加3PNG／2比較、計6PNG／4比較を取得し、実gain／同期／可聴出力／現run成功とは分離した。pure-reference gapの前後適用であり、pressureや実native成功の試験ではない。

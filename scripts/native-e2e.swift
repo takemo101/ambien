@@ -11,6 +11,13 @@ struct Failure: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
+struct AXReadFailure: Error, CustomStringConvertible {
+    let element: AXUIElement
+    let name: String
+    let status: AXError
+    var description: String { "AX \(name): \(status.rawValue)" }
+}
+
 func require(_ condition: Bool, _ message: String) throws {
     if !condition { throw Failure(message) }
 }
@@ -28,9 +35,10 @@ func waitFor(_ message: String, _ predicate: () throws -> Bool) throws {
 func attribute(_ element: AXUIElement, _ name: String) throws -> CFTypeRef {
     var value: CFTypeRef?
     let result = AXUIElementCopyAttributeValue(element, name as CFString, &value)
-    guard result == .success, let value else {
-        throw Failure("AX \(name): \(result.rawValue)")
+    guard result == .success else {
+        throw AXReadFailure(element: element, name: name, status: result)
     }
+    guard let value else { throw Failure("AX \(name) has no value after success") }
     return value
 }
 
@@ -38,8 +46,11 @@ func children(_ element: AXUIElement) throws -> [AXUIElement] {
     var value: CFTypeRef?
     let result = AXUIElementCopyAttributeValue(element, "AXChildren" as CFString, &value)
     if result == .noValue || result == .attributeUnsupported { return [] }
-    guard result == .success, let result = value as? [AXUIElement] else {
-        throw Failure("AX children: \(result.rawValue)")
+    guard result == .success else {
+        throw AXReadFailure(element: element, name: "children", status: result)
+    }
+    guard let result = value as? [AXUIElement] else {
+        throw Failure("AXChildren is not an array")
     }
     return result
 }
@@ -344,7 +355,9 @@ func optional(_ node: AXUIElement, _ name: String) throws -> CFTypeRef? {
     var value: CFTypeRef?
     let result = AXUIElementCopyAttributeValue(node, name as CFString, &value)
     if result == .noValue || result == .attributeUnsupported { return nil }
-    guard result == .success else { throw Failure("AX \(name): \(result.rawValue)") }
+    guard result == .success else {
+        throw AXReadFailure(element: node, name: name, status: result)
+    }
     return value
 }
 
@@ -370,6 +383,14 @@ func named(_ window: AXUIElement, role: String, name: String) throws -> AXUIElem
     return nil
 }
 
+func segment(_ window: AXUIElement, label: String) throws -> AXUIElement {
+    guard let group = try named(window, role: "AXGroup", name: "シチュエーション"),
+          let labelNode = try named(group, role: "AXRadioButton", name: label) else {
+        throw Failure("Owned selector label missing: \(label)")
+    }
+    return labelNode
+}
+
 func line(_ window: AXUIElement, prefix: String) throws -> String? {
     for node in try ownNodes(window) where try text(node, "AXRole") == "AXStaticText" {
         for key in ["AXTitle", "AXDescription", "AXValue"] {
@@ -390,20 +411,50 @@ func generations(_ value: String) throws -> (Int, Int) {
     return (settings, manual)
 }
 
-func expectReceipt(_ window: AXUIElement, settings: Int, manual: Int) throws {
-    func matches() throws -> Bool {
-        guard let main = try line(window, prefix: "現在の設定:"),
-              let receipt = try line(window, prefix: "音声側の受理:") else { return false }
-        let m = try generations(main), r = try generations(receipt)
-        try require(m.0 <= settings && m.1 <= manual && r.0 <= settings && r.1 <= manual,
-                    "Unexpected/duplicate revision: main=\(main), receipt=\(receipt), expected=\(settings)/\(manual)")
-        return m.0 == settings && m.1 == manual && r.0 == settings && r.1 == manual &&
-            !receipt.contains("受理待ち")
+enum ReceiptObservation {
+    case waiting, exact, invalidated
+}
+
+func expectReceipt(_ candidate: Candidate, _ window: AXUIElement, settings: Int, manual: Int) throws {
+    func requireSameWindow() throws {
+        let current = try candidate.settings()
+        try require(CFEqual(current, window), "Owned settings window changed during receipt observation")
     }
-    try waitFor("main endpoints and actual audio receipt \(settings)/\(manual)", matches)
-    // Ensure a second asynchronous handler does not make a transient exact value pass.
+    func observe() throws -> ReceiptObservation {
+        try requireSameWindow()
+        do {
+            guard let main = try line(window, prefix: "現在の設定:"),
+                  let receipt = try line(window, prefix: "音声側の受理:") else { return .waiting }
+            let m = try generations(main), r = try generations(receipt)
+            try require(m.0 <= settings && m.1 <= manual && r.0 <= settings && r.1 <= manual,
+                        "Unexpected/duplicate revision: main=\(main), receipt=\(receipt), expected=\(settings)/\(manual)")
+            return m.0 == settings && m.1 == manual && r.0 == settings && r.1 == manual &&
+                !receipt.contains("受理待ち") ? .exact : .waiting
+        } catch let failure as AXReadFailure
+            where failure.status == .invalidUIElement && !CFEqual(failure.element, window) {
+            // AccessKit destroys removed virtual descendants while this non-atomic
+            // walk is in flight. Discard the whole observation, never a required field.
+            var pid: pid_t = 0
+            try require(AXUIElementGetPid(failure.element, &pid) == .success && pid == candidate.pid,
+                        "Invalidated receipt descendant does not belong to the candidate")
+            try requireSameWindow()
+            print("OBSERVE invalidated owned AX descendant (\(failure.name)); discard receipt snapshot \(settings)/\(manual)")
+            return .invalidated
+        }
+    }
+    try waitFor("main endpoints and actual audio receipt \(settings)/\(manual)") {
+        try observe() == .exact
+    }
+    // A late duplicate remains a failure; only invalidated observations may be
+    // replaced within the existing bounded wait, not mismatching stable values.
     RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.15))
-    try require(try matches(), "Expected receipt did not remain exact \(settings)/\(manual)")
+    try waitFor("stable exact receipt \(settings)/\(manual)") {
+        switch try observe() {
+        case .exact: return true
+        case .invalidated: return false
+        case .waiting: throw Failure("Expected receipt did not remain exact \(settings)/\(manual)")
+        }
+    }
 }
 
 func isForeground(_ candidate: Candidate, _ window: AXUIElement) throws -> Bool {
@@ -528,15 +579,15 @@ func focus(_ node: AXUIElement) throws {
     try waitFor("slider focus acknowledged") { (try optional(node, "AXFocused") as? Bool) == true }
 }
 
-func menuMarked(_ candidate: Candidate) throws -> Bool {
+func menuMarked(_ candidate: Candidate, title: String = "消音") throws -> Bool {
     let raw = try attribute(candidate.app, "AXMenuBar")
     try require(CFGetTypeID(raw) == AXUIElementGetTypeID(), "Menu bar is not AX element")
-    guard let item = try findMenu(raw as! AXUIElement, title: "消音") else { throw Failure("Mute menu missing") }
+    guard let item = try findMenu(raw as! AXUIElement, title: title) else { throw Failure("Menu missing: \(title)") }
     var value: CFTypeRef?
     let result = AXUIElementCopyAttributeValue(item, "AXMenuItemMarkChar" as CFString, &value)
     if result == .noValue { return false } // Native unchecked menu item representation.
     guard result == .success, let mark = value as? String else {
-        throw Failure("AXMenuItemMarkChar unreadable: \(result.rawValue)")
+        throw Failure("AXMenuItemMarkChar unreadable for \(title): \(result.rawValue)")
     }
     return !mark.isEmpty
 }
@@ -567,19 +618,16 @@ func controls(_ executable: URL, artifacts: URL) throws -> String {
         let window = try candidate.settings()
         try foreground(candidate, window)
         try waitFor("controlled metadata and readable main summary") { try line(window, prefix: "現在の設定:") != nil }
-        try expectReceipt(window, settings: 0, manual: 0)
+        try expectReceipt(candidate, window, settings: 0, manual: 0)
         try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: 雨 /") == true,
                     "Initial selected situation is not rain")
         try key(candidate, window, code: 48) // Tab to selected segment.
         try key(candidate, window, code: 49) // Space.
-        try expectReceipt(window, settings: 1, manual: 1)
+        try expectReceipt(candidate, window, settings: 1, manual: 1)
         try key(candidate, window, code: 36) // Return.
-        try expectReceipt(window, settings: 2, manual: 2)
-        guard let selector = try named(window, role: "AXGroup", name: "シチュエーション") else {
-            throw Failure("Selector metadata missing")
-        }
-        try click(candidate, window, selector)
-        try expectReceipt(window, settings: 3, manual: 3)
+        try expectReceipt(candidate, window, settings: 2, manual: 2)
+        try click(candidate, window, try segment(window, label: "雨"))
+        try expectReceipt(candidate, window, settings: 3, manual: 3)
         try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: 雨 /") == true,
                     "Explicit reselection changed rain target")
         evidence.append("rain metadata + selected Space/Enter/mouse exactly1 settings/manual each; receipt3/3")
@@ -588,27 +636,27 @@ func controls(_ executable: URL, artifacts: URL) throws -> String {
         let rainAfter = rainBefore < 100 ? min(100, rainBefore + 1) : rainBefore - 1
         try focus(rain); try key(candidate, window, code: rainBefore < 100 ? 124 : 123)
         try waitFor("rain knob accepts one step to \(rainAfter)") { abs(try number(rain) - rainAfter) < 0.001 }
-        try expectReceipt(window, settings: 4, manual: 4)
+        try expectReceipt(candidate, window, settings: 4, manual: 4)
         let wind = try slider(window, label: "風の量")
         let windBefore = try number(wind)
         let windAfter = windBefore < 100 ? min(100, windBefore + 1) : windBefore - 1
         try focus(wind); try key(candidate, window, code: windBefore < 100 ? 124 : 123)
         try waitFor("wind knob accepts one step to \(windAfter)") { abs(try number(wind) - windAfter) < 0.001 }
-        try expectReceipt(window, settings: 5, manual: 5)
+        try expectReceipt(candidate, window, settings: 5, manual: 5)
         try candidate.menu("消音")
         try waitFor("menu mute reflected in switch/check") { try number(mute(window)) == 1 && menuMarked(candidate) }
-        try expectReceipt(window, settings: 6, manual: 5)
+        try expectReceipt(candidate, window, settings: 6, manual: 5)
         let volume = try slider(window, label: "アプリの音量")
         try foreground(candidate, window); try focus(volume)
         try key(candidate, window, code: 115) // Home.
         try waitFor("volume reaches0") { abs(try number(volume)) < 0.001 }
-        try expectReceipt(window, settings: 7, manual: 5)
+        try expectReceipt(candidate, window, settings: 7, manual: 5)
         try require(try number(mute(window)) == 1 && menuMarked(candidate), "Volume0 unmuted")
         for revision in 8...9 {
             try key(candidate, window, code: 116) // PageUp = +10%.
             let expected = Double(revision - 7) * 10
             try waitFor("volume reaches\(expected)") { abs(try number(volume) - expected) < 0.001 }
-            try expectReceipt(window, settings: revision, manual: 5)
+            try expectReceipt(candidate, window, settings: revision, manual: 5)
             try require(try number(mute(window)) == 1 && menuMarked(candidate), "Volume operation unmuted")
         }
         let oldY = try position(volume).y
@@ -616,14 +664,14 @@ func controls(_ executable: URL, artifacts: URL) throws -> String {
         try waitFor("actual scroll changes viewport") { abs(try position(volume).y - oldY) > 1 }
         try require((try optional(volume, "AXFocused") as? Bool) == true, "Viewport update lost volume focus")
         try require(CFEqual(volume, try slider(window, label: "アプリの音量")), "Viewport rebuilt control identity")
-        try expectReceipt(window, settings: 9, manual: 5)
+        try expectReceipt(candidate, window, settings: 9, manual: 5)
         evidence.append("rain \(rainBefore)→\(rainAfter)/wind \(windBefore)→\(windAfter); menu mute switch+mark; muted volume0/10/20 manual5; real viewport scroll preserves focus/AX identity and receipt9/5")
         let toggle = try mute(window), toggleBounds = try bounds(toggle)
         try require((try bounds(window)).contains(CGPoint(x: toggleBounds.midX, y: toggleBounds.midY)),
                     "Mute switch outside viewport")
         try press(toggle)
         try waitFor("settings unmute reflected in menu") { try number(mute(window)) == 0 && !menuMarked(candidate) }
-        try expectReceipt(window, settings: 10, manual: 5)
+        try expectReceipt(candidate, window, settings: 10, manual: 5)
         try require(abs(try number(volume) - 20) < 0.001, "Unmute lost latest volume")
         try press(try attribute(window, "AXCloseButton") as! AXUIElement)
         try candidate.expectWindows(1)
@@ -635,12 +683,175 @@ func controls(_ executable: URL, artifacts: URL) throws -> String {
                     abs(try number(slider(restored, label: "雨の量")) - rainAfter) < 0.001 &&
                     abs(try number(slider(restored, label: "風の量")) - windAfter) < 0.001,
                     "Recreated settings lost current main controls")
-        try expectReceipt(restored, settings: 10, manual: 5)
+        try expectReceipt(candidate, restored, settings: 10, manual: 5)
         evidence.append("settings unmute keeps20%; close/recreate keeps edited rain/wind/unmuted20/main receipt10/5")
         try candidate.menu("終了"); try candidate.expectExit()
         evidence.append("real menu Quit; owned PID \(candidate.pid) disappeared normal exit0")
     }
     return evidence.joined(separator: "; ")
+}
+
+func situations(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
+    var evidence: [String] = []
+    var stage = "candidate launch"
+    do {
+        try withCandidate(executable, artifacts: artifacts) { candidate in
+            func receipt(_ window: AXUIElement, settings: Int, manual: Int) throws {
+                stage = "receipt \(settings)/\(manual) after \(stage)"
+                try expectReceipt(candidate, window, settings: settings, manual: manual)
+            }
+            stage = "open settings"
+            try candidate.menu("設定…"); try candidate.expectWindows(2)
+            let window = try candidate.settings()
+            stage = "settings foreground"
+            try foreground(candidate, window)
+            try receipt(window, settings: 0, manual: 0)
+            stage = "menu mute"
+            try candidate.menu("消音")
+            try receipt(window, settings: 1, manual: 0)
+            stage = "menu rock"
+            try candidate.menu("岩")
+            try receipt(window, settings: 2, manual: 1)
+            stage = "rock target form/receipt/menu consistency"
+            try waitFor("registered rock target in form, accepted manual display, and menu mark") {
+                let main = try line(window, prefix: "現在の設定:")
+                let receipt = try line(window, prefix: "音声側の受理:")
+                let rockMarked = try menuMarked(candidate, title: "岩")
+                let rainMarked = try menuMarked(candidate, title: "雨")
+                return main?.hasPrefix("現在の設定: 岩 /") == true &&
+                    receipt?.contains("手動の表示対象 岩") == true && rockMarked && !rainMarked
+            }
+            stage = "rock metadata sliders and initial values"
+            let amount = try slider(window, label: "岩の量")
+            let size = try slider(window, label: "大きさ")
+            let hardness = try slider(window, label: "硬さ")
+            let initials = [try number(amount), try number(size), try number(hardness)]
+            stage = "rock size Home0"
+            try focus(size); try key(candidate, window, code: 115)
+            try waitFor("smallest-rock size0") { abs(try number(size)) < 0.001 }
+            try receipt(window, settings: 3, manual: 2)
+            stage = "rock hardness End100"
+            try focus(hardness); try key(candidate, window, code: 119)
+            try waitFor("hardness upper endpoint100") { abs(try number(hardness) - 100) < 0.001 }
+            try receipt(window, settings: 4, manual: 3)
+            stage = "rock amount End100"
+            try focus(amount); try key(candidate, window, code: 119)
+            try waitFor("rock amount upper endpoint100") { abs(try number(amount) - 100) < 0.001 }
+            try receipt(window, settings: 5, manual: 4)
+            stage = "settings pointer rain"
+            try click(candidate, window, try segment(window, label: "雨"))
+            try receipt(window, settings: 6, manual: 5)
+            stage = "pointer rain main/menu consistency"
+            try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: 雨 /") == true &&
+                        (try menuMarked(candidate, title: "雨")) && !(try menuMarked(candidate, title: "岩")),
+                        "Settings rain selection and generic menu disagree")
+            stage = "settings pointer rock"
+            try click(candidate, window, try segment(window, label: "岩"))
+            try receipt(window, settings: 7, manual: 6)
+            stage = "pointer rock main/menu consistency"
+            try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: 岩 /") == true &&
+                        (try menuMarked(candidate, title: "岩")) && !(try menuMarked(candidate, title: "雨")),
+                        "Settings rock selection and generic menu disagree")
+            stage = "muted volume Home0"
+            let volume = try slider(window, label: "アプリの音量")
+            try focus(volume); try key(candidate, window, code: 115)
+            try waitFor("muted volume0") { abs(try number(volume)) < 0.001 }
+            try receipt(window, settings: 8, manual: 6)
+            for revision in 9...10 {
+                let expected = Double(revision - 8) * 10
+                stage = "muted volume PageUp\(expected)"
+                try key(candidate, window, code: 116)
+                try waitFor("muted volume\(expected)") { abs(try number(volume) - expected) < 0.001 }
+                try receipt(window, settings: revision, manual: 6)
+                stage = "volume\(expected) retained mute"
+                try require(try number(mute(window)) == 1 && menuMarked(candidate), "Volume operation unmuted")
+            }
+            stage = "menu unmute latest20"
+            try candidate.menu("消音")
+            try receipt(window, settings: 11, manual: 6)
+            stage = "unmute volume/mute/menu consistency"
+            try require(try number(mute(window)) == 0 && !menuMarked(candidate) &&
+                        abs(try number(volume) - 20) < 0.001, "Unmute lost latest20% endpoint")
+            stage = "menu remute"
+            try candidate.menu("消音")
+            try receipt(window, settings: 12, manual: 6)
+            stage = "remute form/menu consistency"
+            try require(try number(mute(window)) == 1 && menuMarked(candidate), "Capture setup did not mute")
+            stage = "focused nonselected rain Space"
+            try focus(try segment(window, label: "雨"))
+            try key(candidate, window, code: 49)
+            try receipt(window, settings: 13, manual: 7)
+            stage = "Space rain main/menu/radio consistency"
+            try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: 雨 /") == true &&
+                        (try menuMarked(candidate, title: "雨")) && !(try menuMarked(candidate, title: "岩")) &&
+                        (try number(try segment(window, label: "雨"))) == 1,
+                        "Space activated current target instead of focused rain choice")
+            stage = "focused nonselected rock Return"
+            try focus(try segment(window, label: "岩"))
+            try key(candidate, window, code: 36)
+            try receipt(window, settings: 14, manual: 8)
+            stage = "Return rock main/menu/radio/mute consistency"
+            try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: 岩 /") == true &&
+                        (try menuMarked(candidate, title: "岩")) && !(try menuMarked(candidate, title: "雨")) &&
+                        (try number(try segment(window, label: "岩"))) == 1 &&
+                        (try number(mute(window))) == 1,
+                        "Return activated current target instead of focused rock choice, or unmuted")
+            stage = "large-rock capture size End100"
+            let captureSize = try slider(window, label: "大きさ")
+            try focus(captureSize); try key(candidate, window, code: 119)
+            try waitFor("capture size100") { abs(try number(captureSize) - 100) < 0.001 }
+            try receipt(window, settings: 15, manual: 9)
+            stage = "soft-rock capture hardness Home0"
+            let captureHardness = try slider(window, label: "硬さ")
+            try focus(captureHardness); try key(candidate, window, code: 115)
+            try waitFor("capture hardness0") { abs(try number(captureHardness)) < 0.001 }
+            try receipt(window, settings: 16, manual: 10)
+            stage = "capture target/mute/menu consistency"
+            try require((try line(window, prefix: "現在の設定:"))?.hasPrefix("現在の設定: 岩 /") == true &&
+                        (try number(mute(window))) == 1 && (try menuMarked(candidate)) &&
+                        (try menuMarked(candidate, title: "岩")), "Capture edits changed target or mute")
+            let selectedAt = DispatchTime.now().uptimeNanoseconds
+            stage = "post-selection capture separation"
+            // This delay separates capture from selection; it is NOT proof of DSP arrival.
+            while DispatchTime.now().uptimeNanoseconds - selectedAt < 2_300_000_000 {
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            }
+            evidence.append("Registered menu/settings rock; three knob metadata initials \(initials); size0/hardness100/amount100 receipts5/4; settings pointer rain→rock latest7/6; muted volume0/10/20 manual6; unmute20 then remute receipt12/6; focused-other rain Space13/7 then rock Return14/8; large/soft capture size100/hardness0 latest16/10 with retained rock/mute. Receipt proves accepted target, not actual gains/audible output.")
+            stage = "settings close before owned scene capture"
+            try press(try attribute(window, "AXCloseButton") as! AXUIElement)
+            try candidate.expectWindows(1)
+            stage = "three owned muted rock scene captures and two cropped comparisons"
+            evidence.append(try sceneFrames(candidate, try candidate.scene(), executable: executable,
+                                            helper: helper, artifacts: artifacts, prefix: "rock-muted"))
+            stage = "scene menu rain before live crossing captures"
+            try candidate.menu("雨")
+            try require((try menuMarked(candidate, title: "雨")) &&
+                        !(try menuMarked(candidate, title: "岩")) &&
+                        (try menuMarked(candidate)), "Scene menu rain selection lost target or mute")
+            let rainSelectedAt = DispatchTime.now().uptimeNanoseconds
+            stage = "rain selection separation before rock return"
+            // Separates the two selections; elapsed wall time is not DSP arrival proof.
+            while DispatchTime.now().uptimeNanoseconds - rainSelectedAt < 2_300_000_000 {
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            }
+            stage = "scene menu rock and immediate live crossing captures"
+            try candidate.menu("岩")
+            try require((try menuMarked(candidate, title: "岩")) &&
+                        !(try menuMarked(candidate, title: "雨")) &&
+                        (try menuMarked(candidate)), "Scene menu rock return lost target or mute")
+            evidence.append(try sceneFrames(candidate, try candidate.scene(), executable: executable,
+                                            helper: helper, artifacts: artifacts, prefix: "rock-crossing-muted"))
+            evidence.append("After endpoint frames, actual scene menu rain→2.3s wall separation→rock with target/mute marks; second three-frame capture helper started without an endpoint delay after rock return. Images prove live rendered-frame changes, not exact DSP gains, crossing phase, arrival timing, or gain-dependent brightness.")
+            stage = "normal menu Quit"
+            try candidate.menu("終了"); try candidate.expectExit()
+            evidence.append("Real menu Quit; owned PID \(candidate.pid) disappeared normal exit0")
+        }
+    } catch let blocked as Blocked {
+        throw Blocked("situations stage=\(stage); \(blocked)")
+    } catch {
+        throw Failure("situations stage=\(stage); \(error)")
+    }
+    return evidence.joined(separator: "\n")
 }
 
 func privateFile(_ data: Data, at url: URL) throws {
@@ -726,8 +937,72 @@ func screenshotHelper(_ script: URL, arguments: [String], artifacts: URL) throws
     return HelperResult(status: status, json: json, evidence: String(decoding: data, as: UTF8.self))
 }
 
+func sceneFrames(_ candidate: Candidate, _ scene: AXUIElement, executable: URL,
+                 helper: URL, artifacts: URL, prefix: String) throws -> String {
+    guard CGPreflightScreenCaptureAccess() else {
+        throw Blocked("Screen Recording unavailable (CGPreflightScreenCaptureAccess=false); no capture requested, no PNG fabricated. User must prepare authorization externally.")
+    }
+    guard FileManager.default.fileExists(atPath: helper.path) else {
+        throw Blocked("Screenshot helper missing at \(helper.path)")
+    }
+    try foreground(candidate, scene)
+    let initialBounds = try bounds(scene)
+    let id = try windowID(candidate, scene)
+    var evidence: [String] = []
+    var images: [URL] = []
+    for index in 1...3 {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.35))
+        try requireSession()
+        try require(try isForeground(candidate, scene), "Scene no longer foreground before capture")
+        try require(try bounds(scene) == initialBounds && windowID(candidate, scene) == id,
+                    "Scene frame or owned CG window changed between captures")
+        try require(try menuMarked(candidate), "Menu unexpectedly unmuted during visual evidence")
+        let image = artifacts.appendingPathComponent("\(prefix)-\(index).png")
+        let result = try screenshotHelper(helper, arguments: [
+            "capture", "--pid", String(candidate.pid), "--window-id", String(id), "--output", image.path,
+        ], artifacts: artifacts)
+        if result.status == "blocked" { throw Blocked(result.evidence) }
+        try require(result.status == "pass", "Own-window capture failed: \(result.evidence)")
+        guard let owner = result.json["pid"] as? NSNumber,
+              let capturedID = result.json["window_id"] as? NSNumber,
+              let path = result.json["executable"] as? String,
+              let output = result.json["output"] as? String,
+              let windowOnly = result.json["window_only"] as? Bool else {
+            throw Failure("Capture lacks owned identity evidence: \(result.evidence)")
+        }
+        try require(owner.int32Value == candidate.pid && capturedID.uint32Value == id &&
+                    URL(fileURLWithPath: path).resolvingSymlinksInPath() == executable &&
+                    output == image.path && windowOnly && FileManager.default.fileExists(atPath: image.path),
+                    "Capture identity/output does not match owned candidate: \(result.evidence)")
+        images.append(image)
+        evidence.append(result.evidence)
+    }
+    var comparisonFailures: [String] = []
+    var comparisonBlockers: [String] = []
+    for index in 1..<images.count {
+        let result = try screenshotHelper(helper, arguments: [
+            "compare", images[index - 1].path, images[index].path,
+        ], artifacts: artifacts)
+        evidence.append(result.evidence)
+        if result.status == "fail" { comparisonFailures.append(result.evidence) }
+        if result.status == "blocked" { comparisonBlockers.append(result.evidence) }
+        if result.status == "pass" {
+            guard let changed = result.json["changed_pixels"] as? NSNumber,
+                  let fraction = result.json["changed_fraction"] as? NSNumber,
+                  result.json["crop"] is [String: Any], changed.intValue > 0,
+                  fraction.doubleValue.isFinite, fraction.doubleValue > 0,
+                  fraction.doubleValue <= 1 else {
+                throw Failure("Compare pass lacks valid cropped pixel-change measurements: \(result.evidence)")
+            }
+        }
+    }
+    if !comparisonFailures.isEmpty { throw Failure(comparisonFailures.joined(separator: "; ")) }
+    if !comparisonBlockers.isEmpty { throw Blocked(comparisonBlockers.joined(separator: "; ")) }
+    evidence.append("Owned scene PID \(candidate.pid), CGWindowID \(id); real menu mute; three spaced actual PNGs/two changed cropped-interior pairs. Evidence only rendered-frame change: not audible silence, particle identity, physical synchronization, or subjective glass/music. Through-glass background can affect pixels.")
+    return evidence.joined(separator: "\n")
+}
+
 func visual(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
-    // No capture API capable of prompting is invoked when this public preflight is false.
     guard CGPreflightScreenCaptureAccess() else {
         throw Blocked("Screen Recording unavailable (CGPreflightScreenCaptureAccess=false); no capture requested, no PNG fabricated. User must prepare authorization externally.")
     }
@@ -739,70 +1014,18 @@ func visual(_ executable: URL, helper: URL, artifacts: URL) throws -> String {
         let scene = try candidate.scene()
         try candidate.menu("設定…"); try candidate.expectWindows(2)
         let settings = try candidate.settings()
-        try expectReceipt(settings, settings: 0, manual: 0)
+        try expectReceipt(candidate, settings, settings: 0, manual: 0)
         try candidate.menu("消音")
         try waitFor("visual menu mute reflected in settings and menu mark") {
             try number(mute(settings)) == 1 && menuMarked(candidate)
         }
-        try expectReceipt(settings, settings: 1, manual: 0)
+        try expectReceipt(candidate, settings, settings: 1, manual: 0)
         try press(try attribute(settings, "AXCloseButton") as! AXUIElement)
         try candidate.expectWindows(1)
-        try foreground(candidate, scene)
-        let initialBounds = try bounds(scene)
-        let id = try windowID(candidate, scene)
-        var images: [URL] = []
-        for index in 1...3 {
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.35))
-            try requireSession()
-            try require(try isForeground(candidate, scene), "Scene no longer foreground before capture")
-            try require(try bounds(scene) == initialBounds && windowID(candidate, scene) == id,
-                        "Scene frame or owned CG window changed between captures")
-            try require(try menuMarked(candidate), "Menu unexpectedly unmuted during visual evidence")
-            let image = artifacts.appendingPathComponent("scene-muted-\(index).png")
-            let result = try screenshotHelper(helper, arguments: [
-                "capture", "--pid", String(candidate.pid), "--window-id", String(id), "--output", image.path,
-            ], artifacts: artifacts)
-            if result.status == "blocked" { throw Blocked(result.evidence) }
-            try require(result.status == "pass", "Own-window capture failed: \(result.evidence)")
-            guard let owner = result.json["pid"] as? NSNumber,
-                  let capturedID = result.json["window_id"] as? NSNumber,
-                  let path = result.json["executable"] as? String,
-                  let output = result.json["output"] as? String,
-                  let windowOnly = result.json["window_only"] as? Bool else {
-                throw Failure("Capture lacks owned identity evidence: \(result.evidence)")
-            }
-            try require(owner.int32Value == candidate.pid && capturedID.uint32Value == id &&
-                        URL(fileURLWithPath: path).resolvingSymlinksInPath() == executable &&
-                        output == image.path && windowOnly && FileManager.default.fileExists(atPath: image.path),
-                        "Capture identity/output does not match owned candidate: \(result.evidence)")
-            images.append(image)
-            evidence.append(result.evidence)
-        }
-        // Both spaced pairs must change in helper's cropped interior. A single transient
-        // repaint is insufficient; no subjective/audible/physical-sync claim is made.
-        var comparisonFailures: [String] = []
-        var comparisonBlockers: [String] = []
-        for index in 1..<images.count {
-            let result = try screenshotHelper(helper, arguments: [
-                "compare", images[index - 1].path, images[index].path,
-            ], artifacts: artifacts)
-            evidence.append(result.evidence)
-            if result.status == "fail" { comparisonFailures.append(result.evidence) }
-            if result.status == "blocked" { comparisonBlockers.append(result.evidence) }
-            if result.status == "pass" {
-                guard let changed = result.json["changed_pixels"] as? NSNumber,
-                      let fraction = result.json["changed_fraction"] as? NSNumber,
-                      result.json["crop"] is [String: Any], changed.intValue > 0,
-                      fraction.doubleValue.isFinite, fraction.doubleValue > 0,
-                      fraction.doubleValue <= 1 else {
-                    throw Failure("Compare pass lacks valid cropped pixel-change measurements: \(result.evidence)")
-                }
-            }
-        }
+        evidence.append(try sceneFrames(candidate, scene, executable: executable,
+                                        helper: helper, artifacts: artifacts, prefix: "scene-muted"))
         try candidate.menu("終了"); try candidate.expectExit()
-        if !comparisonFailures.isEmpty { throw Failure(comparisonFailures.joined(separator: "; ")) }
-        if !comparisonBlockers.isEmpty { throw Blocked(comparisonBlockers.joined(separator: "; ")) }
-        evidence.append("Owned scene PID \(candidate.pid), CGWindowID \(id); real menu mute; three spaced actual PNGs/two changed cropped-interior pairs; menu Quit normal exit0. Evidence only rendered-frame change while muted: not audible silence, particle identity, physical synchronization, or subjective glass/music. Through-glass background can affect pixels.")
+        evidence.append("Real menu Quit; owned PID \(candidate.pid) disappeared normal exit0")
     }
     return evidence.joined(separator: "\n")
 }
@@ -860,7 +1083,7 @@ final class Checks {
 }
 
 let usage = """
-Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|visual|all] [--artifacts PARENT_DIR]
+Usage: /usr/bin/swift scripts/native-e2e.swift /absolute/path/to/ambien [--case lifecycle|controls|situations|visual|all] [--artifacts PARENT_DIR]
        /usr/bin/swift scripts/native-e2e.swift --help
 
 Default case: all. Each run creates a unique private directory (0700) under
@@ -869,8 +1092,8 @@ and authorized own-window PNG/helper measurements. No permission prompts,
 desktop captures, image uploads, or production test hooks.
 
 Exit: 0 every selected case passed; 1 any failure; 77 prerequisites blocked
-when no failure. Missing capture permission blocks visual only; independent
-lifecycle/controls still run. Null lock metadata alone is not unlocked proof.
+when no failure. Missing capture permission blocks visual/situations image stages;
+independent lifecycle/controls still run. Null lock metadata alone is not unlocked proof.
 Visual evidence is rendered-frame change while muted, not audible silence,
 particle identity, physical synchronization, or subjective glass/music.
 """
@@ -896,7 +1119,7 @@ struct Options {
                         "Unknown, duplicate, or incomplete argument: \(option)\n\(usage)")
             let value = arguments[index + 1]
             if option == "--case" {
-                try require(["lifecycle", "controls", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
+                try require(["lifecycle", "controls", "situations", "visual", "all"].contains(value), "Unknown case \(value)\n\(usage)")
                 selected = value
             } else {
                 try require(!value.isEmpty && !value.hasPrefix("--"), "Invalid artifacts parent\n\(usage)")
@@ -952,13 +1175,15 @@ do {
     let nativeReady = checks.checks.last?.status == "pass" && binaryReady
     let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
         .deletingLastPathComponent().appendingPathComponent("native-screenshot.swift")
-    for selected in ["lifecycle", "controls", "visual"] where options.selected == "all" || options.selected == selected {
+    for selected in ["lifecycle", "controls", "situations", "visual"] where options.selected == "all" || options.selected == selected {
         let expected: String
         switch selected {
         case "lifecycle":
             expected = "Real menus, same settings singleton, minimize/restore and disabled zoom on both windows, settings Cmd-comma recreation, scene close/zero-window/menu recreation, menu Quit and foreground Cmd-Q from both windows with real PID disappearance/normal0"
         case "controls":
             expected = "P03 current rain metadata; exact main/audio settings+manual receipts for selected Space/Enter/mouse, real rain/wind edits, menu mute/mark, muted volume0/10/20, real scroll with unchanged revisions/focus/AX identity, settings unmute latest20%, close/recreate retaining main controls, menu Quit normal0"
+        case "situations":
+            expected = "Registered rock menu/settings and owned labeled radio choices; exact accepted target revisions and menu marks; rock amount/size/hardness endpoints; settings pointer rain→rock latest selection; muted volume0/10/20 then unmute latest20 and remute; focused-other rain Space and rock Return with exact target receipts/radio/menu/main; real size100/hardness0 edits for large/soft muted capture latest16/10; three owned muted endpoint PNGs/two interior-change pairs; actual scene menu rain then rock return immediately initiating another three owned muted PNGs/two pairs; menu Quit normal0. Not actual-gain, audible, particle-only, exact crossing timing/brightness or physical-sync proof."
         default:
             expected = "Authorized actual owned scene-window PNGs; real menu mute; stable CG owner/bounds; three spaced captures; two cropped-interior nonblank/nontransparent pixel-change comparisons; retained PNGs and measurements; menu Quit normal0"
         }
@@ -967,6 +1192,7 @@ do {
             switch selected {
             case "lifecycle": return try lifecycle(options.executable, artifacts: artifacts)
             case "controls": return try controls(options.executable, artifacts: artifacts)
+            case "situations": return try situations(options.executable, helper: helper, artifacts: artifacts)
             default: return try visual(options.executable, helper: helper, artifacts: artifacts)
             }
         }

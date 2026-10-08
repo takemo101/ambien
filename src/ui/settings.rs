@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use ely::{
-    buttons::SegmentedControl,
-    forms::{FormField, Slider, Switch},
+    forms::{FormField, Radio, Slider, Switch},
     primitives::FocusScope,
     theme::ActiveTheme,
     typography::{Heading, Paragraph},
@@ -29,6 +28,7 @@ struct KnobControl {
 
 struct SelectionActivation {
     key: &'static str,
+    target: SituationIndex,
     focus: FocusHandle,
     _blur: Subscription,
 }
@@ -163,47 +163,51 @@ impl Render for SettingsView {
 
         if let (Some(registry), Some(controls)) = (&self.registry, &self.controls) {
             let selected = &registry.definitions()[controls.manual_target.get()];
-            let mut selector = SegmentedControl::new("situation", selected.id);
-            for definition in registry.definitions() {
-                selector = selector.segment(definition.id, definition.label, None);
-            }
-            content = content.child(
-                FormField::new("situation-field", "シチュエーション").child(
+            let mut selector = div()
+                .id("situation-selector")
+                .role(Role::Group)
+                .aria_label("シチュエーション")
+                .flex()
+                .gap_4();
+            for (position, definition) in registry.definitions().iter().enumerate() {
+                let target = SituationIndex::from_index(position, registry.definitions().len())
+                    .expect("validated registry position");
+                let radio_id: ElementId = (ElementId::from(definition.id), "selection").into();
+                selector = selector.child(
                     div()
-                        .id("situation-selector")
-                        .role(Role::Group)
-                        .aria_label("シチュエーション")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            // Ely suppresses changes on the selected segment. Its
-                            // bubbled click still represents a new manual intent.
-                            if let Some(controls) = &view.controls {
-                                dispatch_control_edit(
-                                    ControlEdit::Select(controls.manual_target),
-                                    cx,
-                                );
-                            }
-                        }))
-                        .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+                        .id((radio_id.clone(), "activation"))
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            cx.stop_propagation();
                             view.selection_activation = None;
-                            let key = match event.keystroke.key.as_str() {
-                                "enter" => "enter",
-                                "space" => "space",
-                                _ => return,
-                            };
-                            if event.keystroke.modifiers.modified() || window.default_prevented() {
-                                return;
-                            }
-                            if let Some(focus) = window.focused(cx) {
-                                let blur = cx.on_blur(&focus, window, |view, _, _| {
-                                    view.selection_activation = None;
-                                });
-                                view.selection_activation = Some(SelectionActivation {
-                                    key,
-                                    focus,
-                                    _blur: blur,
-                                });
-                            }
+                            // Re-selecting the same real choice is a new manual intent.
+                            dispatch_control_edit(ControlEdit::Select(target), cx);
                         }))
+                        .on_key_down(cx.listener(
+                            move |view, event: &gpui::KeyDownEvent, window, cx| {
+                                view.selection_activation = None;
+                                let key = match event.keystroke.key.as_str() {
+                                    "enter" => "enter",
+                                    "space" => "space",
+                                    _ => return,
+                                };
+                                if event.keystroke.modifiers.modified()
+                                    || window.default_prevented()
+                                {
+                                    return;
+                                }
+                                if let Some(focus) = window.focused(cx) {
+                                    let blur = cx.on_blur(&focus, window, |view, _, _| {
+                                        view.selection_activation = None;
+                                    });
+                                    view.selection_activation = Some(SelectionActivation {
+                                        key,
+                                        target,
+                                        focus,
+                                        _blur: blur,
+                                    });
+                                }
+                            },
+                        ))
                         .on_key_up(cx.listener(|view, event: &gpui::KeyUpEvent, window, cx| {
                             let Some(activation) = view.selection_activation.take() else {
                                 return;
@@ -212,30 +216,18 @@ impl Render for SettingsView {
                                 && !event.keystroke.modifiers.modified()
                                 && !window.default_prevented()
                                 && activation.focus.is_focused(window)
-                                && let Some(controls) = &view.controls
                             {
-                                dispatch_control_edit(
-                                    ControlEdit::Select(controls.manual_target),
-                                    cx,
-                                );
+                                dispatch_control_edit(ControlEdit::Select(activation.target), cx);
                             }
                         }))
-                        .child(selector.on_change(cx.listener(
-                            |view, value: &SharedString, _, cx| {
-                                // A changed segment must not also reselect the old one.
-                                cx.stop_propagation();
-                                view.selection_activation = None;
-                                if let Some(index) = view
-                                    .registry
-                                    .as_ref()
-                                    .and_then(|registry| registry.resolve(value.as_ref()))
-                                {
-                                    dispatch_control_edit(ControlEdit::Select(index), cx);
-                                }
-                            },
-                        ))),
-                ),
-            );
+                        .child(
+                            Radio::new(radio_id, target == controls.manual_target)
+                                .label(definition.label),
+                        ),
+                );
+            }
+            content = content
+                .child(FormField::new("situation-field", "シチュエーション").child(selector));
             for knob in self
                 .knobs
                 .iter()
@@ -328,7 +320,7 @@ impl Render for SettingsView {
                 Some(receipt) => {
                     let dominant = &registry.definitions()[receipt.display_dominant.get()];
                     format!(
-                        "音声側の受理: 設定世代 {}・手動世代 {} / 主に聞こえる環境 {} / 受理通知時点の世界時刻 {:.3} 秒{}",
+                        "音声側の受理: 設定世代 {}・手動世代 {} / 手動の表示対象 {} / 受理通知時点の世界時刻 {:.3} 秒{}",
                         receipt.ack_revision.get(), receipt.ack_manual_revision.get(),
                         dominant.label, receipt.world.get(),
                         if receipt.ack_revision == controls.settings_revision { "" } else { "（最新設定の受理待ち）" },
