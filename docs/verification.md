@@ -805,3 +805,57 @@ P08の「最小化中の実自動移動、hide/close中のworld/wander、再表�
 同じbaseからcomplete P08 worktreeを、Spec／Standardsが別々にread-only reviewした。両方correct、actionable findingsなし、confidence0.90／0.91。Specはactual consumerのbracket／g²・息／epochとphase・bounded cache・viewport・visibility、owned native契約とevidence限界が対象要件に整合すると判定。Standardsはatomic last-current再検査、None scratch非採用、資源／Task所有、pinned GPUI visibility、settings notify抑制、AX/CG/input/capture guard、RGBA regressionとscaffold除去を確認した。saved source／report／counter logを読むレビューで、reviewer自身のchecksやapp launchはない。耳／物理同期／maxDPI／GPU cost／普遍的RTを独立検証したとの主張はしない。
 
 parentの `npm run check:docs` はPASS（全体0.41秒／本体102ms、本行追加前）。Latの参照／graph検査であり、製品受け入れではない。既存 `No init version recorded` 警告は保持し、init／hook／認証設定を変更していない。
+
+## P09 保護付き状態保存・実再起動・通常失敗の継続
+
+対象はP08 merge `2a1d7005f38b8ab74bee924f343ed71d92a2ad14` からのworktree。環境はDarwin27 arm64、Rust1.95、Swift6.4。SPECの保存／復元／ボリューム／時間に対する端点・元ファイル・世代の検証であり、P12の終了veto／fade／更新調停、P13品質、P18物理同期と全負荷は別gate。
+
+### 実consumer・所有・試験
+
+`SaveWorker` が起動時の読取り／退避と元JSONを所有し、mainはstream／窓より前にtyped endpointsを受け取る。metadata Registryは一度構築し、音声workerに復元controlsを渡す。声準備とFSは各worker、callbackには保存経路を加えない。mainの500ms debounce／一つのTaskが、control ackと別の保存generationで端点・再開対象・有限矩形をsnapshotにする。native captureは同じ借用NSWindow／NSScreenのouter/contentと所有display IDを読み、UUIDはdisplayが変わったときだけ解決する。退役windowの通知はcurrent handleとIDで捨てる。
+
+変更前のisolated HOMEにversion1／岩80%／mute on／20,10分／2.6秒／過大size／位置200,100を置いたactual startupは、雨30%／mute off／12,40分／40秒／scene800,435,960×600でruntime RED（2.73秒／exit1）。所有PID41146はassert前に正常menu Quit0。実装後同じfixtureのactual startupは岩80.000001192%／mute on／10,20分／3秒／scene200,100,960×600、fresh0/0、正常menu Quit PID25256、3.68秒PASS。AX百分率のf32誤差だけを0.001以内で比較し、保存値・位置条件を減らしていない。これはUI／受理経路の観測であり、最初の物理音の無音を実測した主張ではない。
+
+parentのfmt／offline Cargo test／all-targets Clippy `-D warnings`／locked offline build chainは50.14秒PASS、test167件PASS（39.75秒）。新しい18件はreal private tempdir、known境界／metadata defaults／時間交換と丸め／未登録last、nested unknown、future read-only、backup成否、置換前各failure／置換後directory-syncの未確認durability、latest pending1／in-flight1、r1完了でr3 flushを解除しない条件、待機済みsuperseded generation、startup channel／停止／panic／joinを確認する。geometry新8件は保存座標／offscreen clamp／現在workareaとfixed基準／fractional content／UUIDとNone／無効値とoverflow／main-thread guardを確認する。追加direct依存は既存解決版serde_json1.0.151のみ。testsをactual native／電源断保証に読み替えない。
+
+### nativeの失敗と根拠付きcutover
+
+- `run-31277C81-A3C4-4446-B9DA-E3DC08ACE14B` は2.35秒／exit1、observerが実在しない「音量」metadata groupを要求した。既存controlled group「アプリの音量」へ合わせた。failure cleanupは正常Quitではない。
+- `run-DCF52A7C-0113-4AEA-AB6C-EBF8152086E5` は7.87秒／exit1、通知menuのdisabled判定で停止。pinned `gpui_macos/src/platform.rs` のvalidatorはaction availabilityを返し、初期disabled flagを参照しない。意味のないno-opやGPUI patchで無効化せず、通知から既存settings詳細を開く通常ShowSettings actionへcutoverした。実actionとsingleton保持を新しいnative経路で確認する。
+- 修正後shipping SHA256 `77c4e224ca1a35a560c307258e1b27417d362bf24365af53a54d989a35b9b66e` のchain16.49秒ではfmt／Clippy／build PASS、`run-4E17BFFC-D429-4261-9AAF-4EAB1EB50FB2` はbackup directoryをDataとして開いたobserverでFAIL。実装はcreate_dirで一意directoryを予約し、その中のstate.jsonへ原本をrenameして返す。observerを予約一つ／leaf一つ／leaf bytes同一へ修正し、owned unreadable leafだけmode変更して検査する。原本保護を弱めていない。
+
+失敗report／候補log／fixtureをprivate localに保持した。unchanged failureの再確認だけの再実行はせず、識別したAPI／layoutへ観測を修正した。三回の部分成功を総合合格へ書き換えていない。
+
+### 最終shippingの保存・再起動・故障
+
+同じSHA77c4...のproduction `--case persistence` は79.02秒／exit0、report `target/native-e2e/run-BD512162-91A8-4CEF-B6FA-63E055C4D77C/report.json`。全候補のHOMEはこのprivate run内だけで、通常ユーザーstateには触れない。captureなし、時間短縮hookなし。
+
+- PID24343は岩80%／mute on／normalized10,20分・3秒／scene200,100,960×600／0/0を復元。実volume Home0・岩size Home0・time3本 Home1・menu mute offと実scene250,150移動からsettled state.jsonを確認し、nested unknown／removed knob／unknown situationを保持して正常menu Quit0。
+- PID24452はvolume0／mute off／time1,1分・1秒／岩size0／位置250,150を別processで復元。実再消音、volume1%、深海選択後の受理3/1から即正常Quitし、latest last=deepと最新端点のflushをJSONで確認した。
+- PID24617は深海1%／mute on／time1/1/1／位置250,150／fresh0/0を復元。実wander on1/0から61.121659083 wall秒で深海→雨、audio world60.79、unchanged1/0とmenu／main／audio／actual state.json last=rainを照合し、正常Quit0。
+- PID28282は自動lastの雨／wander on／mute on／1%／time1/1/1／位置250,150／fresh0/0を別processで復元し、world<5秒からのfresh stayingを確認して正常Quit0。途中world／DSP／混合を再演しない。保存reportの旧expected文にはthree launchesが残るがobservedは上記four；今後のCLI契約文をfourへ直し、保存済みreportは改変していない。
+
+故障5候補では通知menuの実actionが同じsettings singletonを開き、mute保持と別の実volume操作のaudio受理／world進行を確認した。各候補は実menu Quit正常0。
+
+| fixture | 所有PID | receipt world 前→後 | 原本と新状態 |
+|---|---:|---|---|
+| future version2 | 28298 | 0.104→1.474、2/0 | ReadOnly通知、元state.json bytes不変 |
+| corrupt JSON | 28594 | 0.093→1.451、2/0 | state-backup-28594-0/state.jsonが元bytes同一、新version1 defaults保存 |
+| unreadable mode000 | 28634 | 0.128→1.498、2/0 | state-backup-28634-0/state.jsonが元bytes同一、新version1 defaults保存 |
+| backup不能のreadonly parent | 28905 | 0.046→1.428、2/0 | backup失敗／ReadOnly通知、元bytes不変 |
+| valid stateのreadonly parent | 28963 | 0.012→1.416、1/0 | 実CreateTemp PermissionDenied通知、元bytes不変 |
+
+POSIX mode故障は自分のfixtureだけ。通常保存失敗は音声hostを停止せず、新しいcontrol editで保存通知を消さない。receipt/worldは可聴音の継続・物理的無音・click／品質の測定ではない。元bytes比較とatomic testを電源断／全filesystem／自動rollback保証へ広げない。
+
+影響する既存 `lifecycle`／`controls` も同じSHAで実行してchain11.51秒PASS。reportは `run-5D917893-CB3B-46DE-9069-8474A9AF7584` と `run-3D210F96-A315-46FB-A579-FABEFDCBD053`。lifecycleのowned PIDs48519／48562／48573はzero-window再生成、menu Quit／両窓のforeground Cmd-Qで正常0。controlsはactual雨／風の編集、0/10/20%と独立mute、scroll focus／AX identity／9/5、設定再生成の保持と正常Quitを確認した。全画像caseや製品全体の再受け入れではない。
+
+### 固有recipeの参照評価
+
+保存専用入口・HOME隔離・正常再起動・手動／自動last・元bytes保護・通知action・audio world・正常Quit・限界を問う同一文を、変更前後の実recipeだけをsystem参照にしたtools／履歴なしcompletionへ渡した。beforeは専用case／fixture／保護契約が未記載と明言し、allやwindow再生成を保存試験へ代用しなかった。afterはpersistence、private HOME／production path、time3本1/1/1、manual深海last／実60〜95秒automatic lastとfresh restart、backup directory内leaf bytes、意味のあるsettings通知action、normal Quit0とproof limitsを取得した。結果の実行や合否を捏造せず、物理音／gain同率／PRNG／RT／終了更新gateへ広げなかった。frontmatter183文字／340words、純粋なreference retrievalで、wording microtest・discipline rationalization tableはN/A。
+
+### 最終独立レビューと文書検査
+
+同じbaseからcomplete P09 worktreeをSpec／Standardsが別々にread-only reviewした。両方correct／actionable findings0、confidence0.88／0.90。Specはloader/default/unknown/original保護、first-stream controls、位置とresume consumers、debounce／exact flush／stale results／独立通知、実native assertionと証拠の限界を確認した。StandardsはRust／Swiftと実consumer、pinned GPUIのTask／native dispatch／所有、worker-only FS/JSON、atomic stageとgeneration／退役window／通知を確認した。reviewerによるchecks／app launch／編集はない。P11/P12/P18と物理音・耐電源断の保証をこの判定へ加えない。
+
+parentの `npm run check:docs` はPASS（全体0.50秒／本体99ms、本節追加前）。Lat参照／graphの検査であり、保存の実動作や製品全体の受け入れではない。既存 `No init version recorded` 警告を保持し、init／hook／認証設定を変更していない。temporary startup Swiftと旧所有PR messageを除去し、private failure report／candidate log／fixtureだけを保持した。
+

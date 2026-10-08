@@ -135,6 +135,7 @@ pub(crate) struct SceneView {
     running: bool,
     animation: Option<Task<()>>,
     _visibility: Subscription,
+    _placement: Subscription,
 }
 
 impl SceneView {
@@ -148,6 +149,13 @@ impl SceneView {
         let visibility = cx.observe_window_visibility(window, |view, _, window, cx| {
             view.update_animation(window, cx);
         });
+        let placement = cx.observe_window_bounds(window, |_, window, cx| {
+            crate::app::dispatch_scene_placement_changed(
+                window.window_handle().window_id(),
+                crate::platform::macos::capture_placement(window),
+                cx,
+            );
+        });
         let (status, source) = audio.snapshot();
         let mut view = Self {
             focus,
@@ -156,6 +164,7 @@ impl SceneView {
             running: false,
             animation: None,
             _visibility: visibility,
+            _placement: placement,
         };
         view.update_audio(status, source, window, cx);
         view

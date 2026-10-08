@@ -4,7 +4,7 @@
 
 本書は、[SPEC の構成と Interface](../SPEC.md#構成と-interface)で選択された構成を、責務・所有・時間・失敗の関係から説明する補助文書である。製品要件と継続条件の唯一の正本は [SPEC.md](../SPEC.md) であり、本書から新しい仕様を決めない。数値、初期値、依存の改訂は正本の該当節を参照する。
 
-以下は製品全体の選択済み設計の説明であり、性能の実測結果ではない。現存する固定二窓・三環境の合成・共通手動交差・音量と独立消音の責務は各節のソース参照から追い、未実装の自動移動・保存・更新を区別する。本書では具体的な型・呼び出し形式・細かな配置・実装順序を定めず、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、実際のソースを区別して読む。観測済みの範囲と未確認 gate は [検証記録](verification.md)、現在の作業状態は mikan に置く。最終承認と次の作業への条件は [文書の状態](../SPEC.md#文書の状態)と[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)に従う。
+以下は製品全体の選択済み設計の説明であり、性能の実測結果ではない。現存する固定二窓・三環境の合成・共通手動／自動移動・独立音量／消音・保護付き保存の責務は各節のソース参照から追い、未実装の出力復旧・終了調停・更新を区別する。本書では具体的な型・呼び出し形式・細かな配置・実装順序を定めず、[詳細設計](detailed-design.md)、[実装計画](implementation-plan.md)、実際のソースを区別して読む。観測済みの範囲と未確認 gate は [検証記録](verification.md)、現在の作業状態は mikan に置く。最終承認と次の作業への条件は [文書の状態](../SPEC.md#文書の状態)と[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)に従う。
 
 関連文書は [索引](README.md)、[検証手順](verification.md)、[参考資料](references.md) を参照する。
 
@@ -24,7 +24,7 @@ Interface は渡す値だけでなく、その意味、更新の扱い、失敗�
 
 GPUI がアプリの実行ループを持ち、シーンと設定はその上の別窓となる。AppKit の窓制約や Sparkle の操作に必要な Adapter は、OS と既存の Module をつなぐ範囲に限定する。設定窓や更新のために別のアプリホストへ置き換える構成ではない。
 
-現存経路は、[`src/main.rs`](../src/main.rs) が GPUI を起動し、[`src/app.rs`](../src/app.rs) の global root が窓 handles、close・外観・音声更新・quit の subscriptions と Task、音声 controller、整合した制御 state を所有する。窓の close と音声停止は分離し、GPUI の quit observer では worker の停止・DSP 回収・join を明示的に待つ。設定の再表示は既存窓を前面へ出し、action は active window の借用後に適用する。[`src/ui/`](../src/ui/) は登録された声の固定視覚キャッシュを直接 paint するシーンと、登録 metadata に基づく controlled Ely フォーム・出力／受理状態の表示、[`src/platform/macos.rs`](../src/platform/macos.rs) は実 workarea 補正と借用 NSWindow の固定制約を扱う。menu とフォームは最新 main state へ同じ部分操作を適用し、viewport を音声 intent にしない。終了 fade／保存調停・OS 更新の仮実装は置かない。
+現存経路は、[`src/main.rs`](../src/main.rs) が GPUI を起動し、[`src/app.rs`](../src/app.rs) の global root が窓 handles、close・外観・音声／保存更新・quit の subscriptions と Task、音声 controller、保存 worker、整合した制御 state と最新の有限窓位置を所有する。起動時の保存読取りは専用 worker が行い、最初の stream／窓より前に読み終えた端点を音声へ渡す。窓の close と音声停止は分離し、現存 quit observer は最新端点の flush 結果を扱ってから音声停止・DSP 回収・join を待つ。終了 veto／fade／更新の調停は別の未実装 gate。設定の再表示は既存窓を前面へ出し、action は active window の借用後に適用する。[`src/ui/`](../src/ui/) は固定視覚キャッシュを直接 paint するシーン、登録 metadata に基づく controlled Ely フォーム、出力／受理状態と独立した保存通知を扱う。[`src/platform/macos.rs`](../src/platform/macos.rs) は実 workarea 補正と借用 NSWindow の固定制約・所有 screen 相対位置を扱う。menu とフォームは同じ部分操作を適用し、viewport を音声 intent にしない。
 
 [`src/situations/`](../src/situations/) が登録と雨／岩／深海固有の声・粒・揺らぎ・残響を持ち、[`src/audio/`](../src/audio/) のworkerが標準Deviceとconfig、声・固定配列・N声gain vectorを準備してstreamを開始する。callbackは単発lease借用の間だけengineとsample世界時計を進め、共通手動／自動slerp、到着基準の滞在とcallback単位の有限抽選budget、数値制御・受理通知・視覚リング・epoch専用error bitsetに触れる。混合後の音量と消音は独立して追従し、世界やシーンを停止しない。UIはDSPを所有しない。workerは受理mailboxを読み、出力・表示／再開対象・受理世代・失敗の離散変更だけを非RTの `AudioShared` とbounded wake経路で渡し、callbackからchannelへ送らない。自動表示はg²、同率は以前の表示、保存用の自動同率はdeparture。manual ack前はmainの最新targetを即表示する。実寄与gainsは時刻付き視覚stateで別に配送する。出力失敗時はworkerがgateを閉じてengineを回収し、凍結中も最新設定を受理できるが世界は進めない。シーンは既に受け入れたキャッシュとfade時刻を保持する。非可視シーンの更新は止め、復帰時は現在の生存イベントを読み直してからtimerを開始する。
 
@@ -50,7 +50,7 @@ GPUI がアプリの実行ループを持ち、シーンと設定はその上の
 
 - **オーディオコールバック**は、準備済みの声のうち寄与する声のサンプル列を生成し、混合と世界更新を行う。消音や音量がゼロでも必要な世界更新は続け、出力に不要なサンプル生成は省ける構成とする。
 - **GPUI／AppKit メイン**は、窓・操作・外観・OS 連携・更新画面を扱う。オーディオの実行状態を直接編集せず、最新の設定と指示を渡す。
-- **保存処理**は、変更が落ち着いた時点と終了前に保存する。オーディオから呼ばず、更新時には保存完了を判断に使う。この分担は保存専用スレッドの具体構成を決めるものではない。
+- **保存処理**は、専用の直列 worker が読取り・退避・書込みを所有する。main は変更が落ち着いた端点と矩形を渡し、終了前は最新世代の flush を待つ。オーディオ callback から呼ばず、通常の保存失敗でも音声を止めない。更新・安全な終了の判断へ合流する調停は別 gate。
 
 声の構築・資源の破棄、サンプルレートの準備、内部バッファの確保はコールバック外で行う。登録に応じた声と、粒・制御・イベントの容量を準備してからリアルタイム経路で使う。コールバック内でサンプル列を生成することと、声を構築することは別である。寄与しなくなった声のサンプル生成を止めることと、声の資源をコールバック内で破棄することも区別する。
 
@@ -124,7 +124,7 @@ AppKit Adapter は GPUI の借用 NSView から所属 NSWindow を扱うメイ�
 | 更新前の保存失敗 | 現在の音 | その回の更新・再起動を中止する | 保存失敗を成功として通過させない |
 | 更新時の置き換え失敗 | アプリバンドル外の保存データを保護する | 旧設定を破壊しない。完全な自動ロールバックは保証しない | 更新成功や全面的な復旧を断言しない |
 
-保存は変更が落ち着いた時点で一時ファイルへ書き、置き換える。未知の値の保持、欠落時の既定値、範囲の整え方は保存 Module の Implementation に閉じる。毎フレームやマウスの移動ごとの保存にしない。
+[`src/persistence.rs`](../src/persistence.rs) が元 JSON と write policy を所有し、未知の値を残して既知の端点だけを正規化・merge する。main の settled debounce は音声の制御世代と別の保存世代を発行し、worker の最新 pending と in-flight は各一つに限る。同じ directory の一意 temp を書き、file sync・rename・directory sync の段階別結果を返す。古い完了で新しい編集や失敗を受理済みにしない。窓 bounds observer は所有 scene の有限位置だけを main に渡し、退役窓の通知を捨てる。毎 frame／drag event ごとに filesystem を呼ばず、UUID は所有 display が変わったときだけ解決する。
 
 更新はユーザーが確認を求めたときだけ行う。確認・ダウンロード中は音を続け、インストール・再起動も明示的な選択に従う。更新前の保存完了を確認してからフェードアウトして終了し、再起動後は保存対象の環境と設定を復元する。更新経路と失敗の正本は [アプリ内更新](../SPEC.md#アプリ内更新)。
 

@@ -1,18 +1,25 @@
-use std::error::Error;
+use std::{error::Error, path::PathBuf, sync::Arc, time::Duration};
 
 use ely::theme::{Mode, Theme};
 use gpui::{
-    App, AppContext, Context, Entity, Global, KeyBinding, Menu, MenuItem, Render, SharedString,
-    Subscription, Task, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowId, WindowOptions, actions,
+    App, AppContext, Context, DisplayId, Entity, Global, KeyBinding, Menu, MenuItem, Render,
+    SharedString, Subscription, Task, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowId, WindowOptions, actions,
 };
 
 use crate::{
     audio::{AudioController, OutputStatus},
-    controls::{ControlEdit, ControlState},
-    platform::macos::{WindowGeometryError, WindowRole, constrain_window, prepare_window},
-    situations::SituationIndex,
-    ui::{scene::SceneView, settings::SettingsView},
+    controls::{ControlEdit, ControlState, Revision},
+    persistence::{LoadedState, SaveError, SaveSnapshot, SaveStage, SaveStartup, SaveWorker},
+    platform::macos::{
+        WindowGeometryError, WindowPlacement, WindowRole, capture_placement, constrain_window,
+        prepare_window,
+    },
+    situations::{Registry, SituationIndex},
+    ui::{
+        scene::SceneView,
+        settings::{SettingsNotices, SettingsView},
+    },
 };
 
 actions!(
@@ -36,11 +43,20 @@ pub(crate) struct AppModel {
     scene: Option<WindowHandle<SceneView>>,
     settings: Option<WindowHandle<SettingsView>>,
     audio: AudioController,
-    controls: Option<ControlState>,
+    controls: ControlState,
     menu_selection: Option<SituationIndex>,
     audio_updates: Option<Task<()>>,
     control_error: Option<SharedString>,
-    audio_quit: Option<Subscription>,
+    _quit: Option<Subscription>,
+    save_worker: Option<SaveWorker>,
+    save_updates: Option<Task<()>>,
+    autosave: Option<Task<()>>,
+    save_revision: Revision,
+    save_notice: Option<SharedString>,
+    save_error: Option<SharedString>,
+    last_resume: SituationIndex,
+    placement: Option<WindowPlacement>,
+    placement_display: Option<DisplayId>,
     // The global root keeps subscriptions alive; callbacks do not own the root.
     _window_closed: Option<Subscription>,
     settings_appearance: Option<Subscription>,
@@ -50,18 +66,65 @@ pub(crate) fn start(cx: &mut App) {
     ely::init(cx);
     Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
 
-    let (audio, updates) = AudioController::start();
+    let registry = match Registry::new() {
+        Ok(registry) => Arc::new(registry),
+        Err(error) => {
+            eprintln!("Ambien: 環境の登録を初期化できません: {error}");
+            cx.quit();
+            return;
+        }
+    };
+    let mut save_worker = None;
+    let mut save_updates = None;
+    // The worker owns all filesystem work. Wait before any stream/window exists,
+    // so a restored mute and endpoint are effective from the first audio sample.
+    let startup = std::env::var_os("HOME")
+        .ok_or_else(|| "HOME がなく、状態保存先を決められません".to_owned())
+        .and_then(|home| {
+            let path = PathBuf::from(home).join("Library/Application Support/Ambien/state.json");
+            let (worker, startup, updates) =
+                SaveWorker::start(path, registry.clone()).map_err(|error| error.to_string())?;
+            save_worker = Some(worker);
+            save_updates = Some(updates);
+            startup
+                .recv_blocking()
+                .map_err(|error| format!("保存 worker から初期状態を受け取れません: {error}"))
+        });
+    let SaveStartup {
+        settings: LoadedState {
+            controls,
+            window: placement,
+        },
+        notice,
+    } = startup.unwrap_or_else(|error| SaveStartup {
+        settings: LoadedState {
+            controls: ControlState::new(&registry),
+            window: None,
+        },
+        notice: Some(format!("状態を読み込めず保存できません: {error}")),
+    });
+    let last_resume = controls.manual_target;
+    let (audio, updates) = AudioController::start(registry, controls.clone());
     let owner = cx.new(move |_| AppModel {
         scene: None,
         settings: None,
         _window_closed: None,
         settings_appearance: None,
         audio,
-        controls: None,
+        controls,
         menu_selection: None,
         audio_updates: None,
         control_error: None,
-        audio_quit: None,
+        _quit: None,
+        save_worker,
+        save_updates: None,
+        autosave: None,
+        save_revision: Revision::INITIAL,
+        save_notice: notice.map(|notice| format!("保存状態: {notice}").into()),
+        save_error: None,
+        last_resume,
+        placement,
+        placement_display: None,
     });
     cx.set_global(AppRoot(owner.clone()));
 
@@ -77,7 +140,10 @@ pub(crate) fn start(cx: &mut App) {
     owner.update(cx, |model, _| model._window_closed = Some(closed));
     owner.update(cx, |model, cx| {
         // GPUI retains globals through native shutdown; root Drop alone is not a quit hook.
-        model.audio_quit = Some(cx.on_app_quit(|model, _| {
+        model._quit = Some(cx.on_app_quit(|model, cx| {
+            if let Err(error) = model.flush_latest(cx) {
+                model.record_save_error(error, cx);
+            }
             model.audio.shutdown();
             std::future::ready(())
         }));
@@ -95,6 +161,21 @@ pub(crate) fn start(cx: &mut App) {
         })
     });
     owner.update(cx, |model, _| model.audio_updates = Some(update_task));
+    if let Some(updates) = save_updates {
+        let task = owner.update(cx, |_, cx| {
+            cx.spawn(async move |owner, cx| {
+                while updates.recv().await.is_ok() {
+                    if owner
+                        .update(cx, |model, cx| model.save_updated(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        });
+        owner.update(cx, |model, _| model.save_updates = Some(task));
+    }
 
     cx.bind_keys([
         KeyBinding::new("cmd-,", ShowSettings, None),
@@ -126,9 +207,7 @@ pub(crate) fn start(cx: &mut App) {
         cx.defer(|cx| {
             let owner = cx.global::<AppRoot>().0.clone();
             owner.update(cx, |model, cx| {
-                if let Some(state) = &model.controls {
-                    model.apply_control_edit(ControlEdit::Wander(!state.wander), cx);
-                }
+                model.apply_control_edit(ControlEdit::Wander(!model.controls.wander), cx);
             });
         });
     });
@@ -136,9 +215,7 @@ pub(crate) fn start(cx: &mut App) {
         cx.defer(|cx| {
             let owner = cx.global::<AppRoot>().0.clone();
             owner.update(cx, |model, cx| {
-                if let Some(state) = &model.controls {
-                    model.apply_control_edit(ControlEdit::Mute(!state.mute), cx);
-                }
+                model.apply_control_edit(ControlEdit::Mute(!model.controls.mute), cx);
             });
         });
     });
@@ -170,6 +247,21 @@ pub(crate) fn dispatch_control_edit(edit: ControlEdit, cx: &mut App) {
     });
 }
 
+pub(crate) fn dispatch_scene_placement_changed(
+    window_id: WindowId,
+    placement: Result<(WindowPlacement, DisplayId), WindowGeometryError>,
+    cx: &mut App,
+) {
+    cx.defer(move |cx| {
+        let Some(owner) = cx.try_global::<AppRoot>().map(|root| root.0.clone()) else {
+            return;
+        };
+        owner.update(cx, |model, cx| {
+            model.scene_placement_changed(window_id, placement, cx);
+        });
+    });
+}
+
 impl AppModel {
     fn show_scene(&mut self, cx: &mut Context<Self>) -> WindowResult<()> {
         if let Some(handle) = self.scene {
@@ -182,9 +274,13 @@ impl AppModel {
         let audio = self.audio.shared();
         self.scene = Some(open_window(
             WindowRole::Scene,
+            self.placement.as_ref(),
             move |window, cx| SceneView::new(window, cx, audio),
             cx,
         )?);
+        let handle = self.scene.expect("the scene was just opened");
+        let placement = handle.update(cx, |_, window, _| capture_placement(window))?;
+        self.scene_placement_changed(handle.window_id(), placement, cx);
         Ok(())
     }
 
@@ -204,12 +300,21 @@ impl AppModel {
                 .as_ref()
                 .is_some_and(|source| source.epoch == receipt.epoch)
         });
-        let controls = self.controls.as_ref();
-        let error = self.control_error.clone();
+        let controls = Some(&self.controls);
+        let notices = self.settings_notices();
         let handle = open_window(
             WindowRole::Settings,
+            None,
             move |window, cx| {
-                SettingsView::new(window, cx, status.text(), source, controls, receipt, error)
+                SettingsView::new(
+                    window,
+                    cx,
+                    status.text(),
+                    source,
+                    controls,
+                    receipt,
+                    notices,
+                )
             },
             cx,
         )?;
@@ -231,7 +336,7 @@ impl AppModel {
         ];
         let shared = self.audio.shared();
         let (_, source) = shared.snapshot();
-        self.menu_selection = self.controls.as_ref().map(|controls| {
+        self.menu_selection = Some(
             shared
                 .control_receipt()
                 .filter(|receipt| {
@@ -239,11 +344,13 @@ impl AppModel {
                         .as_ref()
                         .is_some_and(|source| source.epoch == receipt.epoch)
                 })
-                .map_or(controls.manual_target, |receipt| {
-                    controls.display_target(receipt.ack_manual_revision, receipt.display_dominant)
-                })
-        });
-        if let (Some(_), Some(source)) = (&self.controls, source) {
+                .map_or(self.controls.manual_target, |receipt| {
+                    self.controls
+                        .display_target(receipt.ack_manual_revision, receipt.display_dominant)
+                }),
+        );
+        let controls_ready = source.is_some();
+        if let Some(source) = source {
             let definitions = source.registry.definitions();
             for (position, definition) in definitions.iter().enumerate() {
                 let target = SituationIndex::from_index(position, definitions.len())
@@ -257,44 +364,57 @@ impl AppModel {
         }
         items.extend([
             MenuItem::action("ひとりで移る", ToggleWander)
-                .checked(self.controls.as_ref().is_some_and(|state| state.wander))
-                .disabled(self.controls.is_none()),
+                .checked(self.controls.wander)
+                .disabled(!controls_ready),
             MenuItem::action("消音", ToggleMute)
-                .checked(self.controls.as_ref().is_some_and(|state| state.mute))
-                .disabled(self.controls.is_none()),
+                .checked(self.controls.mute)
+                .disabled(!controls_ready),
             MenuItem::separator(),
             MenuItem::action("設定…", ShowSettings),
             MenuItem::action("終了", Quit),
         ]);
+        if let Some(status) = self.save_error.as_ref().or(self.save_notice.as_ref()) {
+            items.insert(
+                items.len() - 1,
+                MenuItem::action(status.clone(), ShowSettings),
+            );
+        }
         cx.set_menus([Menu::new("Ambien").items(items)]);
     }
 
     fn apply_control_edit(&mut self, edit: ControlEdit, cx: &mut Context<Self>) {
-        let Some(state) = &mut self.controls else {
-            return;
+        let (_, source) = self.audio.shared().snapshot();
+        let Some(source) = source else {
+            return; // Preserve the existing preparing/failed-output control gate.
         };
+        let state = &mut self.controls;
         let old_mute = state.mute;
         let old_wander = state.wander;
         let old_manual_revision = state.manual_revision;
-        match state.apply(edit) {
+        let changed = match state.apply(edit) {
             Ok(changed) => {
                 self.control_error = None;
                 if changed {
-                    let (_, source) = self.audio.shared().snapshot();
-                    if let Some(source) = source {
-                        source.controls.publish(state);
-                    }
+                    source.controls.publish(state);
                 }
+                changed
             }
             Err(error) => {
                 self.control_error = Some(error.to_string().into());
+                false
             }
-        }
+        };
         if old_mute != state.mute
             || old_wander != state.wander
             || old_manual_revision != state.manual_revision
         {
             self.update_menu(cx);
+        }
+        if old_manual_revision != self.controls.manual_revision {
+            self.last_resume = self.controls.manual_target;
+        }
+        if changed {
+            self.schedule_save(cx);
         }
         self.update_settings(cx);
     }
@@ -314,9 +434,9 @@ impl AppModel {
             view.update_audio(
                 status.text(),
                 source,
-                self.controls.as_ref(),
+                Some(&self.controls),
                 receipt,
-                self.control_error.clone(),
+                self.settings_notices(),
                 cx,
             );
         }) {
@@ -326,27 +446,24 @@ impl AppModel {
 
     fn audio_updated(&mut self, cx: &mut Context<Self>) {
         let (status, source) = self.audio.shared().snapshot();
-        if self.controls.is_none()
-            && let Some(source) = &source
-        {
-            let state = ControlState::new(&source.registry);
-            // Main now owns the full control state and its sole publication authority.
-            source.controls.publish(&state);
-            self.controls = Some(state);
-        }
         let shared = self.audio.shared();
-        let selection = self.controls.as_ref().map(|controls| {
-            shared
-                .control_receipt()
-                .filter(|receipt| {
-                    source
-                        .as_ref()
-                        .is_some_and(|source| source.epoch == receipt.epoch)
-                })
-                .map_or(controls.manual_target, |receipt| {
-                    controls.display_target(receipt.ack_manual_revision, receipt.display_dominant)
-                })
+        let receipt = shared.control_receipt().filter(|receipt| {
+            source
+                .as_ref()
+                .is_some_and(|source| source.epoch == receipt.epoch)
         });
+        let selection = Some(receipt.map_or(self.controls.manual_target, |receipt| {
+            self.controls
+                .display_target(receipt.ack_manual_revision, receipt.display_dominant)
+        }));
+        let resume = receipt.map_or(self.controls.manual_target, |receipt| {
+            self.controls
+                .display_target(receipt.ack_manual_revision, receipt.resume_target)
+        });
+        if self.last_resume != resume {
+            self.last_resume = resume;
+            self.schedule_save(cx);
+        }
         if self.menu_selection != selection {
             self.update_menu(cx);
         }
@@ -383,18 +500,214 @@ impl AppModel {
             self.settings_appearance = None;
         }
     }
+
+    fn settings_notices(&self) -> SettingsNotices {
+        SettingsNotices {
+            control: self.control_error.clone(),
+            persistence: self
+                .save_error
+                .as_ref()
+                .or(self.save_notice.as_ref())
+                .cloned(),
+        }
+    }
+
+    fn remember_placement(
+        &mut self,
+        mut placement: WindowPlacement,
+        display_id: DisplayId,
+        cx: &App,
+    ) -> bool {
+        let changed = self.placement_display != Some(display_id)
+            || self.placement.as_ref().is_none_or(|old| {
+                old.x != placement.x
+                    || old.y != placement.y
+                    || old.width != placement.width
+                    || old.height != placement.height
+            });
+        if !changed {
+            return false;
+        }
+        placement.display_uuid = if self.placement_display == Some(display_id) {
+            self.placement
+                .as_mut()
+                .and_then(|old| old.display_uuid.take())
+        } else {
+            cx.displays()
+                .into_iter()
+                .find(|display| display.id() == display_id)
+                .and_then(|display| display.uuid().ok())
+                .map(|uuid| uuid.to_string())
+        };
+        self.placement_display = Some(display_id);
+        self.placement = Some(placement);
+        true
+    }
+
+    fn scene_placement_changed(
+        &mut self,
+        window_id: WindowId,
+        placement: Result<(WindowPlacement, DisplayId), WindowGeometryError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .scene
+            .is_none_or(|window| window.window_id() != window_id)
+        {
+            return; // A retired scene cannot overwrite a reopened scene's position.
+        }
+        match placement {
+            Ok((placement, display)) => {
+                if self.remember_placement(placement, display, cx) {
+                    self.schedule_save(cx);
+                }
+            }
+            Err(error) => self.record_save_error(
+                SaveError {
+                    stage: SaveStage::Serialize,
+                    message: format!("窓位置を確認できません: {error}"),
+                },
+                cx,
+            ),
+        }
+    }
+
+    fn next_save_revision(&mut self) -> Result<Revision, SaveError> {
+        let revision = self
+            .save_revision
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| SaveError {
+                stage: SaveStage::InvalidRevision,
+                message: "状態保存の世代が上限に達しました".to_owned(),
+            })?;
+        self.save_revision = Revision::from_raw(revision);
+        Ok(self.save_revision)
+    }
+
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        let revision = match self.next_save_revision() {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.record_save_error(error, cx);
+                return;
+            }
+        };
+        self.autosave = Some(cx.spawn(async move |owner, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = owner.update(cx, |model, cx| {
+                model.autosave = None;
+                if model.save_revision == revision
+                    && let Err(error) = model.submit_save(revision, cx)
+                {
+                    model.record_save_error(error, cx);
+                }
+            });
+        }));
+    }
+
+    fn submit_save(&mut self, revision: Revision, cx: &mut Context<Self>) -> Result<(), SaveError> {
+        if let Some(window) = self.scene {
+            let capture = window
+                .update(cx, |_, window, _| capture_placement(window))
+                .map_err(|error| SaveError {
+                    stage: SaveStage::Serialize,
+                    message: format!("保存時のシーンを確認できません: {error}"),
+                })?
+                .map_err(|error| SaveError {
+                    stage: SaveStage::Serialize,
+                    message: format!("保存時の窓位置を確認できません: {error}"),
+                })?;
+            self.remember_placement(capture.0, capture.1, cx);
+        }
+        let shared = self.audio.shared();
+        let (_, source) = shared.snapshot();
+        let resume_target = shared
+            .control_receipt()
+            .filter(|receipt| {
+                source
+                    .as_ref()
+                    .is_some_and(|source| source.epoch == receipt.epoch)
+            })
+            .map_or(self.controls.manual_target, |receipt| {
+                self.controls
+                    .display_target(receipt.ack_manual_revision, receipt.resume_target)
+            });
+        let worker = self.save_worker.as_ref().ok_or_else(|| SaveError {
+            stage: SaveStage::WorkerStopped,
+            message: "状態保存 worker が利用できません".to_owned(),
+        })?;
+        worker.submit(
+            revision,
+            SaveSnapshot {
+                controls: self.controls.clone(),
+                resume_target,
+                window: self.placement.clone(),
+            },
+        )
+    }
+
+    fn flush_latest(&mut self, cx: &mut Context<Self>) -> Result<(), SaveError> {
+        self.autosave = None;
+        let revision = self.next_save_revision()?;
+        self.submit_save(revision, cx)?;
+        self.save_worker
+            .as_ref()
+            .expect("submit requires a worker")
+            .flush(revision)
+    }
+
+    fn record_save_error(&mut self, error: SaveError, cx: &mut Context<Self>) {
+        self.save_error = Some(format!("状態を保存できません: {error}").into());
+        self.update_menu(cx);
+        self.update_settings(cx);
+    }
+
+    fn save_updated(&mut self, cx: &mut Context<Self>) {
+        let Some(receipt) = self.save_worker.as_ref().and_then(SaveWorker::take_receipt) else {
+            return;
+        };
+        if receipt.revision != self.save_revision {
+            return; // Completion of an older snapshot cannot acknowledge the latest edit.
+        }
+        match receipt.result {
+            Ok(()) => {
+                if self.save_error.take().is_some() {
+                    self.update_menu(cx);
+                    self.update_settings(cx);
+                }
+            }
+            Err(error) => self.record_save_error(error, cx),
+        }
+    }
 }
 
 fn open_window<V: Render + 'static>(
     role: WindowRole,
+    saved: Option<&WindowPlacement>,
     constructor: impl FnOnce(&mut Window, &mut Context<V>) -> V,
     cx: &mut Context<AppModel>,
 ) -> WindowResult<WindowHandle<V>> {
-    let display_id = cx
-        .primary_display()
-        .ok_or(WindowGeometryError::DisplayUnavailable)?
-        .id();
-    let prepared = prepare_window(role, display_id)?;
+    let display_id = saved
+        .and_then(|saved| saved.display_uuid.as_deref())
+        .and_then(|wanted| {
+            cx.displays()
+                .into_iter()
+                .find(|display| {
+                    display.uuid().ok().is_some_and(|uuid| {
+                        let mut buffer = [0; 36];
+                        uuid.hyphenated()
+                            .encode_lower(&mut buffer)
+                            .eq_ignore_ascii_case(wanted)
+                    })
+                })
+                .map(|display| display.id())
+        })
+        .or_else(|| cx.primary_display().map(|display| display.id()))
+        .ok_or(WindowGeometryError::DisplayUnavailable)?;
+    let prepared = prepare_window(role, display_id, saved)?;
     let (titlebar, background) = match role {
         WindowRole::Scene => (
             TitlebarOptions {

@@ -277,14 +277,14 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **DependsOn:** P08。**SPEC:** [保存](../SPEC.md#保存)、[ボリューム設定](../SPEC.md#ボリューム設定)、[時間設定](../SPEC.md#時間設定)。
 
-**Files:** Create `src/persistence.rs`; Modify `src/app.rs`, `src/controls.rs`, `src/ui/settings.rs`, `Cargo.toml`, `Cargo.lock`（保存の必要依存のみ）。Tests: `persistence.rs` の real tempdir I/O と `controls.rs` 内。
+**Files:** Create `src/persistence.rs`; Modify `src/main.rs`, `src/app.rs`, `src/audio/mod.rs`（最初の stream へ loaded endpoints）, `src/ui/scene.rs`（owned bounds observer）, `src/ui/settings.rs`（独立保存通知）, `src/platform/macos.rs`（保存／復元位置と owning display）, `scripts/native-e2e.swift`（private HOME／再起動／故障）, `Cargo.toml`, `Cargo.lock`（既存解決版 serde_json の direct 依存のみ）。Tests: `persistence.rs` の real tempdir I/O／failure／exact-generation、`platform/macos.rs` の geometry boundaries。`controls.rs` の検査済み型と既存 reducer を再利用する。
 
 **Consumes:** I01 metadata/default candidates、I03 endpoints、I06 `resume_target`、I11 settled window state。**Produces:** I09 `StateDocument`/`LoadedState`/`LoadOutcome`/`SaveWorker`/`SaveReceipt` と write policy。
 
-- [ ] raw JSON Value の unknown を残し known fields だけ clamp/round/交換、missing default、unregistered last は先頭に解決する。
-- [ ] future version は defaults 起動＋明示失敗＋元 read-only、corrupt/unreadable は一意 backup rename、backup 不能は read-only にする。余分な migration を作らない。
-- [ ] debounce と latest pending1/in-flight1 の直列 worker、同 directory temp→write_all→sync_all→rename→parent sync を実装し receipt を返す。
-- [ ] 通常保存失敗は menu/設定に表示し音を維持する。flush は latest revision の成功だけ認める。
+- [x] raw JSON Value の unknown を残し known fields だけ clamp/round/交換、missing default、unregistered last は先頭に解決する。
+- [x] future version は defaults 起動＋明示失敗＋元 read-only、corrupt/unreadable は一意 backup rename、backup 不能は read-only にする。余分な migration を作らない。
+- [x] debounce と latest pending1/in-flight1 の直列 worker、同 directory temp→write_all→sync_all→rename→parent sync を実装し receipt を返す。
+- [x] 通常保存失敗は menu/設定に表示し音を維持する。flush は latest revision の成功だけ認める。
 
 **Behavior tests:** volume=-1/2→両端、known knob 範囲外→端、missing knob→module default；min20/max10→10/20、非整数 time→SPEC の単位へ丸める。unknown situation/外した knob/nested unknown→往復保持；last="missing"→先頭。future version→元 bytes 不変；invalid JSON→backup と defaults；backup rename 拒否→元不変/保存 failure。temp write/sync/rename 各失敗→置換前に old file を失わない。rename後の directory sync 失敗→新 bytes は既に置換済みだが durability 未確認、成功 receipt なし、旧 bytes に戻ったと表示しない。r1 in-flight に r2/r3 submit→pending r3 のみ、r1 receipt で flush(r3) を解除しない。
 
