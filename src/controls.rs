@@ -48,6 +48,8 @@ impl Revision {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ControlEdit {
     Volume(Normalized),
+    Blur(bool),
+    Veil(Normalized),
     Mute(bool),
     Wander(bool),
     DwellMinMinutes(u32),
@@ -104,6 +106,8 @@ impl Error for ControlEditError {}
 #[derive(Clone, Copy, PartialEq)]
 struct CommonFields {
     volume: Normalized,
+    blur: bool,
+    veil: Normalized,
     mute: bool,
     wander: bool,
     dwell_min_minutes: u32,
@@ -115,6 +119,8 @@ impl From<&ControlState> for CommonFields {
     fn from(state: &ControlState) -> Self {
         Self {
             volume: state.volume,
+            blur: state.blur,
+            veil: state.veil,
             mute: state.mute,
             wander: state.wander,
             dwell_min_minutes: state.dwell_min_minutes,
@@ -127,6 +133,10 @@ impl From<&ControlState> for CommonFields {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ControlState {
     pub volume: Normalized,
+    /// Scene background: blurred glass when true, plain transparency when false. Display only.
+    pub blur: bool,
+    /// Amount of colour film over the scene, 0..=1. Display only.
+    pub veil: Normalized,
     pub mute: bool,
     pub wander: bool,
     pub dwell_min_minutes: u32,
@@ -161,6 +171,8 @@ impl ControlState {
             .collect();
         Self {
             volume: Normalized::new(0.3).expect("SPEC volume is normalized"),
+            blur: true,
+            veil: Normalized::ZERO,
             mute: false,
             wander: true,
             dwell_min_minutes: 12,
@@ -198,6 +210,16 @@ impl ControlState {
             ControlEdit::Volume(value) => {
                 let mut common = CommonFields::from(&*self);
                 common.volume = value;
+                self.set_common(common)
+            }
+            ControlEdit::Blur(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.blur = value;
+                self.set_common(common)
+            }
+            ControlEdit::Veil(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.veil = value;
                 self.set_common(common)
             }
             ControlEdit::Mute(value) => {
@@ -295,6 +317,8 @@ impl ControlState {
             self.wander_revision
         };
         self.volume = common.volume;
+        self.blur = common.blur;
+        self.veil = common.veil;
         self.mute = common.mute;
         self.wander = common.wander;
         self.dwell_min_minutes = common.dwell_min_minutes;
@@ -312,6 +336,8 @@ impl ControlState {
         assert_eq!(self.knob_owners, source.knob_owners);
         assert_eq!(self.knobs.len(), source.knobs.len());
         self.volume = source.volume;
+        self.blur = source.blur;
+        self.veil = source.veil;
         self.mute = source.mute;
         self.wander = source.wander;
         self.dwell_min_minutes = source.dwell_min_minutes;
@@ -447,6 +473,36 @@ mod tests {
         assert!(
             !state
                 .apply(ControlEdit::Volume(Normalized::new(0.8).unwrap()))
+                .unwrap()
+        );
+        assert_eq!(state.settings_revision.get(), 2);
+    }
+
+    #[test]
+    fn blur_and_veil_default_to_the_existing_glass_and_never_become_manual_intent() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        assert!(state.blur);
+        assert_eq!(state.veil, Normalized::ZERO);
+        let target = state.manual_target;
+        assert!(state.apply(ControlEdit::Blur(false)).unwrap());
+        assert!(
+            state
+                .apply(ControlEdit::Veil(Normalized::new(0.4).unwrap()))
+                .unwrap()
+        );
+        assert!(!state.blur);
+        assert_eq!(state.veil.get(), 0.4);
+        assert_eq!(state.manual_target, target);
+        assert_eq!(state.manual_revision, Revision::INITIAL);
+        assert_eq!(state.wander_revision, Revision::INITIAL);
+        assert!(state.wander);
+        assert_eq!(state.settings_revision.get(), 2);
+        // Re-applying the same value is not an edit.
+        assert!(!state.apply(ControlEdit::Blur(false)).unwrap());
+        assert!(
+            !state
+                .apply(ControlEdit::Veil(Normalized::new(0.4).unwrap()))
                 .unwrap()
         );
         assert_eq!(state.settings_revision.get(), 2);

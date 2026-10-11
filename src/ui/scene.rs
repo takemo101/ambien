@@ -16,6 +16,7 @@ use crate::{
         timing::MachNanos,
         transport::{VISIBLE_CAPACITY, VisualEvent, WorldVisualHeader},
     },
+    controls::Normalized,
     ui::appearance::{AccessibilityState, Motion},
 };
 
@@ -137,6 +138,7 @@ pub(crate) struct SceneView {
     animation: Option<Task<()>>,
     motion: Motion,
     opaque: bool,
+    veil: f32,
     _visibility: Subscription,
     _placement: Subscription,
 }
@@ -147,6 +149,7 @@ impl SceneView {
         cx: &mut Context<Self>,
         audio: Arc<AudioShared>,
         accessibility: AccessibilityState,
+        veil: Normalized,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -169,6 +172,7 @@ impl SceneView {
             animation: None,
             motion: accessibility.motion(),
             opaque: accessibility.reduce_transparency,
+            veil: veil.get(),
             _visibility: visibility,
             _placement: placement,
         };
@@ -176,17 +180,21 @@ impl SceneView {
         view
     }
 
-    /// Applies display accessibility only to presentation: the window surface and how
-    /// particles are drawn. Audio state, controls and the cached particles are untouched.
-    pub(crate) fn set_accessibility(
+    /// Applies the surface choices only to presentation: the window surface (blur choice
+    /// and reduce transparency), the colour film, and how particles are drawn. Audio state,
+    /// controls and the cached particles are untouched.
+    pub(crate) fn set_surface(
         &mut self,
         accessibility: AccessibilityState,
+        blur: bool,
+        veil: Normalized,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.set_background_appearance(accessibility.scene_background());
+        window.set_background_appearance(accessibility.scene_background(blur));
         self.motion = accessibility.motion();
         self.opaque = accessibility.reduce_transparency;
+        self.veil = veil.get();
         cx.notify();
     }
 
@@ -382,6 +390,12 @@ fn paint_glow(
     window.paint_quad(fill(bounds, color).corner_radii(px(radius)));
 }
 
+/// Opacity of the theme-coloured film laid over the scene. Reduce transparency lays it fully
+/// opaque; otherwise it is the user's glass density, 0 meaning no film at all.
+fn film_alpha(opaque: bool, veil: f32) -> f32 {
+    if opaque { 1.0 } else { veil.clamp(0.0, 1.0) }
+}
+
 impl Render for SceneView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.weak_entity();
@@ -390,9 +404,11 @@ impl Render for SceneView {
             .track_focus(&self.focus)
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move());
         // Normally no background is painted and the native blurred surface shows through.
-        // Reduce transparency uses the system palette's opaque background instead.
-        let root = if self.opaque {
-            root.bg(cx.theme().colors.bg)
+        // The colour film (the user's glass density) and reduce transparency's opaque palette
+        // are both the theme background, differing only in how much of it is laid over.
+        let alpha = film_alpha(self.opaque, self.veil);
+        let root = if alpha > 0.0 {
+            root.bg(cx.theme().colors.bg.opacity(alpha))
         } else {
             root
         };
@@ -477,6 +493,21 @@ mod tests {
             lifetime: Duration::from_nanos(50),
             serial: 0,
         }));
+    }
+
+    #[test]
+    fn the_colour_film_is_absent_at_zero_follows_the_slider_and_is_opaque_under_reduce_transparency()
+     {
+        // Zero density lays nothing over the scene: the glass looks as it always did.
+        assert_eq!(film_alpha(false, 0.0), 0.0);
+        assert_eq!(film_alpha(false, 0.35), 0.35);
+        assert_eq!(film_alpha(false, 1.0), 1.0);
+        // The system setting wins whatever the slider says.
+        assert_eq!(film_alpha(true, 0.0), 1.0);
+        assert_eq!(film_alpha(true, 0.35), 1.0);
+        // A stray out-of-range value cannot lay a negative or over-full film.
+        assert_eq!(film_alpha(false, -2.0), 0.0);
+        assert_eq!(film_alpha(false, 9.0), 1.0);
     }
 
     #[test]

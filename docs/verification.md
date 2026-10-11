@@ -1034,3 +1034,19 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 | 下限 macOS 15 | 実機が無く、用意できる見込みも無い。確認できるまで下限の対応を宣言しない。現在の OS だけで代用しない |
 | 公開前の監査（秘密情報・個人の環境情報・不要な履歴） | 追跡ファイルと全履歴（40 commit）への読取り専用の grep のみ実施。token・秘密鍵・認証情報らしい文字列は0件。ユーザーのホームディレクトリの絶対パスを含む追跡ファイルは `docs/verification.md` だけ（この記録自体を含む）、LICENSE は無い。commit author は、個人のメールアドレス（23 commit）、GitHub の noreply アドレス（16 commit）、GitButler の自動 commit（1 commit）。専用の秘密情報検査ツールは使っておらず網羅ではない。公開前にユーザーが履歴の扱い（個人メールの公開可否）とライセンスを判断する |
 | `takemo101/ambien` の公開、Ed25519 鍵の生成、署名・配布 | 未実施。この方針変更は許可ではなく、それぞれ別の明示依頼が必要 |
+
+## P19 背景のぼかし入切とガラスの濃さ
+
+2026-10-11、macOS 27.0.1（26A434）、arm64。「ぼかし」（`blur`、既定 true）と「ガラスの濃さ」（`veil`、0〜1、既定0）を共通設定へ追加した。ぼかしは `Window::set_background_appearance` で `Blurred`／`Transparent` を実行中に切り替え、濃さは Ely palette の `bg` に不透明度を掛けた膜をシーンの root に塗る。システムの「透明度を下げる」は常に優先し、設定窓へ優先中であることを示す。
+
+### AI 側の確認
+
+- `cargo fmt --all --check`、`cargo clippy --all-targets --locked --offline -- -D warnings`、`cargo test --locked --offline` は成功（209 tests、追加は controls／persistence／appearance／scene の各 test）。
+- 追加した test は、既定が従来のガラス（blur true・veil 0）であること、blur／veil が手動意図にならず設定世代だけを進めること、保存の既定・型違い・範囲外・往復と未知キー保持、背景の決定（ぼかし入／切／透明度低下／解除後）、膜の不透明度（0で何も塗らない、透明度低下で1、範囲外を丸める）である。
+- 実窓の native E2E（`controls`／`lifecycle`／`persistence`）は、このセッションが画面ロック中だったため `session.preflight` で BLOCKED となり実行されていない。
+
+### 未確認範囲
+
+- 実窓でぼかしの入切・濃さの操作がデスクトップ上でどう見えるか（ライト・ダーク・透明度低下を含む）は、ユーザーの目視が必要で、未観測。
+- `Window::set_background_appearance` で `Blurred` と `Transparent` を実行中に往復したときの描画の乱れは、実窓では観測していない（GPUI の source 上は変更可能と確認）。
+- ガラスの濃さの既定・刻み・濃さ100%の見え方の好みはユーザーの判断。

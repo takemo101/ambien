@@ -427,6 +427,16 @@ fn normalize(root: &Map<String, Value>, registry: &Registry) -> (LoadedState, Op
         &mut repairs,
     ) as f32)
     .expect("clamped volume is normalized");
+    controls.blur = boolean(root.get("blur"), controls.blur, "blur", &mut repairs);
+    controls.veil = Normalized::new(number(
+        root.get("veil"),
+        f64::from(controls.veil.get()),
+        0.0,
+        1.0,
+        "veil",
+        &mut repairs,
+    ) as f32)
+    .expect("clamped veil is normalized");
     controls.mute = boolean(root.get("mute"), controls.mute, "mute", &mut repairs);
     controls.wander = boolean(root.get("wander"), controls.wander, "wander", &mut repairs);
     controls.dwell_min_minutes = time_setting(
@@ -548,6 +558,8 @@ impl StateDocument {
         let controls = &snapshot.controls;
         root.insert("version".into(), Value::from(1));
         root.insert("volume".into(), Value::from(controls.volume.get()));
+        root.insert("blur".into(), Value::from(controls.blur));
+        root.insert("veil".into(), Value::from(controls.veil.get()));
         root.insert("mute".into(), Value::from(controls.mute));
         root.insert("wander".into(), Value::from(controls.wander));
         root.insert(
@@ -1231,6 +1243,40 @@ mod tests {
         assert_eq!(saved["window"]["future"], original["window"]["future"]);
         assert_eq!(saved["window"]["x"], json!(2.0));
         assert_eq!(saved["window"]["display_uuid"], Value::Null);
+    }
+
+    #[test]
+    fn blur_and_veil_default_repair_and_roundtrip_with_unknown_keys_kept() {
+        let fixture = Fixture::new();
+        let registry = registry();
+        // An older file without the keys keeps today's glass: blurred, no veil.
+        fixture.write(&json!({"version":1, "volume":0.4}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(state.controls.blur);
+        assert_eq!(state.controls.veil, Normalized::ZERO);
+        assert!(notice.is_none());
+        // Wrong types fall back to the defaults, out-of-range values clamp to the ends.
+        fixture.write(&json!({"version":1, "blur":"yes", "veil":7}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(state.controls.blur);
+        assert_eq!(state.controls.veil, Normalized::ONE);
+        assert!(notice.unwrap().contains("blur"));
+        // A saved choice survives a round trip next to keys this version does not know.
+        fixture.write(&json!({"version":1, "future_display": {"mode": 2}}));
+        let (worker, startup, _notices) =
+            SaveWorker::start(fixture.path(), registry.clone()).unwrap();
+        startup.recv_blocking().unwrap();
+        let revision = Revision::from_raw(1);
+        let mut request = snapshot(&registry, 0.5);
+        request.controls.blur = false;
+        request.controls.veil = Normalized::new(0.35).unwrap();
+        worker.submit(revision, request).unwrap();
+        worker.flush(revision).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(fixture.path()).unwrap()).unwrap();
+        assert_eq!(saved["future_display"], json!({"mode": 2}));
+        let (state, _, _, _) = loaded(load_state(&fixture.path(), &registry));
+        assert!(!state.controls.blur);
+        assert_eq!(state.controls.veil, Normalized::new(0.35).unwrap());
     }
 
     #[test]
