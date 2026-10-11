@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::controls::{ControlState, Normalized, Revision};
+use crate::lifecycle::AttemptId;
 use crate::situations::{SituationIndex, VisualShape};
 
 use super::timing::{MachNanos, StreamEpoch, WorldSeconds};
@@ -579,6 +580,9 @@ pub(crate) struct ControlMailbox {
     manual_revision: AtomicU64,
     wander_revision: AtomicU64,
     settings_revision: AtomicU64,
+    shutdown_request: AtomicU64,
+    shutdown_deadline: AtomicU64,
+    shutdown_deadline_attempt: AtomicU64,
 }
 
 impl ControlMailbox {
@@ -607,6 +611,9 @@ impl ControlMailbox {
             manual_revision: AtomicU64::new(initial.manual_revision.get()),
             wander_revision: AtomicU64::new(initial.wander_revision.get()),
             settings_revision: AtomicU64::new(initial.settings_revision.get()),
+            shutdown_request: AtomicU64::new(0),
+            shutdown_deadline: AtomicU64::new(0),
+            shutdown_deadline_attempt: AtomicU64::new(0),
         }
     }
 
@@ -691,6 +698,32 @@ impl ControlMailbox {
         dst.wander_revision = Revision::from_raw(self.wander_revision.load(Ordering::SeqCst));
         dst.settings_revision = Revision::from_raw(self.settings_revision.load(Ordering::SeqCst));
         self.sequence.load(Ordering::SeqCst) == before
+    }
+
+    /// Main asks the engine to fade to silence for this termination attempt.
+    pub(crate) fn request_shutdown(&self, attempt: AttemptId) {
+        self.shutdown_request.store(attempt.get(), Ordering::SeqCst);
+    }
+
+    /// Callback side: the attempt whose fade should run, if any.
+    pub(crate) fn shutdown_request(&self) -> Option<AttemptId> {
+        AttemptId::from_raw(self.shutdown_request.load(Ordering::SeqCst))
+    }
+
+    /// The callback reports the scheduled playback time of the fade's final sample.
+    /// The deadline is stored before the attempt, so a reader that sees the attempt
+    /// also sees its deadline.
+    pub(crate) fn publish_shutdown_deadline(&self, attempt: AttemptId, deadline: MachNanos) {
+        self.shutdown_deadline
+            .store(deadline.get(), Ordering::SeqCst);
+        self.shutdown_deadline_attempt
+            .store(attempt.get(), Ordering::SeqCst);
+    }
+
+    /// Only the requested attempt's own deadline; another attempt's is never returned.
+    pub(crate) fn shutdown_deadline(&self, attempt: AttemptId) -> Option<MachNanos> {
+        (self.shutdown_deadline_attempt.load(Ordering::SeqCst) == attempt.get())
+            .then(|| MachNanos::new(self.shutdown_deadline.load(Ordering::SeqCst)))
     }
 }
 

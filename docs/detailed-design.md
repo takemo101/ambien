@@ -687,6 +687,16 @@ static NSApplicationTerminateReply ambien_applicationShouldTerminate(
 
 native 同期 callback は App へ再入せず、token を main の defer 経路へ渡す。OS の pending request に対し、完了時は同じ token で `replyToApplicationShouldTerminate:YES`、保存失敗なら NO。通常 App action は最初に Coordinator、App::quit は commit 後だけ。OS shutdown／Sparkle Apple event と内部 Quit の重複は同一 active attempt に合流し、複数 save／fade／reply を作らない。[AppKit termination](https://developer.apple.com/documentation/appkit/nsapplicationdelegate/applicationshouldterminate(_:))、[reply](https://developer.apple.com/documentation/appkit/nsapplication/reply(toapplicationshouldterminate:))
 
+### 現存の終了経路（P12）
+
+[`src/lifecycle.rs`](../src/lifecycle.rs) の `TerminationCoordinator` は純粋な状態機械で、`AwaitLatestState → Saving(revision) → Fading → Committing` を持つ。Quit・⌘Q・メニューと OS の終了要求は同じ `request()` に合流し、既に attempt があれば `Joined` になる。保存結果は最終 snapshot の revision と完全に一致したものだけを採り、古い revision の成功は無視する。失敗は attempt を取消して edit・autosave・音を戻し、取消済みや古い `AttemptId` の結果は新しい attempt に作用しない。`NormalQuit` だけを実装し、`UpdateInstall` は P15 以降で追加する。
+
+`AppModel` は attempt の間 edit と autosave を止め、10ms の poll Task で進める。音声側が最新 control を ack する（epoch 一致かつ `ack_revision >= settings_revision`、source が無ければ待たず、最長500ms）のを待って最終 snapshot を submit し、その receipt を `save_updated` が coordinator へ渡す。成功後だけ `ControlMailbox::request_shutdown` で100msの独立した shutdown gain（`render.rs` の4つ目の `OutputRamp`）を開始する。callback は最終 sample の予定 playback 時刻（`presentation_time(playback, frame_offset + 1, 0 遅延)`）を同じ mailbox へ publish し、main は `MachClock::now()` がそれに達するまで stream を保持する。出力が Running でない間（sleep・機器喪失・失敗）は凍結済みで待たず、callback が deadline を報告しない場合は500msで打ち切る。commit は App の borrow の外で行い、保存済みの終了では `on_app_quit` の再保存を省く。
+
+native gate は計画の `native/*.m`・`build.rs` を使わず、`objc2::ffi` の `class_getInstanceMethod` で不足を確認し `class_addMethod` で `GPUIApplicationDelegate` へ `applicationShouldTerminate:`（`Q@:@`）だけを追加する純 Rust 実装である（Cargo.toml／Cargo.lock の変更なし）。既存実装の置換・wrap・swizzle はせず、実装が既にある・追加失敗・二重 install は `TerminationGateError` として設定の通知に表示する。この場合も app 内の Quit は coordinator を通る。IMP は commit 許可前なら `NSTerminateLater` を返して `try_send` で main へ知らせるだけで、attempt の完了時に同じ経路で `replyToApplicationShouldTerminate:` を返す。取消は NO、commit は YES で、内部の `cx.quit()` は許可後にだけ `NSTerminateNow` を得る。
+
+保存できない状態は終了を妨げない。保護された旧版・新版の状態（`ReadOnly`）と、保存 worker が無い・停止した状態（`Spawn`／`StartupChannel`／`WorkerStopped`／`WorkerPanicked`）は、何も書けないため終了を止めても何も守らず、利用者を閉じ込めて OS の logout も止める。一時ファイル作成・書込み・置換のように直して再試行できる失敗だけが終了を取り消し、失敗を表示して音を続ける。
+
 ### Sparkle標準driverの保存beforeInstall
 
 確認済み Sparkle は [SPUUpdater](https://github.com/sparkle-project/Sparkle/blob/eef1a539a373c1f1a320624b1130fc5de7b2e100/Sparkle/SPUUpdater.h) と [SPUStandardUserDriver](https://github.com/sparkle-project/Sparkle/blob/eef1a539a373c1f1a320624b1130fc5de7b2e100/Sparkle/SPUStandardUserDriver.h) を直接組み合わせられる。`SPUStandardUpdaterController` 単体では reply の保存 gate を挟めないため採らず、標準 user driver の薄い subclass で **ready と Installing stage の再開 reply** を wrap する。確認・download・error・authorization 画面は標準のまま。main run loop は GPUI。

@@ -1,4 +1,9 @@
-use std::{error::Error, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ely::theme::{Mode, Theme};
 use gpui::{
@@ -10,11 +15,16 @@ use gpui::{
 use crate::{
     audio::{AudioController, OutputStatus, RecoverySignals},
     controls::{ControlEdit, ControlState, Revision},
+    lifecycle::{
+        AttemptId, POLL_INTERVAL, Requested, SaveDecision, TerminationCoordinator, fade_finished,
+        final_save_allows_quit, latest_state_settled,
+    },
     persistence::{LoadedState, SaveError, SaveSnapshot, SaveStage, SaveStartup, SaveWorker},
     platform::macos::{
         EnvironmentMonitor, PowerMonitor, ScreenLayout, WindowGeometryError, WindowPlacement,
-        WindowRole, capture_placement, constrain_window, prepare_window, read_display_options,
-        read_screen_layout, refit_window,
+        WindowRole, capture_placement, constrain_window, finish_termination,
+        install_termination_gate, prepare_window, read_display_options, read_screen_layout,
+        refit_window,
     },
     situations::{Registry, SituationIndex},
     ui::{
@@ -36,6 +46,14 @@ struct SelectSituation {
 }
 
 type WindowResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+/// What the termination poll should do next.
+enum TerminationStep {
+    Continue,
+    /// The fade is over: allow the quit (outside the App borrow).
+    Commit,
+    Stop,
+}
 
 struct AppRoot(Entity<AppModel>);
 
@@ -70,6 +88,10 @@ pub(crate) struct AppModel {
     environment: Option<EnvironmentMonitor>,
     environment_changes: Option<ChangeNotifier>,
     environment_task: Option<Task<()>>,
+    coordinator: TerminationCoordinator,
+    termination_task: Option<Task<()>>,
+    termination_signal: Option<Task<()>>,
+    termination_since: Instant,
 }
 
 pub(crate) fn start(cx: &mut App) {
@@ -144,6 +166,13 @@ pub(crate) fn start(cx: &mut App) {
             }
         }
     };
+    let (termination_notifier, termination_receiver) = change_channel();
+    // The AppKit callback only signals; the owner Task above merges it into an attempt.
+    // A failure is shown, and the in-app Quit still saves and fades before exiting.
+    let gate_failure = install_termination_gate(move || {
+        termination_notifier.notify();
+    })
+    .err();
     let owner_notifier = change_notifier.clone();
     let owner = cx.new(move |_| AppModel {
         scene: None,
@@ -157,6 +186,10 @@ pub(crate) fn start(cx: &mut App) {
         environment,
         environment_changes: Some(owner_notifier),
         environment_task: None,
+        coordinator: TerminationCoordinator::default(),
+        termination_task: None,
+        termination_signal: None,
+        termination_since: Instant::now(),
         audio,
         power_monitor,
         controls,
@@ -168,7 +201,10 @@ pub(crate) fn start(cx: &mut App) {
         save_updates: None,
         autosave: None,
         save_revision: Revision::INITIAL,
-        save_notice: notice.map(|notice| format!("保存状態: {notice}").into()),
+        save_notice: join_notices(
+            notice.map(|notice| format!("保存状態: {notice}")),
+            gate_failure.map(|error| format!("終了前の保存と音の終了を調整できません: {error}")),
+        ),
         save_error: None,
         last_resume,
         placement,
@@ -191,6 +227,22 @@ pub(crate) fn start(cx: &mut App) {
     owner.update(cx, |model, _| {
         model.environment_task = Some(environment_task)
     });
+    let termination_signal = owner.update(cx, |_, cx| {
+        cx.spawn(async move |owner, cx| {
+            // An OS termination request (Dock Quit, logout) joins the same attempt.
+            while termination_receiver.recv().await.is_ok() {
+                if owner
+                    .update(cx, |model, cx| model.request_termination(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+    });
+    owner.update(cx, |model, _| {
+        model.termination_signal = Some(termination_signal)
+    });
     cx.set_global(AppRoot(owner.clone()));
 
     let closed = cx.on_window_closed(|cx, window_id| {
@@ -206,9 +258,15 @@ pub(crate) fn start(cx: &mut App) {
     owner.update(cx, |model, cx| {
         // GPUI retains globals through native shutdown; root Drop alone is not a quit hook.
         model._quit = Some(cx.on_app_quit(|model, cx| {
-            if let Err(error) = model.flush_latest(cx) {
+            // An attempt that committed already saved the final state; saving again
+            // here would only repeat it. Any other quit path still saves before exit.
+            if !model.coordinator.is_committing()
+                && let Err(error) = model.flush_latest(cx)
+            {
                 model.record_save_error(error, cx);
             }
+            model.termination_task = None;
+            model.termination_signal = None;
             // Observer removal, then channel close, then the owner Task; never detach it.
             if let Some(mut monitor) = model.environment.take()
                 && let Err(error) = monitor.shutdown()
@@ -282,7 +340,13 @@ pub(crate) fn start(cx: &mut App) {
             });
         });
     });
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| {
+        // Quit, ⌘Q and the menu all request the same attempt; none quits directly.
+        cx.defer(|cx| {
+            let owner = cx.global::<AppRoot>().0.clone();
+            owner.update(cx, |model, cx| model.request_termination(cx));
+        });
+    });
     cx.on_action(|_: &ToggleWander, cx| {
         cx.defer(|cx| {
             let owner = cx.global::<AppRoot>().0.clone();
@@ -486,6 +550,9 @@ impl AppModel {
     }
 
     fn apply_control_edit(&mut self, edit: ControlEdit, cx: &mut Context<Self>) {
+        if self.coordinator.is_active() {
+            return; // Edits stop while the final state is saved and the sound fades.
+        }
         let (_, source) = self.audio.shared().snapshot();
         let Some(source) = source else {
             return; // Preserve the existing preparing/failed-output control gate.
@@ -777,6 +844,9 @@ impl AppModel {
     }
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        if self.coordinator.is_active() {
+            return; // The termination snapshot already carries the latest endpoints.
+        }
         let revision = match self.next_save_revision() {
             Ok(revision) => revision,
             Err(error) => {
@@ -801,17 +871,19 @@ impl AppModel {
 
     fn submit_save(&mut self, revision: Revision, cx: &mut Context<Self>) -> Result<(), SaveError> {
         if let Some(window) = self.scene {
-            let capture = window
-                .update(cx, |_, window, _| capture_placement(window))
-                .map_err(|error| SaveError {
-                    stage: SaveStage::Serialize,
-                    message: format!("保存時のシーンを確認できません: {error}"),
-                })?
-                .map_err(|error| SaveError {
-                    stage: SaveStage::Serialize,
-                    message: format!("保存時の窓位置を確認できません: {error}"),
-                })?;
-            self.remember_placement(capture.0, capture.1, cx);
+            // A window rectangle that cannot be read right now (a screen change in
+            // progress) keeps the last finite one; it must neither block a save nor a quit.
+            match window.update(cx, |_, window, _| capture_placement(window)) {
+                Ok(Ok((placement, display))) => {
+                    self.remember_placement(placement, display, cx);
+                }
+                Ok(Err(error)) => {
+                    eprintln!("Ambien: 保存時の窓位置を確認できず、最後の位置を使います: {error}");
+                }
+                Err(error) => {
+                    eprintln!("Ambien: 保存時のシーンを確認できず、最後の位置を使います: {error}");
+                }
+            }
         }
         let shared = self.audio.shared();
         let (_, source) = shared.snapshot();
@@ -860,6 +932,22 @@ impl AppModel {
         let Some(receipt) = self.save_worker.as_ref().and_then(SaveWorker::take_receipt) else {
             return;
         };
+        // The final termination snapshot is matched by its own exact revision, before
+        // the staleness rule below, which only protects ordinary edits.
+        match self
+            .coordinator
+            .save_completed(receipt.revision, final_save_allows_quit(&receipt.result))
+        {
+            SaveDecision::Fade(id) => self.begin_fade(id),
+            SaveDecision::Cancel(_) => {
+                // Not saved: keep running. Edits resume; a waiting OS request is refused.
+                self.termination_task = None;
+                if let Err(error) = finish_termination(false) {
+                    eprintln!("Ambien: 終了要求を取り消せません: {error}");
+                }
+            }
+            SaveDecision::Ignore => {}
+        }
         if receipt.revision != self.save_revision {
             return; // Completion of an older snapshot cannot acknowledge the latest edit.
         }
@@ -872,6 +960,140 @@ impl AppModel {
             }
             Err(error) => self.record_save_error(error, cx),
         }
+    }
+
+    /// Quit, ⌘Q and OS termination all land here. The first request starts the attempt;
+    /// later ones join it, so there is never more than one save, fade or reply.
+    fn request_termination(&mut self, cx: &mut Context<Self>) {
+        let Requested::Started(id) = self.coordinator.request() else {
+            return;
+        };
+        self.termination_since = Instant::now();
+        self.termination_task = Some(cx.spawn(async move |owner, cx| {
+            loop {
+                cx.background_executor().timer(POLL_INTERVAL).await;
+                match owner.update(cx, |model, cx| model.termination_step(id, cx)) {
+                    Ok(TerminationStep::Continue) => {}
+                    Ok(TerminationStep::Commit) => {
+                        // Outside the App borrow: AppKit may act on its reply at once, and
+                        // GPUI's quit handling needs that borrow.
+                        match finish_termination(true) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let _ = owner.update(cx, |_, cx| cx.quit());
+                            }
+                            Err(error) => {
+                                eprintln!("Ambien: 終了を許可できません: {error}");
+                                let _ = owner.update(cx, |_, cx| cx.quit());
+                            }
+                        }
+                        break;
+                    }
+                    Ok(TerminationStep::Stop) | Err(_) => break,
+                }
+            }
+        }));
+    }
+
+    /// One poll of the attempt.
+    fn termination_step(&mut self, id: AttemptId, cx: &mut Context<Self>) -> TerminationStep {
+        if self.coordinator.is_awaiting_latest_state(id) {
+            let shared = self.audio.shared();
+            let (_, source) = shared.snapshot();
+            let acknowledged = source.as_ref().is_some_and(|source| {
+                shared.control_receipt().is_some_and(|receipt| {
+                    receipt.epoch == source.epoch
+                        && receipt.ack_revision.get() >= self.controls.settings_revision.get()
+                })
+            });
+            if latest_state_settled(
+                source.is_some(),
+                acknowledged,
+                self.termination_since.elapsed(),
+            ) {
+                self.begin_final_save(id, cx);
+            }
+        } else if self.coordinator.is_fading(id) {
+            let (status, source) = self.audio.shared().snapshot();
+            let deadline = source
+                .as_ref()
+                .and_then(|source| source.controls.shutdown_deadline(id));
+            // Without a readable clock the playback time cannot be waited on.
+            let now = source.as_ref().and_then(|source| source.clock.now().ok());
+            let finished = now.is_none_or(|now| {
+                fade_finished(
+                    status.is_running(),
+                    deadline,
+                    now,
+                    self.termination_since.elapsed(),
+                )
+            });
+            if finished {
+                return if self.coordinator.begin_commit(id) {
+                    TerminationStep::Commit
+                } else {
+                    TerminationStep::Stop
+                };
+            }
+        }
+        // Saving: the receipt arrives through `save_updated`. A cancelled attempt ends.
+        if self.coordinator.is_current(id) {
+            TerminationStep::Continue
+        } else {
+            TerminationStep::Stop
+        }
+    }
+
+    /// Edits are already stopped and the audio side has acknowledged the last control:
+    /// save the final snapshot, whose resume target comes from that acknowledgement.
+    fn begin_final_save(&mut self, id: AttemptId, cx: &mut Context<Self>) {
+        self.autosave = None;
+        let revision = match self.next_save_revision() {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.cancel_termination(id);
+                self.record_save_error(error, cx);
+                return;
+            }
+        };
+        match self.submit_save(revision, cx) {
+            Ok(()) => {
+                self.coordinator.begin_saving(id, revision);
+            }
+            Err(error) => {
+                // No worker at all (it never started or died) can never save: quit anyway.
+                let proceed = final_save_allows_quit(&Err(error.clone()));
+                self.record_save_error(error, cx);
+                if !proceed {
+                    self.cancel_termination(id);
+                } else if self.coordinator.begin_saving(id, revision)
+                    && let SaveDecision::Fade(id) = self.coordinator.save_completed(revision, true)
+                {
+                    self.begin_fade(id);
+                }
+            }
+        }
+    }
+
+    /// Gives up before the output was touched: edits resume, the sound goes on and a
+    /// waiting OS termination request is refused.
+    fn cancel_termination(&mut self, id: AttemptId) {
+        self.coordinator.cancel(id);
+        self.termination_task = None;
+        if let Err(error) = finish_termination(false) {
+            eprintln!("Ambien: 終了要求を取り消せません: {error}");
+        }
+    }
+
+    /// Only after the final save succeeded: fade to silence. The request goes to any
+    /// source, even while the output is momentarily not running, so an engine that
+    /// resumes during the attempt fades on its first callback. A stopped output has
+    /// nothing to fade and is simply not waited on by `termination_step`.
+    fn begin_fade(&mut self, id: AttemptId) {
+        if let (_, Some(source)) = self.audio.shared().snapshot() {
+            source.controls.request_shutdown(id);
+        }
+        self.termination_since = Instant::now();
     }
 }
 
@@ -887,6 +1109,15 @@ fn refit_and_sync(
         window.bounds_changed(cx);
     }
     Ok(())
+}
+
+/// Startup notices, joined in a single persistence label.
+fn join_notices(first: Option<String>, second: Option<String>) -> Option<SharedString> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} / {second}").into()),
+        (Some(only), None) | (None, Some(only)) => Some(only.into()),
+        (None, None) => None,
+    }
 }
 
 /// Follows the system light/dark appearance for this window's lifetime. The Theme is
