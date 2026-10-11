@@ -8,7 +8,7 @@
 
 use std::f32::consts::TAU;
 
-use super::{Look, Mark, deepen, lighten, mix};
+use super::{Look, Mark, deepen, lighten, mix, seed};
 use crate::{controls::VisualIntensity, situations::VisualShape};
 
 /// What the scatter depends on. `opacity` is the particle's envelope for this frame.
@@ -97,9 +97,15 @@ fn deep_unit(radius: f32) -> f32 {
 pub(super) fn lead_ring_radius(shape: VisualShape, radius: f32, age: f32) -> f32 {
     match shape {
         VisualShape::Point => rain_unit(radius) * (2.0 + 15.0 * ease_out(age)),
-        VisualShape::Impact => rock_unit(radius) * (2.0 + 13.0 * ease_out(age)),
+        VisualShape::Impact => rock_unit(radius) * (2.5 + 13.0 * ease_out(age)),
         VisualShape::SlowGlow => 0.0,
     }
+}
+
+/// The turn and the corner seed of a rock's shock outline. The rainbow fringes use the same, so
+/// they are scaled copies that stay outside it instead of crossing it.
+pub(super) fn shock_outline(serial: u64) -> (f32, u32) {
+    (TAU * unit(serial, 2), seed(serial, 3))
 }
 
 pub(super) fn scatter(look: &mut Look, s: &Scatter) {
@@ -175,36 +181,60 @@ fn rain(look: &mut Look, s: &Scatter, soft: f32) {
     }
 }
 
-/// A rock impact: a shock ring, shards thrown out and pulled down, and from standard up sparks
-/// and a puff of dust.
+/// A rock impact, all in hard angles: a jagged flash, a jagged shock outline, uneven shards that
+/// tumble as they are thrown out and pulled down, and from standard up diamond sparks and a puff of
+/// angular dust. Only the core's soft light and the halos (blurs) are round.
 fn rock(look: &mut Look, s: &Scatter, soft: f32) {
     let u = rock_unit(s.radius);
     let fade = 1.0 - s.age;
-    look.push(Mark::Ring {
+    // The flash lives only for the first third of the impact.
+    let flash = (1.0 - 3.0 * s.age).max(0.0);
+    if flash > 0.0 {
+        look.push(Mark::Poly {
+            offset: [0.0, 0.0],
+            radius: u * 9.0 * flash,
+            sides: 6,
+            rotation: 0.3,
+            seed: seed(s.serial, 1),
+            stroke: 0.0,
+            rgb: lighten(s.rgb, 0.7),
+            opacity: soft * 0.9 * flash,
+        });
+    }
+    let ring = lead_ring_radius(VisualShape::Impact, s.radius, s.age);
+    let (turn, outline) = shock_outline(s.serial);
+    // A stroke wider than the outline's inner radius would overlap itself into a blob; a jagged
+    // hexagon's edges are at least 0.39 of its radius from the centre.
+    let reach = ring * 0.7;
+    let width = (3.0 * fade + 0.8).min(reach);
+    look.push(Mark::Poly {
         offset: [0.0, 0.0],
-        radius: u * (2.0 + 13.0 * ease_out(s.age)),
-        width: 3.0 * fade + 0.5,
+        radius: ring,
+        sides: 6,
+        rotation: turn,
+        seed: outline,
+        stroke: width,
         rgb: s.rgb,
         opacity: soft * 0.9 * fade,
     });
-    ring_halo(
-        look,
-        s,
-        u * (2.0 + 13.0 * ease_out(s.age)),
-        3.0 * fade + 0.5,
-        soft * 0.9 * fade,
-    );
+    // The same outline again, wide and faint, so its edge reads as softened.
+    look.push(Mark::Poly {
+        offset: [0.0, 0.0],
+        radius: ring,
+        sides: 6,
+        rotation: turn,
+        seed: outline,
+        stroke: (width * 4.0 + 2.0).min(reach),
+        rgb: s.rgb,
+        opacity: soft * 0.9 * fade * 0.18,
+    });
     let shards = match s.intensity {
         VisualIntensity::Calm => count(6, 3, s.strength),
         VisualIntensity::Standard => count(10, 4, s.strength),
         VisualIntensity::Vivid => count(13, 7, s.strength),
     };
-    let halos = match s.intensity {
-        VisualIntensity::Calm => 0,
-        VisualIntensity::Standard => 6,
-        VisualIntensity::Vivid => 10,
-    };
-    for i in 0..shards {
+    // Where shard `i` is and how big, so its halo can be laid on it afterwards.
+    let shard = |i: u64| {
         let angle = TAU * (i as f32 / shards as f32 + 0.08 * unit(s.serial, i));
         let speed = u * (32.0 + 48.0 * unit(s.serial, 100 + i));
         let distance = speed * (1.0 - fade * fade);
@@ -212,48 +242,83 @@ fn rock(look: &mut Look, s: &Scatter, soft: f32) {
             angle.cos() * distance,
             angle.sin() * distance + 0.5 * u * 70.0 * s.age * s.age,
         ];
-        let radius = u * (0.8 + 1.9 * unit(s.serial, 200 + i)) * (1.0 - 0.55 * s.age);
-        if i < halos {
-            halo(look, s, offset, radius * 3.5, soft * 0.5);
-        }
-        look.push(Mark::Dot {
+        let size = u * (1.3 + 3.0 * unit(s.serial, 200 + i)) * (1.0 - 0.45 * s.age);
+        (offset, size)
+    };
+    for i in 0..shards {
+        let (offset, size) = shard(i);
+        // Each shard tumbles at its own rate.
+        let spin = (unit(s.serial, 500 + i) - 0.5) * 9.0 * s.age;
+        look.push(Mark::Poly {
             offset,
-            radius,
-            rgb: s.rgb,
+            radius: size,
+            sides: 3 + (i % 3) as u8,
+            rotation: TAU * unit(s.serial, 600 + i) + spin,
+            seed: seed(s.serial, 700 + i),
+            stroke: 0.0,
+            rgb: if i % 3 == 0 {
+                lighten(s.rgb, 0.25)
+            } else {
+                s.rgb
+            },
             opacity: soft * 0.95,
         });
     }
-    if s.intensity == VisualIntensity::Calm {
-        return;
-    }
-    let sparks = if s.intensity == VisualIntensity::Vivid {
-        7
-    } else {
-        4
+    let sparks = match s.intensity {
+        VisualIntensity::Calm => 0,
+        VisualIntensity::Standard => 4,
+        VisualIntensity::Vivid => 7,
     };
     let burn = (s.age * 2.2).min(1.0);
-    for i in 0..sparks {
+    let spark = |i: u64| {
         let angle = TAU * unit(s.serial, 400 + i);
         let speed = u * (55.0 + 40.0 * unit(s.serial, 410 + i));
         let distance = speed * (1.0 - (1.0 - burn) * (1.0 - burn));
-        let offset = [angle.cos() * distance, angle.sin() * distance];
-        halo(look, s, offset, u * 5.0, soft * 0.6 * (1.0 - burn));
-        look.push(Mark::Dot {
+        (angle, [angle.cos() * distance, angle.sin() * distance])
+    };
+    for i in 0..sparks {
+        let (angle, offset) = spark(i);
+        // A diamond pointing along its flight.
+        look.push(Mark::Poly {
             offset,
-            radius: u * 0.8,
+            radius: u * 1.5,
+            sides: 4,
+            rotation: angle,
+            seed: seed(s.serial, 800 + i),
+            stroke: 0.0,
             rgb: lighten(s.rgb, 0.8),
             opacity: soft * 0.95 * (1.0 - burn),
         });
     }
-    for i in 0..4 {
-        let angle = TAU * unit(s.serial, 300 + i);
-        let distance = u * (2.0 + 5.0 * s.age) * (0.5 + unit(s.serial, 310 + i));
-        look.push(Mark::Dot {
-            offset: [angle.cos() * distance, angle.sin() * distance],
-            radius: u * (3.0 + 6.0 * s.age),
-            rgb: s.rgb,
-            opacity: soft * 0.13,
-        });
+    if s.intensity != VisualIntensity::Calm {
+        for i in 0..4 {
+            let angle = TAU * unit(s.serial, 300 + i);
+            let distance = u * (2.0 + 5.0 * s.age) * (0.5 + unit(s.serial, 310 + i));
+            look.push(Mark::Poly {
+                offset: [angle.cos() * distance, angle.sin() * distance],
+                radius: u * (3.0 + 6.0 * s.age),
+                sides: 5,
+                rotation: TAU * unit(s.serial, 320 + i),
+                seed: seed(s.serial, 330 + i),
+                stroke: 0.0,
+                rgb: s.rgb,
+                opacity: soft * 0.13,
+            });
+        }
+    }
+    // The halos, last.
+    let halos = match s.intensity {
+        VisualIntensity::Calm => 0,
+        VisualIntensity::Standard => 6,
+        VisualIntensity::Vivid => 10,
+    };
+    for i in 0..shards.min(halos) {
+        let (offset, size) = shard(i);
+        halo(look, s, offset, size * 2.5, soft * 0.5);
+    }
+    for i in 0..sparks {
+        let (_, offset) = spark(i);
+        halo(look, s, offset, u * 5.0, soft * 0.6 * (1.0 - burn));
     }
 }
 
@@ -420,7 +485,12 @@ mod tests {
                 let rings: Vec<(f32, f32)> = scatter_of(shape, level, 0.5, 0.4)
                     .iter()
                     .filter_map(|mark| match *mark {
-                        Mark::Ring { width, opacity, .. } => Some((width, opacity)),
+                        Mark::Ring { width, opacity, .. }
+                        | Mark::Poly {
+                            stroke: width,
+                            opacity,
+                            ..
+                        } if width > 0.0 => Some((width, opacity)),
                         _ => None,
                     })
                     .collect();
@@ -435,14 +505,43 @@ mod tests {
         }
     }
 
+    /// The thrown pieces: round dots, and the filled polygons rock throws instead.
     fn dots(marks: &[Mark]) -> Vec<([f32; 2], f32)> {
         marks
             .iter()
             .filter_map(|mark| match *mark {
-                Mark::Dot { offset, radius, .. } => Some((offset, radius)),
+                Mark::Dot { offset, radius, .. }
+                | Mark::Poly {
+                    offset,
+                    radius,
+                    stroke: 0.0,
+                    ..
+                } => Some((offset, radius)),
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn rock_is_all_hard_angles_no_circles_at_any_intensity_or_age() {
+        for level in LEVELS {
+            for strength in [0.0, 0.5, 1.0] {
+                for step in 0..=20 {
+                    let marks =
+                        scatter_of(VisualShape::Impact, level, strength, step as f32 / 20.0);
+                    assert!(
+                        !marks
+                            .iter()
+                            .any(|mark| matches!(mark, Mark::Ring { .. } | Mark::Dot { .. })),
+                        "{level:?} {strength} {step}: rock has a circle"
+                    );
+                    assert!(
+                        marks.iter().any(|mark| matches!(mark, Mark::Poly { .. })),
+                        "{level:?} rock is drawn with polygons"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -593,6 +692,12 @@ mod tests {
                                     ..
                                 }
                                 | Mark::Ring {
+                                    offset,
+                                    radius,
+                                    opacity,
+                                    ..
+                                } => (offset, radius, opacity),
+                                Mark::Poly {
                                     offset,
                                     radius,
                                     opacity,

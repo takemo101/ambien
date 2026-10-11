@@ -6,8 +6,8 @@ use std::{
 use ely::theme::ActiveTheme;
 use gpui::{
     BorderStyle, Bounds, BoxShadow, ContentMask, Context, FocusHandle, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba, Styled, Subscription, Task,
-    Window, canvas, div, fill, outline, point, px, size,
+    IntoElement, MouseButton, ParentElement, PathBuilder, Pixels, Render, Rgba, Styled,
+    Subscription, Task, Window, canvas, div, fill, outline, point, px, size,
 };
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
     ui::{
         appearance::{AccessibilityState, Motion},
         backdrop,
-        look::{Budget, Mark, ParticleInput, look},
+        look::{Budget, Mark, ParticleInput, look, vertices},
     },
 };
 
@@ -582,6 +582,44 @@ fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
                 color,
             ));
         }
+        Mark::Poly { .. } => paint_poly(window, viewport, position, mark),
+    }
+}
+
+/// A jagged polygon mark, filled or as an outline, drawn as a GPUI path. A path that cannot be
+/// built (the tessellator refused it) is skipped; it is only decoration.
+fn paint_poly(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2], mark: &Mark) {
+    let Mark::Poly {
+        offset,
+        radius,
+        sides,
+        rotation,
+        seed,
+        stroke,
+        rgb,
+        opacity,
+    } = *mark
+    else {
+        return;
+    };
+    let (corners, count) = vertices(sides, radius, rotation, seed);
+    let centre = disc_bounds(viewport, position, offset, 0.0).origin;
+    let mut builder = if stroke > 0.0 {
+        PathBuilder::stroke(px(stroke))
+    } else {
+        PathBuilder::fill()
+    };
+    for (index, corner) in corners[..count].iter().enumerate() {
+        let at = centre + point(px(corner[0]), px(corner[1]));
+        if index == 0 {
+            builder.move_to(at);
+        } else {
+            builder.line_to(at);
+        }
+    }
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, rgba(rgb, opacity));
     }
 }
 
