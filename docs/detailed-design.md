@@ -553,6 +553,8 @@ P02 の声 factory は worker で rate・DSP・固定 delay を準備し、`Voic
 
 「演出の強さ」（`visuals`: `calm`／`standard`／`vivid`）は表示専用で、`ControlState` の共通設定として保存・即時反映するが音声 mailbox へは渡さない。各 situation は受理した粒をすべて視覚イベントとして発行し、従来の閾値以上の粒に `large` を付ける（深海は深さの暗さを掛ける前の強さで判定する）。`large` は event ring の shape 語の1 bit に載せ、`VisualRing` の保持順位は「large、強さ、新しさ」の順なので、小さい粒が大きい粒を押し出さない。`look` は小さい粒を、控えめでは何も描かず、標準・派手では小さな淡い点1個にする。大きい粒の見た目は段階に依らない（P23 以降の段階別の質感を除く）。
 
+背景は純粋関数 [`ui::backdrop::backdrop`](../src/ui/backdrop.rs) が、世界時刻・各声の寄与と息・声の色・viewport の論理サイズ・ダークかどうかだけから、固定長（80個）の柔らかな光の列にする。控えめでは空、標準は寄与のある声ごとに2個の色の場がゆっくり漂い、派手はそれに加えて3本・各14点のオーロラの帯が流れて色相がゆっくり動く。寄与は二乗した混合後の値なので、移り変わりでは両方の声の色が寄与に応じて同時に出て、寄与0の声は出ない。位相は f64 の世界時刻から周期ごとに畳むので、長時間の連続稼働でも飛びも精度落ちもない。Reduced motion では時刻を 0 に固定して漂わない。ライトでは色を暗く不透明寄りにし、GPUI の通常の alpha 合成だけで描く（加算は使わない）。scene は先に背景、次に従来の中心の光、粒の順に描く。背景の光は GPUI の影が sigma＝blur_radius の Gaussian であることに合わせ、半径を blur 以上にして影だけで描く（硬い円盤は重ねない）。粒は `paint_drop_shadows`＋`paint_quad`、、世界時刻は直近の header の時刻にその `present` からの経過を足す。乱数は使わない。
+
 `request_animation_frame` だけでは上限 cadence にならない。visible scene だけが timer Task を保持し、期限の notify で必要な更新を要求する。`window.is_visible()`／`observe_window_visibility` を使い、完全 occlusion／最小化時は task を停止、復帰時は live 読取を一度行ってから task を再開する。cadence は SPEC の最大 fps から決め、OS の resize／露出による redraw は animation と別。settings を同じ毎 frame Task に入れず、control／dominant／output／receipt／failure／appearance の離散変化だけ notify。gain／breath／world秒で設定窓を常時 notify しない。
 
 ### Ely実Interfaceとcontrolled form

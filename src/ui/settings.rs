@@ -340,9 +340,11 @@ impl Render for SettingsView {
                     FormField::new("visuals-field", "演出の強さ")
                         .description(match controls.visuals {
                             VisualIntensity::Calm => "控えめ（大きい粒だけ、ガラスの静けさ）",
-                            VisualIntensity::Standard => "標準（小さい粒も淡い点で光ります）",
+                            VisualIntensity::Standard => {
+                                "標準（小さい粒が光り、色の場がゆっくり漂います）"
+                            }
                             VisualIntensity::Vivid => {
-                                "派手（いまは標準と同じ。背景やきらめきは今後追加します）"
+                                "派手（標準に加えて、色の帯がオーロラのように流れます）"
                             }
                         })
                         .child(
