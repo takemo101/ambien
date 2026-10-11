@@ -134,6 +134,15 @@ pub(crate) enum Mark {
         rgb: [f32; 3],
         opacity: f32,
     },
+    /// A rock's glint: three uneven pointed spikes (thin diamonds) from the centre, the longest
+    /// `arm` long and `width` across. Their directions and lengths come from [`spikes`].
+    Shards {
+        arm: f32,
+        width: f32,
+        seed: u32,
+        rgb: [f32; 3],
+        opacity: f32,
+    },
 }
 
 /// Everything the look depends on. `opacity` is the particle's fade envelope for this frame.
@@ -245,6 +254,47 @@ fn rotate(rgb: [f32; 3], forward: bool, amount: f32) -> [f32; 3] {
 /// A brief twinkle that is dark when born and expired and brightest in the middle.
 fn twinkle(age: f32) -> f32 {
     (std::f32::consts::PI * age.clamp(0.0, 1.0)).sin().powi(2)
+}
+
+/// Three spikes from a rock's glint: where each points (an angle, in radians) and how long it is
+/// (a share of the full arm). The first points anywhere; the others are uneven turns from it, so
+/// no two point opposite and it never reads as a plus sign; the lengths differ too. The same
+/// `seed` always gives the same spikes.
+pub(crate) fn spikes(seed: u32) -> [(f32, f32); 3] {
+    let unit = |salt: u32| {
+        let mixed = seed
+            .wrapping_add(salt.wrapping_mul(0x9E37_79B9))
+            .wrapping_mul(0x85EB_CA6B);
+        ((mixed ^ (mixed >> 15)) % 1000) as f32 / 1000.0
+    };
+    let first = TAU * unit(0);
+    [
+        (first, 1.0),
+        (first + TAU * (0.27 + 0.08 * unit(1)), 0.5 + 0.2 * unit(2)),
+        (first + TAU * (0.60 + 0.10 * unit(3)), 0.7 + 0.2 * unit(4)),
+    ]
+}
+
+/// The glint on a particle: a thin plus sign, except for a rock, whose light is three uneven
+/// pointed spikes (a rock has no neat right angles).
+fn glint(input: &ParticleInput, arm: f32, width: f32, rgb: [f32; 3], opacity: f32) -> Mark {
+    let rgb = lighten(rgb, 0.6);
+    if input.shape == VisualShape::Impact {
+        Mark::Shards {
+            arm: arm * 2.0,
+            width: width * 2.4,
+            seed: seed(input.serial, 740),
+            rgb,
+            opacity,
+        }
+    } else {
+        Mark::Cross {
+            arm,
+            width,
+            rgb,
+            opacity,
+        }
+    }
 }
 
 /// The place and shape of one polygon, so a glow can be laid round exactly the same shape.
@@ -447,12 +497,13 @@ fn texture(
             opacity: opacity * 0.2,
         });
     }
-    look.push(Mark::Cross {
-        arm: core * 1.8,
-        width: 1.0,
-        rgb: lighten(rgb, 0.6),
-        opacity: opacity * 0.7 * twinkle(age),
-    });
+    look.push(glint(
+        input,
+        core * 1.8,
+        1.0,
+        rgb,
+        opacity * 0.7 * twinkle(age),
+    ));
     match input.shape {
         VisualShape::Point | VisualShape::Impact => {
             // Rainbow fringes just outside the ripple or shock ring.
@@ -537,12 +588,13 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
                 });
             }
             if input.intensity == VisualIntensity::Vivid && motion != Motion::Reduced {
-                look.push(Mark::Cross {
-                    arm: dot * 3.0,
-                    width: 0.8,
-                    rgb: lighten(rgb, 0.6),
-                    opacity: opacity * 0.5 * twinkle(age),
-                });
+                look.push(glint(
+                    input,
+                    dot * 3.0,
+                    0.8,
+                    rgb,
+                    opacity * 0.5 * twinkle(age),
+                ));
             }
         }
         return look;
@@ -1011,12 +1063,70 @@ mod tests {
             let glints = |marks: &[Mark]| {
                 marks
                     .iter()
-                    .filter(|mark| matches!(mark, Mark::Cross { .. }))
+                    .filter(|mark| matches!(mark, Mark::Cross { .. } | Mark::Shards { .. }))
                     .count()
             };
             assert_eq!((glints(&calm), glints(&standard)), (0, 0), "{shape:?}");
             assert!(glints(&vivid) >= 1, "{shape:?}");
         }
+    }
+
+    #[test]
+    fn a_rocks_glint_is_uneven_spikes_never_a_plus_sign_and_the_others_keep_the_plus() {
+        for shape in SHAPES {
+            for large in [true, false] {
+                let marks = marks_of(
+                    &ParticleInput {
+                        large,
+                        ..at(shape, VisualIntensity::Vivid, true)
+                    },
+                    Motion::Full,
+                );
+                let crosses = marks
+                    .iter()
+                    .filter(|mark| matches!(mark, Mark::Cross { .. }))
+                    .count();
+                let spikes = marks
+                    .iter()
+                    .filter(|mark| matches!(mark, Mark::Shards { .. }))
+                    .count();
+                if shape == VisualShape::Impact {
+                    assert_eq!((crosses, spikes), (0, 1), "a rock has one burst of spikes");
+                } else {
+                    assert_eq!((crosses, spikes), (1, 0), "{shape:?} keeps its plus sign");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn glint_spikes_are_uneven_never_opposite_and_the_same_for_the_same_seed() {
+        let mut longest_first = 0;
+        for seed in (0..3000_u32).map(|n| n.wrapping_mul(2_654_435_761)) {
+            let found = spikes(seed);
+            assert_eq!(found, spikes(seed), "deterministic");
+            let angles = found.map(|(angle, _)| angle);
+            for a in 0..3 {
+                for b in a + 1..3 {
+                    // Compare the turn between two spikes to a half turn: a plus sign has them
+                    // exactly opposite.
+                    let turn = (angles[a] - angles[b]).rem_euclid(TAU);
+                    assert!(
+                        (turn - std::f32::consts::PI).abs() > 0.3,
+                        "seed {seed}: spikes {a} and {b} point nearly opposite"
+                    );
+                }
+            }
+            let lengths = found.map(|(_, share)| share);
+            assert!(lengths.iter().all(|share| (0.4..=1.0).contains(share)));
+            assert!(lengths[0] > lengths[1] && lengths[0] > lengths[2]);
+            assert_ne!(lengths[1], lengths[2], "uneven lengths");
+            if found[0].0 > std::f32::consts::PI {
+                longest_first += 1;
+            }
+        }
+        // The direction is spread over the whole circle, not fixed.
+        assert!((1000..2000).contains(&longest_first), "{longest_first}");
     }
 
     #[test]
@@ -1244,6 +1354,20 @@ mod tests {
                                                 opacity,
                                             } => {
                                                 (vec![arm, width, rgb[0], rgb[1], rgb[2]], opacity)
+                                            }
+                                            Mark::Shards {
+                                                arm,
+                                                width,
+                                                seed,
+                                                rgb,
+                                                opacity,
+                                            } => {
+                                                let mut numbers =
+                                                    vec![arm, width, rgb[0], rgb[1], rgb[2]];
+                                                for (angle, share) in spikes(seed) {
+                                                    numbers.extend([angle, share]);
+                                                }
+                                                (numbers, opacity)
                                             }
                                         };
                                         assert!(numbers.iter().all(|value| value.is_finite()));

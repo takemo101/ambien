@@ -119,6 +119,7 @@ flowchart LR
  P13 --> P27
  P21 --> P28
  P14 --> P29
+ P26 --> P30
  P25 --> P26
  P14 --> P15 --> P16 --> P17 --> P18
  P13 --> P17
@@ -606,6 +607,19 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 - [ ] 「ぼかし」入で、窓の背後の細かい模様がぼけて見える。切では見えたまま。
 
 **Behavior tests:** 純粋に試験できる規則はない。**Smoke/gate:** 鮮明な市松模様の窓を背面に置いた実測（ぼかし入切の差）と、ユーザーが実デスクトップで見て判断する。
+
+## P30 岩のきらめきを十字から尖った光の筋へ
+
+**DependsOn:** P26（岩を多角形で描く）。**SPEC:** [演出の強さ](../SPEC.md#演出の強さ)。
+
+**Files（予定）:** Modify `src/ui/look.rs`（`Mark::Shards` と筋の角度・長さの純粋関数）・`src/ui/scene.rs`（筋の描画）・`src/ui/look/scatter.rs` の test の網羅・`docs/verification.md`・`docs/detailed-design.md`。
+
+**Produces:** 派手の岩のきらめきを、十字から、核から不揃いに放つ3本の尖った光の筋にする。雨・深海は十字のまま。mark 数は増やさない（筋は1 mark）。
+
+- [ ] 岩の派手に十字が出ない。筋は2本が真逆に並ばず、角度・長さが不揃いで、同じイベントなら同じ形になる。
+- [ ] 雨・深海の十字、岩以外の mark 数、標準以下は変えない。
+
+**Behavior tests:** 筋の角度・長さの純粋関数（不揃い・真逆にならない・決定的・有限）と、岩の派手に Cross がなく Shards があること。**Smoke/gate:** 実アプリの派手の岩を見てユーザーが判断する。
 
 ## 全 SPEC 節の coverage matrix
 
