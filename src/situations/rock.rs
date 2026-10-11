@@ -63,9 +63,10 @@ const VISUAL: VisualStyle = VisualStyle {
     color: [0.65, 0.65, 0.65],
     shape: VisualShape::Impact,
 };
-// Bar-like inharmonic partials: the ring of struck stone/ore, not a tuned tone.
-const MODE_RATIOS: [f32; 3] = [1.0, 2.76, 5.40];
-const MODE_WEIGHTS: [f32; 3] = [0.16, 0.30, 0.54];
+// Modes of a struck ball: a small low body (the "tock"), the clear main ring, and a bright
+// shimmer above it. The first number is the main ring's pitch ratio of the tone's centre.
+const MODE_RATIOS: [f32; 3] = [0.32, 1.0, 1.90];
+const MODE_WEIGHTS: [f32; 3] = [0.22, 0.50, 0.28];
 
 pub(super) fn definition() -> SituationDefinition {
     SituationDefinition {
@@ -91,12 +92,15 @@ struct CollisionTone {
 impl CollisionTone {
     fn new(size: f32, hardness: f32) -> Self {
         Self {
-            center: 360.0 * (115.0_f32 / 360.0).powf(size),
-            lifetime: 0.30
-                * (0.95_f64 / 0.30).powf(size as f64)
+            // A ball's pitch: small balls ring high and clear, big ones lower.
+            center: 3_600.0 * (1_700.0_f32 / 3_600.0).powf(size),
+            // A short clear ring: tens of milliseconds to a couple of hundred.
+            lifetime: 0.07
+                * (0.16_f64 / 0.07).powf(size as f64)
                 * 1.25
-                * (0.58_f64 / 1.25).powf(hardness as f64),
-            attack: 0.004 * (0.0008_f64 / 0.004).powf(hardness as f64),
+                * (0.55_f64 / 1.25).powf(hardness as f64),
+            // A hard, nearly instant contact.
+            attack: 0.0006 * (0.00015_f64 / 0.0006).powf(hardness as f64),
             high_mix: 0.08 + hardness * 0.30,
             radius: 2.0 + size * 4.0,
             // Faster attack/high-band excitation is compensated rather than
@@ -149,11 +153,15 @@ const REF_LIFETIME: f32 = 0.5;
 const CRACKLE_LEVEL: f32 = 0.04;
 const ROUGH_HZ: f32 = 110.0;
 
-// Strike-only room: wet share, 60 dB decay time and delay-size stretch. A big, hard room so
-// every strike hangs in the air for seconds.
-const STRIKE_REVERB: f32 = 1.1;
-const ROOM_DECAY_SECONDS: f64 = 3.6;
-const ROOM_SIZE: f64 = 1.8;
+// Strike-only room: wet share, 60 dB decay time and delay-size stretch. A small hall, so a
+// clack is clear and a little roomy, not a cave.
+const STRIKE_REVERB: f32 = 0.40;
+const ROOM_DECAY_SECONDS: f64 = 0.8;
+const ROOM_SIZE: f64 = 0.8;
+// The rolling bed is a low, quiet cloth rumble, whatever the balls' pitch.
+const ROLL_CENTER: f32 = 200.0;
+// Highest Q a collision mode may have (the resonator preparation accepts up to 128).
+const MAX_MODE_Q: f32 = 120.0;
 // Collisions per second at full amount (it was 3.2 when strikes were too sparse).
 const COLLISIONS_PER_SECOND: f64 = 8.0;
 
@@ -224,8 +232,11 @@ impl Collision {
         self.pan = [angle.cos(), angle.sin()];
         for (index, ratio) in MODE_RATIOS.iter().copied().enumerate() {
             self.centers[index] = (tone.center / scale * ratio).min(rate as f32 * 0.40);
+            // The ring dies in about the lifetime: a 60 dB decay of 0.8 x lifetime sets the
+            // bandwidth, and Q stays within the resonator's supported range at any pitch.
+            let decay = 6.9 / (std::f32::consts::PI * 0.8 * self.lifetime as f32);
             self.bandwidths[index] =
-                (3.0 + 2.0 / self.lifetime as f32) * (1.0 + index as f32 * 0.5);
+                (decay * (1.0 + index as f32 * 0.5)).max(self.centers[index] / MAX_MODE_Q);
             // FunDSP's second Resonator input is Q, NOT bandwidth Hz.
             self.q[index] = self.centers[index] / self.bandwidths[index];
             self.resonators[index].reset();
@@ -418,9 +429,9 @@ impl RockVoice {
             hardness: KnobRamp::new(KNOBS[2].initial),
             tone,
             rolling_density: 0.0,
-            rolling_center: tone.center,
+            rolling_center: ROLL_CENTER,
             rolling_cutoff: 420.0,
-            rolling_level: 0.05,
+            rolling_level: 0.03,
             breath_intensity: Normalized::ZERO,
             rolling: std::array::from_fn(|index| {
                 RollingChannel::new(config.seed.wrapping_add(0x6a09e667f3bcc909 + index as u64))
@@ -478,12 +489,12 @@ impl Voice for RockVoice {
         // Weather cannot cross either endpoint, particularly the no-birth gate.
         let density = amount + amount * (1.0 - amount) * weather * 0.08;
         self.rolling_density = density * 0.18;
-        self.rolling_level = 0.05 * (1.0 + breath * 0.12) / (1.0 + self.hardness.value() * 0.30);
+        self.rolling_level = 0.03 * (1.0 + breath * 0.12) / (1.0 + self.hardness.value() * 0.30);
         self.breath_intensity =
             Normalized::new(density * (0.45 + breath * 0.08)).expect("bounded breath intensity");
         if cadence {
             self.tone = CollisionTone::new(self.size.value(), self.hardness.value());
-            self.rolling_center = self.tone.center;
+            self.rolling_center = ROLL_CENTER;
             self.rolling_cutoff = 320.0 + self.hardness.value() * 560.0 + breath * 30.0;
         }
         // Zero contribution is not mute: retain logical ages/modulation and
@@ -635,8 +646,18 @@ impl Voice for RockVoice {
                 return Err(VoicePreparationError::UnresolvedCausalDelay);
             }
             for index in 0..3 {
-                let center = grain.centers[index];
-                let bandwidth = grain.bandwidths[index];
+                // A slot admitted at a higher rate may hold a centre above this rate's limit:
+                // bring it (and its bandwidth) inside before validating, so a device change to a
+                // lower rate cannot fail on a dead slot's stale values.
+                let raw = grain.centers[index];
+                let center = if raw.is_finite() {
+                    raw.min(sample_rate as f32 * 0.40)
+                } else {
+                    raw
+                };
+                let bandwidth = grain.bandwidths[index].max(center / MAX_MODE_Q);
+                grain.centers[index] = center;
+                grain.bandwidths[index] = bandwidth;
                 let q = center / bandwidth;
                 if !center.is_finite()
                     || center <= 0.0
@@ -955,13 +976,131 @@ mod tests {
             "hard attacks are peak-compensated"
         );
         let halfway = CollisionTone::new(0.5, 0.0);
+        // Relative: the centres are thousands of hertz now.
         assert!(
-            (halfway.center * halfway.center - small_soft.center * large_soft.center).abs() < 0.1
+            (halfway.center * halfway.center / (small_soft.center * large_soft.center) - 1.0).abs()
+                < 1e-5
         );
         assert!(
             (halfway.lifetime * halfway.lifetime - small_soft.lifetime * large_soft.lifetime).abs()
                 < 1e-8
         );
+    }
+
+    /// Energy of `samples` at `frequency`, by direct correlation (a single DFT bin).
+    fn energy_at(samples: &[f32], frequency: f32, rate: f32) -> f32 {
+        let (mut real, mut imag) = (0.0_f64, 0.0_f64);
+        for (index, sample) in samples.iter().enumerate() {
+            let phase =
+                std::f64::consts::TAU * f64::from(frequency) * index as f64 / f64::from(rate);
+            real += f64::from(*sample) * phase.cos();
+            imag += f64::from(*sample) * phase.sin();
+        }
+        (real * real + imag * imag) as f32
+    }
+
+    fn rendered_clack(size: f32, hardness: f32, rate: u32) -> Vec<f32> {
+        let mut grain = Collision::new(7);
+        grain.start(CollisionTone::new(size, hardness), 1.0, 0.5, 0.5, 1.0, rate);
+        for index in 0..3 {
+            let center = grain.centers[index];
+            grain.resonators[index].set_center_q(f64::from(center), f64::from(grain.q[index]));
+            prepare_node(&mut grain.resonators[index], rate);
+        }
+        prepare_node(&mut grain.noise, rate);
+        prepare_node(&mut grain.excitation_filter, rate);
+        (0..rate / 2)
+            .map(|_| {
+                let sample = grain.render();
+                grain.advance(1.0 / f64::from(rate));
+                sample[0] + sample[1]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_collision_is_a_hard_bright_short_clack_not_a_low_dull_thud() {
+        let rate = 48_000_u32;
+        let clack = rendered_clack(0.5, 0.5, rate);
+        assert!(clack.iter().all(|sample| sample.is_finite()));
+        // Most of the energy is in the 1-5 kHz ring, not the old stone's few hundred hertz.
+        let band = |from: u32, to: u32| -> f32 {
+            (from..to)
+                .step_by(100)
+                .map(|hz| energy_at(&clack[..4_800], hz as f32, rate as f32))
+                .sum()
+        };
+        let (ring, low) = (band(1_000, 5_000), band(100, 700));
+        assert!(
+            ring > 5.0 * low,
+            "bright, not dull: ring {ring} vs low {low}"
+        );
+        // The ring dies away while the collision is still sounding: the 50-70 ms window (the
+        // collision lasts about 88 ms) is far quieter than the first 20 ms.
+        let rms =
+            |part: &[f32]| (part.iter().map(|s| s * s).sum::<f32>() / part.len() as f32).sqrt();
+        let (early, later) = (rms(&clack[..960]), rms(&clack[2_400..3_360]));
+        assert!(
+            early > 0.0 && later < early * 0.4,
+            "short: early {early}, later {later}"
+        );
+    }
+
+    #[test]
+    fn every_collision_mode_keeps_a_supported_q_and_frequency_at_every_rate_and_knob() {
+        for rate in [8_000_u32, 22_050, 44_100, 48_000, 96_000, 192_000, 384_000] {
+            for size in [0.0, 0.5, 1.0] {
+                for hardness in [0.0, 0.5, 1.0] {
+                    for scale in [0.85, 1.15, 2.0, 2.5] {
+                        let mut grain = Collision::new(1);
+                        grain.start(
+                            CollisionTone::new(size, hardness),
+                            1.0,
+                            0.5,
+                            0.5,
+                            scale,
+                            rate,
+                        );
+                        for index in 0..3 {
+                            let (center, q) = (grain.centers[index], grain.q[index]);
+                            assert!(
+                                center > 0.0 && center < rate as f32 * 0.5,
+                                "{rate} {center}"
+                            );
+                            assert!(q.is_finite() && q > 0.0 && q <= MAX_MODE_Q, "{rate} q {q}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_collision_admitted_at_a_high_rate_survives_a_move_to_a_low_rate() {
+        // Small balls ring high: their upper modes sit above a low rate's limit, in slots that
+        // stay behind after the collision ends. Preparing the lower rate must still succeed.
+        for (from, to) in [(48_000_u32, 8_000_u32), (48_000, 11_025), (96_000, 16_000)] {
+            for size in [Normalized::ZERO, Normalized::ONE] {
+                let knobs = [Normalized::ONE, size, Normalized::ZERO];
+                let mut voice = voice(from, knobs);
+                for grain in &mut voice.grains {
+                    grain.start(
+                        CollisionTone::new(size.get(), 0.0),
+                        1.0,
+                        0.5,
+                        0.5,
+                        0.85,
+                        from,
+                    );
+                }
+                voice
+                    .prepare_rate(to)
+                    .unwrap_or_else(|error| panic!("{from} -> {to}, size {size:?}: {error:?}"));
+                for grain in &voice.grains {
+                    assert!(grain.centers.iter().all(|center| *center < to as f32 * 0.5));
+                }
+            }
+        }
     }
 
     #[test]
