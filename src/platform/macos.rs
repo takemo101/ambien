@@ -998,7 +998,7 @@ impl WindowRole {
     fn content_size(self) -> NSSize {
         match self {
             Self::Scene => NSSize::new(960.0, 600.0),
-            Self::Settings => NSSize::new(480.0, 360.0),
+            Self::Settings => NSSize::new(520.0, 760.0),
         }
     }
 
@@ -1728,7 +1728,7 @@ mod tests {
         let frame = metrics()
             .frame_for_content(NSRect::new(NSPoint::new(0.0, 0.0), placement.content_size));
         let outer = outer_from_top_left(screen, placement.top_left, frame.size).unwrap();
-        assert_eq!(outer.origin, NSPoint::new(-1700.0, -151.0));
+        assert_eq!(outer.origin, NSPoint::new(-1700.0, -551.0));
     }
 
     #[test]
@@ -1737,7 +1737,7 @@ mod tests {
         let visible = rect(-1910.0, 220.0, 1900.0, 1030.0);
         for (x, y, expected) in [
             (-f64::MAX, -f64::MAX, NSPoint::new(10.0, 30.0)),
-            (f64::MAX, f64::MAX, NSPoint::new(1424.0, 669.0)),
+            (f64::MAX, f64::MAX, NSPoint::new(1384.0, 269.0)),
         ] {
             let saved = saved(x, y, f64::MAX, f64::MAX);
             let placement = fit_geometry(

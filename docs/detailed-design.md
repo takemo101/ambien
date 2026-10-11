@@ -582,7 +582,7 @@ FormField.child(control)
 
 Slider／Switch の値 event は `cx.processor` または Entity update closure で Reducer へ渡し、segment の borrowed SharedString は `cx.listener` または Entity update 内で Registry 解決する。全 control は render 時の model 値を入力とする controlled form。stable id は `volume`／`mute`／`wander`／時間 field、knob は situation ID＋knob ID の組。viewport／fit で Entity・input state・focus を作り直さない。knob step0.01 と volume1% は UI 実装値、時間は SPEC の整数単位。メニューと同じ端点を操作する。
 
-UI は [設定窓](../SPEC.md#設定窓) の順に配置し、時間の「次回適用」を説明する。自動の dominant 更新と manual の即時 target 表示を区別し、単に閲覧して wander を止めない。出力・保存 failure の表示に必要な Ely 部品も使い、4種類限定の framework 制約を作らない。
+UI は [設定窓](../SPEC.md#設定窓) の順に、小見出し付きの1列へ配置する（本文に「設定」見出し・使い方・要約・受理表示は出さない）。各項目は名前と値を一行、操作を下に置き、時間の「次回適用」を短く説明する。検証用の要約・受理・出力状態は大きさ0の `unseen_text` としてアクセシビリティだけに残す。スクロールは `ScrollHandle` を `track_scroll` で保持し、右端に常時見える細いつまみを描く。つまみの長さと位置、ドラッグから offset への換算は `thumb`／`offset_for_thumb_top` の純粋関数で、内容が収まるとき・数値が不正なときは描かない。自動の dominant 更新と manual の即時 target 表示を区別し、単に閲覧して wander を止めない。出力・保存 failure の表示に必要な Ely 部品も使い、4種類限定の framework 制約を作らない。
 
 ## AppKit座標と範囲補正
 
