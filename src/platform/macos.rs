@@ -4,8 +4,10 @@ use block2::RcBlock;
 use gpui::{Bounds, DisplayId, Pixels, point, px, size};
 use objc2::{MainThreadMarker, rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::{
-    NSScreen, NSView, NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
-    NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
+    NSApplicationDidChangeScreenParametersNotification, NSScreen, NSView, NSWindow, NSWindowButton,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidWakeNotification,
+    NSWorkspaceWillSleepNotification,
 };
 use objc2_core_audio::{
     AudioObjectAddPropertyListenerBlock, AudioObjectGetPropertyData,
@@ -169,6 +171,125 @@ impl Drop for PowerMonitor {
     fn drop(&mut self) {
         if let Err(error) = self.shutdown() {
             eprintln!("Ambien power monitor shutdown: {error}");
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainThreadRequired;
+
+impl fmt::Display for MainThreadRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AppKit requires the main thread")
+    }
+}
+
+impl std::error::Error for MainThreadRequired {}
+
+/// The OS display options Ambien follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DisplayOptions {
+    pub(crate) reduce_motion: bool,
+    pub(crate) reduce_transparency: bool,
+}
+
+pub(crate) fn read_display_options() -> Result<DisplayOptions, MainThreadRequired> {
+    MainThreadMarker::new().ok_or(MainThreadRequired)?;
+    let workspace = NSWorkspace::sharedWorkspace();
+    Ok(DisplayOptions {
+        reduce_motion: workspace.accessibilityDisplayShouldReduceMotion(),
+        reduce_transparency: workspace.accessibilityDisplayShouldReduceTransparency(),
+    })
+}
+
+/// Every screen's frame and visible frame, in AppKit order. Two equal layouts mean no
+/// screen was added, removed, moved or resized, and no Dock/menu-bar workarea changed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ScreenLayout(Vec<[f64; 8]>);
+
+pub(crate) fn read_screen_layout() -> Result<ScreenLayout, MainThreadRequired> {
+    let mtm = MainThreadMarker::new().ok_or(MainThreadRequired)?;
+    let screens = NSScreen::screens(mtm);
+    let mut layout = Vec::with_capacity(screens.count());
+    for index in 0..screens.count() {
+        let screen = screens.objectAtIndex(index);
+        let (frame, visible) = (screen.frame(), screen.visibleFrame());
+        layout.push([
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+            visible.origin.x,
+            visible.origin.y,
+            visible.size.width,
+            visible.size.height,
+        ]);
+    }
+    Ok(ScreenLayout(layout))
+}
+
+/// One observer token, paired with the exact center that issued it.
+struct EnvironmentRegistration {
+    center: Retained<NSNotificationCenter>,
+    token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+}
+
+/// Main-owned observers for display accessibility and screen-parameter changes. The
+/// blocks capture only the `Send + Sync` callback, which must merely signal; the newest
+/// state is read afterwards on the main thread.
+pub(crate) struct EnvironmentMonitor {
+    _main: MainThreadMarker,
+    registrations: Vec<EnvironmentRegistration>,
+}
+
+impl EnvironmentMonitor {
+    pub(crate) fn new(
+        on_change: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, MainThreadRequired> {
+        let main = MainThreadMarker::new().ok_or(MainThreadRequired)?;
+        let on_change: Arc<dyn Fn() + Send + Sync> = Arc::new(on_change);
+        let mut registrations = Vec::with_capacity(2);
+        let centers = [
+            // Reduce motion/transparency are posted on the workspace's own center.
+            (
+                NSWorkspace::sharedWorkspace().notificationCenter(),
+                unsafe { NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification },
+            ),
+            // Screen add/remove, resolution, scale and workarea changes.
+            (NSNotificationCenter::defaultCenter(), unsafe {
+                NSApplicationDidChangeScreenParametersNotification
+            }),
+        ];
+        for (center, name) in centers {
+            let callback = Arc::clone(&on_change);
+            let block = RcBlock::new(move |_: NonNull<NSNotification>| callback());
+            // The center copies the block; queue=None permits delivery on the posting thread.
+            let token = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+            };
+            registrations.push(EnvironmentRegistration { center, token });
+        }
+        Ok(Self {
+            _main: main,
+            registrations,
+        })
+    }
+
+    /// Removes every observer from its own center. Dropping a token alone does not.
+    pub(crate) fn shutdown(&mut self) -> Result<(), MainThreadRequired> {
+        MainThreadMarker::new().ok_or(MainThreadRequired)?;
+        for EnvironmentRegistration { center, token } in self.registrations.drain(..) {
+            // removeObserver has no failure result; this is exactly the issued token.
+            unsafe { center.removeObserver((*token).as_ref()) };
+        }
+        Ok(())
+    }
+}
+
+impl Drop for EnvironmentMonitor {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown() {
+            eprintln!("Ambien environment monitor shutdown: {error}");
         }
     }
 }
@@ -1196,6 +1317,96 @@ pub(crate) fn constrain_window(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RefitTarget {
+    outer: NSRect,
+    content: NSSize,
+}
+
+/// Recomputes a live window's fixed size and position for its current screen. The
+/// baseline is the role's fixed size, never the window's previous (possibly shrunk)
+/// size. `None` means the window already matches within half a point.
+fn refit_target(
+    screen: NSRect,
+    visible: NSRect,
+    baseline: NSSize,
+    metrics: FrameMetrics,
+    current_outer: NSRect,
+) -> Result<Option<RefitTarget>, WindowGeometryError> {
+    if !valid_rect(current_outer) || !metrics.valid() {
+        return Err(WindowGeometryError::InvalidGeometry);
+    }
+    let current_content = metrics.content_for_frame(current_outer);
+    let top_left = relative_top_left(screen, current_outer)?;
+    let saved = WindowPlacement {
+        x: top_left.x,
+        y: top_left.y,
+        width: current_content.size.width,
+        height: current_content.size.height,
+        display_uuid: None,
+    };
+    let fitted = fit_geometry(screen, Some(visible), baseline, metrics, Some(&saved))?;
+    let outer_size = metrics
+        .frame_for_content(NSRect::new(NSPoint::new(0.0, 0.0), fitted.content_size))
+        .size;
+    let outer = outer_from_top_left(screen, fitted.top_left, outer_size)?;
+    let same = |a: f64, b: f64| (a - b).abs() < 0.5;
+    if same(outer.origin.x, current_outer.origin.x)
+        && same(outer.origin.y, current_outer.origin.y)
+        && same(outer.size.width, current_outer.size.width)
+        && same(outer.size.height, current_outer.size.height)
+    {
+        return Ok(None);
+    }
+    Ok(Some(RefitTarget {
+        outer,
+        content: fitted.content_size,
+    }))
+}
+
+/// Re-fits a live window after its screen or workarea changed. All fallible work
+/// precedes native mutation, so an unavailable screen keeps the last finite size.
+/// Returns whether the native frame changed. AppKit's resize/move callbacks then run
+/// synchronously; while GPUI holds the App borrow they cannot update the window, so
+/// the caller must follow a `true` with `Window::bounds_changed`.
+pub(crate) fn refit_window(
+    window: &gpui::Window,
+    role: WindowRole,
+) -> Result<bool, WindowGeometryError> {
+    let _mtm = MainThreadMarker::new().ok_or(WindowGeometryError::MainThreadRequired)?;
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|_| WindowGeometryError::NativeHandleUnavailable)?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err(WindowGeometryError::NativeHandleUnavailable);
+    };
+    // SAFETY: WindowHandle guarantees a valid NSView for the borrowed GPUI Window.
+    // The main thread was checked above; this reference and the getter-owned native
+    // objects end with this synchronous scope and the raw pointer is never retained.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let native = view
+        .window()
+        .ok_or(WindowGeometryError::NativeHandleUnavailable)?;
+    let screen = native
+        .screen()
+        .ok_or(WindowGeometryError::DisplayUnavailable)?;
+    let frame = native.frame();
+    let metrics = FrameMetrics::measured(frame, native.contentRectForFrameRect(frame));
+    let Some(target) = refit_target(
+        screen.frame(),
+        screen.visibleFrame(),
+        role.content_size(),
+        metrics,
+        frame,
+    )?
+    else {
+        return Ok(false);
+    };
+    native.setContentMinSize(target.content);
+    native.setContentMaxSize(target.content);
+    native.setFrame_display(target.outer, true);
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1697,6 +1908,87 @@ mod tests {
         );
         assert_eq!(
             coordinate_pixels(left + gap * 0.5, left + gap * 0.25, left + gap * 0.75),
+            Err(WindowGeometryError::InvalidGeometry)
+        );
+    }
+
+    fn contains(visible: NSRect, outer: NSRect) -> bool {
+        outer.origin.x >= visible.origin.x
+            && outer.origin.y >= visible.origin.y
+            && max_x(outer) <= max_x(visible)
+            && max_y(outer) <= max_y(visible)
+    }
+
+    #[test]
+    fn a_window_that_already_fits_its_screen_is_not_touched() {
+        let screen = rect(0.0, 0.0, 1920.0, 1080.0);
+        let visible = rect(0.0, 25.0, 1920.0, 1030.0);
+        let outer = rect(100.0, 200.0, 966.0, 631.0);
+        assert_eq!(
+            refit_target(screen, visible, NSSize::new(960.0, 600.0), metrics(), outer),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_smaller_workarea_shrinks_the_window_and_a_roomy_one_restores_the_baseline() {
+        let baseline = NSSize::new(960.0, 600.0);
+        let narrow_screen = rect(0.0, 0.0, 800.0, 500.0);
+        let narrow = rect(0.0, 0.0, 800.0, 500.0);
+        let current = rect(0.0, 0.0, 966.0, 631.0);
+        let shrunk = refit_target(narrow_screen, narrow, baseline, metrics(), current)
+            .unwrap()
+            .unwrap();
+        assert_eq!(shrunk.content, NSSize::new(794.0, 469.0));
+        assert!(contains(narrow, shrunk.outer));
+        // The earlier shrink is not kept as a free size: the roomy screen starts from baseline again.
+        let roomy_screen = rect(0.0, 0.0, 2560.0, 1440.0);
+        let roomy = rect(0.0, 0.0, 2560.0, 1415.0);
+        let restored = refit_target(roomy_screen, roomy, baseline, metrics(), shrunk.outer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.content, baseline);
+        assert!(contains(roomy, restored.outer));
+    }
+
+    #[test]
+    fn a_window_left_off_a_removed_or_moved_display_is_pulled_inside_on_a_negative_origin_screen() {
+        let screen = rect(-1920.0, -700.0, 1920.0, 1080.0);
+        let visible = rect(-1910.0, -680.0, 1900.0, 1030.0);
+        let stranded = rect(-5000.0, 4000.0, 966.0, 631.0);
+        let target = refit_target(
+            screen,
+            visible,
+            NSSize::new(960.0, 600.0),
+            metrics(),
+            stranded,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(target.content, NSSize::new(960.0, 600.0));
+        assert_eq!(target.outer.size, NSSize::new(966.0, 631.0));
+        assert!(contains(visible, target.outer));
+    }
+
+    #[test]
+    fn refit_reports_an_unavailable_or_invalid_workarea_without_inventing_one() {
+        let screen = rect(0.0, 0.0, 1440.0, 900.0);
+        let outer = rect(10.0, 10.0, 966.0, 631.0);
+        let baseline = NSSize::new(960.0, 600.0);
+        for visible in [rect(0.0, 0.0, 0.0, 875.0), rect(f64::NAN, 0.0, 10.0, 10.0)] {
+            assert_eq!(
+                refit_target(screen, visible, baseline, metrics(), outer),
+                Err(WindowGeometryError::InvalidGeometry)
+            );
+        }
+        assert_eq!(
+            refit_target(
+                screen,
+                screen,
+                baseline,
+                metrics(),
+                rect(0.0, 0.0, f64::NAN, 5.0)
+            ),
             Err(WindowGeometryError::InvalidGeometry)
         );
     }

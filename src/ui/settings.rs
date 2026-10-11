@@ -48,6 +48,7 @@ pub(crate) struct SettingsView {
     receipt: Option<ControlReceipt>,
     notices: SettingsNotices,
     selection_activation: Option<SelectionActivation>,
+    _display: Subscription,
 }
 
 impl SettingsView {
@@ -62,6 +63,14 @@ impl SettingsView {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // Only the display is reported; the app refits when it differs from the last one.
+        let display = cx.observe_window_bounds(window, |_, window, cx| {
+            crate::app::dispatch_settings_display(
+                window.window_handle().window_id(),
+                crate::platform::macos::capture_placement(window).map(|(_, display)| display),
+                cx,
+            );
+        });
         let mut view = Self {
             focus,
             audio_status: audio_status.into(),
@@ -71,6 +80,7 @@ impl SettingsView {
             receipt,
             notices,
             selection_activation: None,
+            _display: display,
         };
         view.initialize_controls(source.as_deref(), controls);
         view

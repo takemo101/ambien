@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use ely::theme::ActiveTheme;
 use gpui::{
     Bounds, BoxShadow, ContentMask, Context, FocusHandle, InteractiveElement, IntoElement,
     MouseButton, ParentElement, Pixels, Render, Rgba, Styled, Subscription, Task, Window, canvas,
@@ -15,7 +16,7 @@ use crate::{
         timing::MachNanos,
         transport::{VISIBLE_CAPACITY, VisualEvent, WorldVisualHeader},
     },
-    situations::VisualShape,
+    ui::appearance::{AccessibilityState, Motion},
 };
 
 struct VisibleParticles {
@@ -93,14 +94,14 @@ impl VisibleParticles {
         }
     }
 
-    fn particle_frame(&self, event: &VisualEvent) -> Option<(f32, f32)> {
+    fn particle_frame(&self, event: &VisualEvent, motion: Motion) -> Option<(f32, f32)> {
         let contribution = self.contributions[event.situation.get()];
         if contribution == 0.0 {
             return None;
         }
         let elapsed = self.present.get().saturating_sub(event.present.get());
         let age = (elapsed as f64 / event.lifetime.as_nanos() as f64) as f32;
-        let fade = (1.0 - age).clamp(0.0, 1.0).powi(2);
+        let fade = motion.particle_fade(age);
         let opacity = event.strength.get() * fade * contribution;
         (opacity > 0.0).then_some((age, opacity))
     }
@@ -134,6 +135,8 @@ pub(crate) struct SceneView {
     particles: VisibleParticles,
     running: bool,
     animation: Option<Task<()>>,
+    motion: Motion,
+    opaque: bool,
     _visibility: Subscription,
     _placement: Subscription,
 }
@@ -143,6 +146,7 @@ impl SceneView {
         window: &mut Window,
         cx: &mut Context<Self>,
         audio: Arc<AudioShared>,
+        accessibility: AccessibilityState,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -163,11 +167,27 @@ impl SceneView {
             particles: VisibleParticles::new(0),
             running: false,
             animation: None,
+            motion: accessibility.motion(),
+            opaque: accessibility.reduce_transparency,
             _visibility: visibility,
             _placement: placement,
         };
         view.update_audio(status, source, window, cx);
         view
+    }
+
+    /// Applies display accessibility only to presentation: the window surface and how
+    /// particles are drawn. Audio state, controls and the cached particles are untouched.
+    pub(crate) fn set_accessibility(
+        &mut self,
+        accessibility: AccessibilityState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.set_background_appearance(accessibility.scene_background());
+        self.motion = accessibility.motion();
+        self.opaque = accessibility.reduce_transparency;
+        cx.notify();
     }
 
     pub(crate) fn update_audio(
@@ -277,7 +297,10 @@ impl SceneView {
             for (index, definition) in source.registry.definitions().iter().enumerate() {
                 let intensity = self.particles.contributions[index] * self.particles.breath[index];
                 if intensity > 0.0 {
-                    let radius = 24.0 + intensity * 70.0;
+                    let radius = self.motion.glow_radius(
+                        self.particles.contributions[index],
+                        self.particles.breath[index],
+                    );
                     paint_glow(
                         window,
                         bounds,
@@ -289,15 +312,10 @@ impl SceneView {
                 }
             }
             for event in self.particles.events.iter().flatten() {
-                let Some((age, opacity)) = self.particles.particle_frame(event) else {
+                let Some((age, opacity)) = self.particles.particle_frame(event, self.motion) else {
                     continue;
                 };
-                let radius = event.radius.get()
-                    * match event.shape {
-                        VisualShape::Point => 1.0,
-                        VisualShape::Impact => 1.0 + age * 1.6,
-                        VisualShape::SlowGlow => 1.0 + age * 0.4,
-                    };
+                let radius = event.radius.get() * self.motion.shape_scale(event.shape, age);
                 let position = [event.x.get(), event.y.get()];
                 let color = source.registry.definitions()[event.situation.get()]
                     .visual
@@ -367,27 +385,34 @@ fn paint_glow(
 impl Render for SceneView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.weak_entity();
-        // No background paint: the native blurred surface stays visible beneath the lights.
-        div()
+        let root = div()
             .size_full()
             .track_focus(&self.focus)
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, (), window, cx| {
-                        // Borrow the fixed cache during paint; don't clone a particle vector each frame.
-                        let _ = view.update(cx, |view, _| view.paint(bounds, window));
-                    },
-                )
-                .size_full(),
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move());
+        // Normally no background is painted and the native blurred surface shows through.
+        // Reduce transparency uses the system palette's opaque background instead.
+        let root = if self.opaque {
+            root.bg(cx.theme().colors.bg)
+        } else {
+            root
+        };
+        root.child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, (), window, cx| {
+                    // Borrow the fixed cache during paint; don't clone a particle vector each frame.
+                    let _ = view.update(cx, |view, _| view.paint(bounds, window));
+                },
             )
+            .size_full(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::situations::VisualShape;
     use crate::{
         audio::{
             timing::{MachClock, StreamEpoch, WorldSeconds},
@@ -498,7 +523,9 @@ mod tests {
         cache.refresh_at(&source, MachNanos::new(150));
         // Halfway power is .5/.5, not the square of linearly mixed amplitudes.
         for particle in [departed, arriving] {
-            assert!((cache.particle_frame(&particle).unwrap().1 - 0.28125).abs() < 1e-7);
+            assert!(
+                (cache.particle_frame(&particle, Motion::Full).unwrap().1 - 0.28125).abs() < 1e-7
+            );
         }
         assert!(
             !cache
@@ -515,7 +542,7 @@ mod tests {
                 .flatten()
                 .any(|event| event.present == future.present)
         );
-        assert!((cache.particle_frame(&future).unwrap().1 - 0.75).abs() < 1e-7);
+        assert!((cache.particle_frame(&future, Motion::Full).unwrap().1 - 0.75).abs() < 1e-7);
     }
 
     #[test]
@@ -648,6 +675,42 @@ mod tests {
     }
 
     #[test]
+    fn reduced_motion_never_starts_a_particle_at_full_brightness() {
+        let source = source();
+        publish(&source, 1.0, 100, 1.0, 0.8);
+        let mut cache = VisibleParticles::new(source.registry.definitions().len());
+        cache.refresh_at(&source, MachNanos::new(100));
+        let particle = cache.events[0].unwrap();
+        assert_eq!(
+            cache.particle_frame(&particle, Motion::Full).unwrap().1,
+            1.0
+        );
+        assert_eq!(cache.particle_frame(&particle, Motion::Reduced), None);
+        // Twelve of its fifty nanoseconds later it has softly faded in, never past full.
+        cache.refresh_at(&source, MachNanos::new(112));
+        let (_, soft) = cache.particle_frame(&particle, Motion::Reduced).unwrap();
+        assert!(soft > 0.0 && soft <= 1.0);
+    }
+
+    #[test]
+    fn a_new_viewport_keeps_every_particle_at_the_same_normalized_position_and_size() {
+        let narrow = Bounds::new(point(px(10.0), px(20.0)), size(px(300.0), px(200.0)));
+        let wide = Bounds::new(point(px(-50.0), px(5.0)), size(px(1200.0), px(800.0)));
+        for position in [[0.0, 0.0], [0.25, 0.5], [1.0, 1.0]] {
+            let first = glow_bounds(narrow, position, 3.5);
+            let second = glow_bounds(wide, position, 3.5);
+            assert_eq!(first.size, second.size, "logical radius is not scaled");
+            for (viewport, glow) in [(narrow, first), (wide, second)] {
+                let center = glow.center();
+                let normalized_x = (center.x - viewport.origin.x) / viewport.size.width;
+                let normalized_y = (center.y - viewport.origin.y) / viewport.size.height;
+                assert!((normalized_x - position[0]).abs() < 1e-5);
+                assert!((normalized_y - position[1]).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
     fn output_failure_preserves_the_already_accepted_frame_not_a_newer_ring_snapshot() {
         let source = source();
         publish(&source, 1.0, 10, 0.5, 0.25);
@@ -655,7 +718,7 @@ mod tests {
         cache.refresh_at(&source, MachNanos::new(40));
         let header = cache.state;
         let particle = cache.events[0].unwrap();
-        let accepted_particle_frame = cache.particle_frame(&particle).unwrap();
+        let accepted_particle_frame = cache.particle_frame(&particle, Motion::Full).unwrap();
         assert!((accepted_particle_frame.1 - 0.04).abs() < 1e-7);
         let accepted_contributions = cache.contributions.clone();
         let accepted_breath = cache.breath.clone();
@@ -668,7 +731,7 @@ mod tests {
             Some(particle.serial)
         );
         assert_eq!(
-            cache.particle_frame(&particle),
+            cache.particle_frame(&particle, Motion::Full),
             Some(accepted_particle_frame)
         );
         assert_eq!(cache.contributions, accepted_contributions);

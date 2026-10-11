@@ -1,6 +1,6 @@
 # Ambien Implementation Plan
 
-> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界、雨ノブ・音量・独立消音・受理通知、岩と共通手動交差、深海合成と登録のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
+> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界、雨ノブ・音量・独立消音・受理通知、岩と共通手動交差、深海合成と登録、sleep・出力復旧、accessibility 表示設定と画面構成の通知・窓の再 fit のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
 >
 > **実装 AI 向け:** writing-plans の成果単位・checkbox・境界試験の考え方を使う。未導入の superpowers 実行器や worktree は必須にしない。実行フローは [AGENTS](../AGENTS.md)、[開発手順](development.md)、[Lat 運用](../lat.md/workflow.md) に従う。P01〜P18 は計画の安定参照であり、mikan ID や Status ではない。checkbox は成果の受け入れ項目であって進捗台帳ではなく、進捗は mikan のみで管理する。
 
