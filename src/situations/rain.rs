@@ -47,6 +47,9 @@ static KNOBS: [KnobDefinition; 2] = [
 const OUTPUT_TRIM: f32 = 2.0;
 /// Grain strength from which a drop is a large one, drawn at every intensity.
 const LARGE_FROM: f32 = 0.63;
+/// A splash is drawn for at least this long (more for a strong drop), well past the drop's few
+/// tenths of a second of sound; only the picture lasts longer, the audio grain is unchanged.
+const SPLASH_SECONDS: f64 = 0.85;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.50, 0.72, 0.92],
     shape: VisualShape::Point,
@@ -409,7 +412,9 @@ impl Voice for RainVoice {
                     radius: LogicalPixels::new(1.3 + strength * 2.4).expect("finite radius"),
                     shape: VISUAL.shape,
                     large: strength >= LARGE_FROM,
-                    lifetime: Duration::from_secs_f64(lifetime),
+                    lifetime: Duration::from_secs_f64(
+                        lifetime.max(SPLASH_SECONDS + 0.55 * f64::from(strength)),
+                    ),
                 });
             }
         }
@@ -620,6 +625,10 @@ mod tests {
         );
         for event in events() {
             assert_eq!(event.large, event.strength.get() >= LARGE_FROM);
+            assert!(
+                event.lifetime >= Duration::from_secs_f64(SPLASH_SECONDS),
+                "the splash outlasts the drop's few tenths of a second of sound"
+            );
         }
     }
 
