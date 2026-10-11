@@ -17,6 +17,7 @@ use crate::{
         transport::{VISIBLE_CAPACITY, VisualEvent, WorldVisualHeader},
     },
     controls::{Normalized, VisualIntensity},
+    situations::VisualShape,
     ui::{
         appearance::{AccessibilityState, Motion},
         backdrop,
@@ -329,6 +330,11 @@ impl SceneView {
             for (slot, definition) in colors.iter_mut().zip(source.registry.definitions()) {
                 *slot = definition.visual.color;
             }
+            // A rock's lights are angular; every other situation's are blurred and round.
+            let mut angular = [false; backdrop::MAX_SITUATIONS];
+            for (slot, definition) in angular.iter_mut().zip(source.registry.definitions()) {
+                *slot = definition.visual.shape == VisualShape::Impact;
+            }
             let field = backdrop::backdrop(
                 &backdrop::Input {
                     world_seconds: self.world_seconds(),
@@ -337,6 +343,7 @@ impl SceneView {
                     colors: &colors,
                     size: [bounds.size.width.into(), bounds.size.height.into()],
                     dark,
+                    angular: &angular,
                 },
                 self.intensity,
                 self.motion,
@@ -351,14 +358,27 @@ impl SceneView {
                         self.particles.contributions[index],
                         self.particles.breath[index],
                     );
-                    paint_glow(
-                        window,
-                        bounds,
-                        [0.5, 0.58],
-                        radius,
-                        definition.visual.color,
-                        intensity * 0.025,
-                    );
+                    if definition.visual.shape == VisualShape::Impact {
+                        // A rock's ambient light has no round edge either.
+                        let centre = disc_bounds(bounds, [0.5, 0.58], [0.0, 0.0], 0.0).origin;
+                        paint_angular_light(
+                            window,
+                            centre,
+                            radius * 0.8,
+                            index as u32 + 1,
+                            definition.visual.color,
+                            intensity * 0.025,
+                        );
+                    } else {
+                        paint_glow(
+                            window,
+                            bounds,
+                            [0.5, 0.58],
+                            radius,
+                            definition.visual.color,
+                            intensity * 0.025,
+                        );
+                    }
                 }
             }
             // When many particles are alive each gets fewer decoration marks, and the frame has a
@@ -470,6 +490,18 @@ fn disc_bounds(
 /// shadow alone is the whole light: a hard-edged disc on top would show as a crisp circle. Plain
 /// alpha, never additive, so it reads the same on a light or a dark window.
 fn paint_soft(window: &mut Window, viewport: Bounds<Pixels>, item: &backdrop::Item) {
+    if item.angular {
+        let centre = disc_bounds(viewport, item.center, [0.0, 0.0], 0.0).origin;
+        paint_angular_light(
+            window,
+            centre,
+            item.radius + item.blur * 0.5,
+            item.seed,
+            item.rgb,
+            item.opacity,
+        );
+        return;
+    }
     let bounds = disc_bounds(viewport, item.center, [0.0, 0.0], item.radius);
     window.paint_drop_shadows(
         bounds,
@@ -586,8 +618,7 @@ fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
     }
 }
 
-/// A jagged polygon mark, filled or as an outline, drawn as a GPUI path. A path that cannot be
-/// built (the tessellator refused it) is skipped; it is only decoration.
+/// A jagged polygon mark, filled or as an outline, drawn as a GPUI path.
 fn paint_poly(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2], mark: &Mark) {
     let Mark::Poly {
         offset,
@@ -602,8 +633,34 @@ fn paint_poly(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
     else {
         return;
     };
-    let (corners, count) = vertices(sides, radius, rotation, seed);
     let centre = disc_bounds(viewport, position, offset, 0.0).origin;
+    paint_polygon(
+        window,
+        centre,
+        sides,
+        [radius, rotation],
+        seed,
+        stroke,
+        rgb,
+        opacity,
+    );
+}
+
+/// One closed polygon path at `centre`. `sides` is the corner count, `size` the radius and
+/// rotation, `seed` shapes the corners. A path that cannot be built (the tessellator
+/// refused it) is skipped; it is only decoration.
+#[allow(clippy::too_many_arguments)]
+fn paint_polygon(
+    window: &mut Window,
+    centre: gpui::Point<Pixels>,
+    sides: u8,
+    size: [f32; 2],
+    seed: u32,
+    stroke: f32,
+    rgb: [f32; 3],
+    opacity: f32,
+) {
+    let (corners, count) = vertices(sides, size[0], size[1], seed);
     let mut builder = if stroke > 0.0 {
         PathBuilder::stroke(px(stroke))
     } else {
@@ -620,6 +677,32 @@ fn paint_poly(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
     builder.close();
     if let Ok(path) = builder.build() {
         window.paint_path(path, rgba(rgb, opacity));
+    }
+}
+
+/// A light with no round edge: nested filled polygons of one shape, each a little fainter in
+/// proportion to its size, so the light is brightest at the centre and steps out in hard corners.
+/// It stands in for the blurred shadow for a rock's lights.
+fn paint_angular_light(
+    window: &mut Window,
+    centre: gpui::Point<Pixels>,
+    radius: f32,
+    seed: u32,
+    rgb: [f32; 3],
+    opacity: f32,
+) {
+    let turn = (seed as f32 / u32::MAX as f32) * std::f32::consts::TAU;
+    for (scale, share) in [(2.0, 0.4), (1.4, 0.4), (0.85, 0.4)] {
+        paint_polygon(
+            window,
+            centre,
+            6,
+            [radius * scale, turn],
+            seed,
+            0.0,
+            rgb,
+            opacity * share,
+        );
     }
 }
 

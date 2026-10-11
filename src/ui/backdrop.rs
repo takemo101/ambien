@@ -28,6 +28,9 @@ pub(crate) struct Item {
     /// Logical pixels of blur around the core.
     pub(crate) blur: f32,
     pub(crate) rgb: [f32; 3],
+    /// An angular light is drawn as nested polygons of this `seed`'s shape, not a blurred shadow.
+    pub(crate) angular: bool,
+    pub(crate) seed: u32,
     pub(crate) opacity: f32,
 }
 
@@ -71,6 +74,9 @@ pub(crate) struct Input<'a> {
     /// The window is on a dark appearance; light appearance gets deeper, more opaque colours so
     /// the light does not wash out.
     pub(crate) dark: bool,
+    /// Which situations are drawn in hard angles (a rock): their lights are angular, not blurred.
+    /// A situation past the end of the slice is round.
+    pub(crate) angular: &'a [bool],
 }
 
 fn finite(value: f32) -> f32 {
@@ -138,6 +144,9 @@ pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Mo
         .min(MAX_SITUATIONS);
     let mut heard = 0.0_f32;
     let mut mixed = [0.0_f32; 3];
+    // The ribbons are shared by every voice, so they take the shape of the loudest one.
+    let mut dominant_weight = 0.0_f32;
+    let mut dominant_angular = false;
     for index in 0..count {
         let weight = finite(input.contributions[index]).clamp(0.0, 1.0);
         if weight <= 0.0 {
@@ -148,6 +157,11 @@ pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Mo
         heard += weight;
         for channel in 0..3 {
             mixed[channel] += rgb[channel] * weight;
+        }
+        let angular = input.angular.get(index).copied().unwrap_or(false);
+        if weight > dominant_weight {
+            dominant_weight = weight;
+            dominant_angular = angular;
         }
         for field in 0..fields {
             let phase = TAU * spread(index, field);
@@ -160,6 +174,8 @@ pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Mo
                 radius: short * 0.22,
                 blur: short * 0.14,
                 rgb,
+                angular,
+                seed: (spread(index + 11, field) * 4.0e9) as u32,
                 opacity: (0.20 * level * weight * (0.8 + 0.2 * breath) * tone.1).clamp(0.0, 1.0),
             });
         }
@@ -194,6 +210,8 @@ pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Mo
                     radius: short * 0.07,
                     blur: short * 0.05,
                     rgb: colour,
+                    angular: dominant_angular,
+                    seed: (spread(ribbon, point) * 4.0e9) as u32,
                     opacity: (0.12
                         * total
                         * edge
@@ -221,6 +239,7 @@ mod tests {
             colors: &COLORS,
             size: [960.0, 600.0],
             dark: true,
+            angular: &[],
         }
     }
 
@@ -261,6 +280,37 @@ mod tests {
         assert_eq!(
             items(&at(1.0), VisualIntensity::Calm, Motion::Reduced),
             items(&at(30.0), VisualIntensity::Calm, Motion::Reduced)
+        );
+    }
+
+    #[test]
+    fn an_angular_voice_has_angular_lights_and_the_aurora_takes_the_loudest_voices_shape() {
+        // Voice 0 is angular (a rock), voice 1 round; a voice past the slice is round.
+        let flags = [true, false];
+        let with = |contributions: &'static [f32]| Input {
+            angular: &flags,
+            ..input(7.0, contributions, &[0.5; 3])
+        };
+        let lights = |input: &Input<'_>| items(input, VisualIntensity::Vivid, Motion::Full);
+        let mixed = lights(&with(&[0.6, 0.4, 0.0]));
+        let fields: Vec<&Item> = mixed.iter().take(4).collect();
+        assert!(
+            fields[..2].iter().all(|item| item.angular),
+            "the rock's two fields"
+        );
+        assert!(
+            fields[2..].iter().all(|item| !item.angular),
+            "the round voice's two"
+        );
+        // The loudest voice (the rock here) gives the aurora its shape.
+        assert!(mixed[4..].iter().all(|item| item.angular));
+        let round_loudest = lights(&with(&[0.3, 0.7, 0.0]));
+        assert!(round_loudest[4..].iter().all(|item| !item.angular));
+        // Nothing says a voice is angular by default.
+        assert!(
+            lights(&input(7.0, &[1.0, 0.0, 0.0], &[0.5; 3]))
+                .iter()
+                .all(|item| !item.angular)
         );
     }
 
@@ -377,6 +427,7 @@ mod tests {
                             colors: &colors,
                             size: [size, size],
                             dark: weight > 0.5,
+                            angular: &[true; 20],
                         },
                         VisualIntensity::Vivid,
                         Motion::Full,

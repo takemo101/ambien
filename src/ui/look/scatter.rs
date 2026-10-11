@@ -8,7 +8,7 @@
 
 use std::f32::consts::TAU;
 
-use super::{Look, Mark, deepen, lighten, mix, seed};
+use super::{Facet, Look, Mark, deepen, facet_glow, lighten, mix, seed};
 use crate::{controls::VisualIntensity, situations::VisualShape};
 
 /// What the scatter depends on. `opacity` is the particle's envelope for this frame.
@@ -66,6 +66,23 @@ fn halo(look: &mut Look, s: &Scatter, offset: [f32; 2], radius: f32, opacity: f3
         rgb,
         opacity,
     });
+}
+
+/// The same glow for a piece that must have no round edge: one filled copy of its own shape,
+/// `scale` times larger and faint, from standard up. Dark windows get a lighter light, light
+/// windows a deeper colour.
+fn facet_halo(look: &mut Look, s: &Scatter, facet: &Facet, scale: f32, opacity: f32) {
+    let level = match s.intensity {
+        VisualIntensity::Calm => return,
+        VisualIntensity::Standard => 0.6,
+        VisualIntensity::Vivid => 1.0,
+    };
+    let (rgb, tone) = if s.dark {
+        (lighten(s.rgb, 0.25), 0.4)
+    } else {
+        (deepen(s.rgb, 0.8), 0.32)
+    };
+    facet_glow(look, facet, rgb, opacity * level * tone, &[(scale, 1.0)]);
 }
 
 /// A wide, faint ring laid on the lead ripple or shock ring, centred on its edge, so the edge
@@ -183,7 +200,7 @@ fn rain(look: &mut Look, s: &Scatter, soft: f32) {
 
 /// A rock impact, all in hard angles: a jagged flash, a jagged shock outline, uneven shards that
 /// tumble as they are thrown out and pulled down, and from standard up diamond sparks and a puff of
-/// angular dust. Only the core's soft light and the halos (blurs) are round.
+/// angular dust. Nothing here is round: even its glows are enlarged copies of a piece's own shape.
 fn rock(look: &mut Look, s: &Scatter, soft: f32) {
     let u = rock_unit(s.radius);
     let fade = 1.0 - s.age;
@@ -233,28 +250,31 @@ fn rock(look: &mut Look, s: &Scatter, soft: f32) {
         VisualIntensity::Standard => count(10, 4, s.strength),
         VisualIntensity::Vivid => count(13, 7, s.strength),
     };
-    // Where shard `i` is and how big, so its halo can be laid on it afterwards.
+    // Where shard `i` is, how big and how it is turned, so its glow can be laid round the same
+    // shape afterwards. Each shard tumbles at its own rate.
     let shard = |i: u64| {
         let angle = TAU * (i as f32 / shards as f32 + 0.08 * unit(s.serial, i));
         let speed = u * (32.0 + 48.0 * unit(s.serial, 100 + i));
         let distance = speed * (1.0 - fade * fade);
-        let offset = [
-            angle.cos() * distance,
-            angle.sin() * distance + 0.5 * u * 70.0 * s.age * s.age,
-        ];
-        let size = u * (1.3 + 3.0 * unit(s.serial, 200 + i)) * (1.0 - 0.45 * s.age);
-        (offset, size)
+        Facet {
+            offset: [
+                angle.cos() * distance,
+                angle.sin() * distance + 0.5 * u * 70.0 * s.age * s.age,
+            ],
+            radius: u * (1.3 + 3.0 * unit(s.serial, 200 + i)) * (1.0 - 0.45 * s.age),
+            sides: 3 + (i % 3) as u8,
+            rotation: TAU * unit(s.serial, 600 + i) + (unit(s.serial, 500 + i) - 0.5) * 9.0 * s.age,
+            seed: seed(s.serial, 700 + i),
+        }
     };
     for i in 0..shards {
-        let (offset, size) = shard(i);
-        // Each shard tumbles at its own rate.
-        let spin = (unit(s.serial, 500 + i) - 0.5) * 9.0 * s.age;
+        let facet = shard(i);
         look.push(Mark::Poly {
-            offset,
-            radius: size,
-            sides: 3 + (i % 3) as u8,
-            rotation: TAU * unit(s.serial, 600 + i) + spin,
-            seed: seed(s.serial, 700 + i),
+            offset: facet.offset,
+            radius: facet.radius,
+            sides: facet.sides,
+            rotation: facet.rotation,
+            seed: facet.seed,
             stroke: 0.0,
             rgb: if i % 3 == 0 {
                 lighten(s.rgb, 0.25)
@@ -270,21 +290,27 @@ fn rock(look: &mut Look, s: &Scatter, soft: f32) {
         VisualIntensity::Vivid => 7,
     };
     let burn = (s.age * 2.2).min(1.0);
+    // A diamond pointing along its flight.
     let spark = |i: u64| {
         let angle = TAU * unit(s.serial, 400 + i);
         let speed = u * (55.0 + 40.0 * unit(s.serial, 410 + i));
         let distance = speed * (1.0 - (1.0 - burn) * (1.0 - burn));
-        (angle, [angle.cos() * distance, angle.sin() * distance])
-    };
-    for i in 0..sparks {
-        let (angle, offset) = spark(i);
-        // A diamond pointing along its flight.
-        look.push(Mark::Poly {
-            offset,
+        Facet {
+            offset: [angle.cos() * distance, angle.sin() * distance],
             radius: u * 1.5,
             sides: 4,
             rotation: angle,
             seed: seed(s.serial, 800 + i),
+        }
+    };
+    for i in 0..sparks {
+        let facet = spark(i);
+        look.push(Mark::Poly {
+            offset: facet.offset,
+            radius: facet.radius,
+            sides: facet.sides,
+            rotation: facet.rotation,
+            seed: facet.seed,
             stroke: 0.0,
             rgb: lighten(s.rgb, 0.8),
             opacity: soft * 0.95 * (1.0 - burn),
@@ -306,19 +332,17 @@ fn rock(look: &mut Look, s: &Scatter, soft: f32) {
             });
         }
     }
-    // The halos, last.
-    let halos = match s.intensity {
+    // The glows, last.
+    let glowing = match s.intensity {
         VisualIntensity::Calm => 0,
         VisualIntensity::Standard => 6,
         VisualIntensity::Vivid => 10,
     };
-    for i in 0..shards.min(halos) {
-        let (offset, size) = shard(i);
-        halo(look, s, offset, size * 2.5, soft * 0.5);
+    for i in 0..shards.min(glowing) {
+        facet_halo(look, s, &shard(i), 2.2, soft * 0.5);
     }
     for i in 0..sparks {
-        let (_, offset) = spark(i);
-        halo(look, s, offset, u * 5.0, soft * 0.6 * (1.0 - burn));
+        facet_halo(look, s, &spark(i), 3.2, soft * 0.6 * (1.0 - burn));
     }
 }
 
@@ -420,16 +444,24 @@ mod tests {
         look.marks().copied().collect()
     }
 
-    fn hazes(marks: &[Mark]) -> Vec<([f32; 2], f32, [f32; 3], f32)> {
-        marks
+    /// The base colour `scatter_in` is given.
+    const BASE: [f32; 3] = [0.5, 0.6, 0.7];
+
+    /// A filled polygon in a strictly deeper colour than the particle's: in light mode that is
+    /// a rock's angular glow, since the pieces themselves are never deeper than the base colour.
+    fn is_deeper_glow(mark: &Mark) -> bool {
+        matches!(mark, Mark::Poly { rgb, stroke: 0.0, .. }
+            if rgb.iter().zip(&BASE).all(|(channel, base)| channel < base))
+    }
+
+    /// The glows laid round the pieces in light mode: blurs for rain and deep, angular copies for
+    /// rock. Light mode only ever deepens, so these are told by colour for the polygons.
+    fn glows(shape: VisualShape, level: VisualIntensity, age: f32) -> Vec<f32> {
+        scatter_in(shape, level, 1.0, age, false)
             .iter()
             .filter_map(|mark| match *mark {
-                Mark::Haze {
-                    offset,
-                    radius,
-                    rgb,
-                    opacity,
-                } => Some((offset, radius, rgb, opacity)),
+                Mark::Haze { opacity, .. } => Some(opacity),
+                Mark::Poly { opacity, .. } if is_deeper_glow(mark) => Some(opacity),
                 _ => None,
             })
             .collect()
@@ -438,7 +470,7 @@ mod tests {
     #[test]
     fn pieces_get_a_soft_halo_from_standard_up_and_vivid_glows_more_than_standard() {
         for shape in SHAPES {
-            let halos = |level| hazes(&scatter_of(shape, level, 1.0, 0.6));
+            let halos = |level| glows(shape, level, 0.6);
             assert!(
                 halos(VisualIntensity::Calm).is_empty(),
                 "{shape:?} calm has none"
@@ -449,9 +481,7 @@ mod tests {
             );
             assert!(!standard.is_empty(), "{shape:?}");
             assert!(vivid.len() >= standard.len(), "{shape:?}");
-            let strongest = |halos: &[([f32; 2], f32, [f32; 3], f32)]| {
-                halos.iter().map(|halo| halo.3).fold(0.0, f32::max)
-            };
+            let strongest = |halos: &[f32]| halos.iter().copied().fold(0.0, f32::max);
             assert!(
                 strongest(&vivid) > strongest(&standard),
                 "{shape:?} vivid is brighter"
@@ -461,21 +491,38 @@ mod tests {
 
     #[test]
     fn a_halo_is_a_lighter_light_on_dark_and_a_deeper_colour_on_light_never_a_brightening() {
-        for shape in SHAPES {
-            let rgb = [0.5, 0.6, 0.7];
-            let dark = hazes(&scatter_in(shape, VisualIntensity::Vivid, 1.0, 0.6, true));
-            let light = hazes(&scatter_in(shape, VisualIntensity::Vivid, 1.0, 0.6, false));
+        for shape in [VisualShape::Point, VisualShape::SlowGlow] {
+            let hazes = |dark| -> Vec<([f32; 3], f32)> {
+                scatter_in(shape, VisualIntensity::Vivid, 1.0, 0.6, dark)
+                    .iter()
+                    .filter_map(|mark| match *mark {
+                        Mark::Haze { rgb, opacity, .. } => Some((rgb, opacity)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let (dark, light) = (hazes(true), hazes(false));
             assert_eq!(dark.len(), light.len());
             for (dark, light) in dark.iter().zip(&light) {
                 for ((&dark_channel, &light_channel), &base) in
-                    dark.2.iter().zip(&light.2).zip(&rgb)
+                    dark.0.iter().zip(&light.0).zip(&BASE)
                 {
                     assert!(dark_channel >= base, "dark brightens");
                     assert!(light_channel <= base, "light deepens");
                 }
-                assert!(light.3 <= dark.3, "light is the fainter film");
+                assert!(light.1 <= dark.1, "light is the fainter film");
             }
         }
+        // A rock's glows are angular copies of its pieces: none is ever deeper than the base in a
+        // dark window, and a light window has them, all deeper.
+        let deeper = |dark| {
+            scatter_in(VisualShape::Impact, VisualIntensity::Vivid, 1.0, 0.3, dark)
+                .iter()
+                .filter(|mark| is_deeper_glow(mark))
+                .count()
+        };
+        assert_eq!(deeper(true), 0);
+        assert!(deeper(false) > 0);
     }
 
     #[test]
@@ -530,9 +577,13 @@ mod tests {
                     let marks =
                         scatter_of(VisualShape::Impact, level, strength, step as f32 / 20.0);
                     assert!(
-                        !marks
-                            .iter()
-                            .any(|mark| matches!(mark, Mark::Ring { .. } | Mark::Dot { .. })),
+                        !marks.iter().any(|mark| matches!(
+                            mark,
+                            Mark::Ring { .. }
+                                | Mark::Dot { .. }
+                                | Mark::Glow { .. }
+                                | Mark::Haze { .. }
+                        )),
                         "{level:?} {strength} {step}: rock has a circle"
                     );
                     assert!(
@@ -559,8 +610,16 @@ mod tests {
                 rain[index],
                 "{level:?} rain"
             );
-            let rock_count =
-                |strength| dots(&scatter_of(VisualShape::Impact, level, strength, 0.5)).len();
+            // A rock's angular glows are told from its pieces in light mode, where they alone
+            // are a deeper colour than the particle's.
+            let rock_count = |strength| {
+                scatter_in(VisualShape::Impact, level, strength, 0.5, false)
+                    .iter()
+                    .filter(|mark| {
+                        matches!(mark, Mark::Poly { stroke: 0.0, .. }) && !is_deeper_glow(mark)
+                    })
+                    .count()
+            };
             assert_eq!(
                 (rock_count(0.0), rock_count(1.0)),
                 rock[index],
