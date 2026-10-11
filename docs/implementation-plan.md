@@ -109,6 +109,8 @@ P08 placement consumer:
 flowchart LR
  P01 --> P02 --> P03 --> P04 --> P05 --> P06 --> P07 --> P08 --> P09 --> P10 --> P11 --> P12 --> P13 --> P14
  P12 --> P15
+ P13 --> P19
+ P08 --> P20
  P14 --> P15 --> P16 --> P17 --> P18
  P13 --> P17
  P14 --> P17
@@ -446,6 +448,34 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 **Behavior tests/期待:** P02〜P12/P15/P16 の回帰を実 lockfile で実行。最大声数/音源 pool 満杯/visual overflow/epoch切替が同時でも RT bounded・音は visual 不足で停止しない。closure/monitor/native block/observer/Task 寿命を反復後の保持と分けて観測する。数値の norm 成功だけで聴感、固定窓の寸法だけで GPU cost 一定を主張しない。
 
 **Smoke/gate:** 署名しない DMG の全操作、OS sleep/出力変更、対応ディスプレイ変更、失敗→継続/取消/再要求を実施。ユーザーの試聴・ガラス判断、下限 OS、物理測定、実更新を AI だけで completed にできない。下限 OS の実機が無い間は下限の対応を宣言しない。未検証・未解決レビュー・統合不足がある限り初回完成版とはしない。
+
+## P19 背景のぼかし入切とガラスの濃さを設定へ追加する
+
+**DependsOn:** P13。P14〜P18 の配布準備とは独立。**SPEC:** [窓](../SPEC.md#窓)、[設定窓](../SPEC.md#設定窓)、[保存](../SPEC.md#保存)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
+
+**Files（予定、現存 source を再確認して適用）:** Modify `src/persistence.rs`（`blur`／`veil` の正規化・往復・未知キー保持）、`src/controls.rs` と `src/app.rs`（編集の適用。表示専用で音声 mailbox へ送らない）、`src/ui/settings.rs`（共通設定へ「ぼかし」Switch と「ガラスの濃さ」Slider）、`src/ui/scene.rs`（色の膜の paint）、`src/ui/appearance.rs`（`Blurred`／`Transparent`／不透明の決定。システムの透明度低下を優先）、`docs/verification.md`。Tests は各 Module 内。
+
+**Consumes:** I09 保存、既存の外観・アクセシビリティ状態、`Window::set_background_appearance`（実行中に変更できることは固定 GPUI の source で確認済みで、実窓でも観測する）。**Produces:** 保存・復元できる `blur`（既定 true）と `veil`（0〜1、既定0）、設定とシーンの両窓への反映。新しい音声 API は作らない。
+
+- [ ] `blur`／`veil` を保存へ追加し、無い値は既定、範囲外は端へ丸め、未知キーを保持する。
+- [ ] 設定窓の共通設定へ「ぼかし」と「ガラスの濃さ」を置き、操作を即時にシーンへ反映して保存する。再生成・focus 喪失を起こさない。
+- [ ] システムの「透明度を下げる」が有効な間は不透明背景を優先し、設定窓へ優先中であることを示す。無効になれば設定を再適用する。
+
+**Behavior tests:** 値の往復・既定・範囲外・未知キー保持。ぼかし切で `Transparent`、入で `Blurred`、透明度低下で不透明、解除後に設定へ戻る遷移。濃さ0は従来と同じ paint、100%でも paint が有限。**Smoke/gate:** 実窓でぼかし入切・濃さの操作と、ライト・ダーク・透明度低下の見え方を観測する。ガラスとしての好みはユーザーの判断で、AI だけで completed にできない。
+
+## P20 粒の表現（波紋・尾・輝きの形・色の幅）を豊かにする
+
+**DependsOn:** P08（粒の光の描画と容量）、P19 は不要。**SPEC:** [視覚イベント](../SPEC.md#視覚イベント)、[音と絵](../SPEC.md#音と絵)、[高DPIと描画負荷](../SPEC.md#高dpiと描画負荷)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
+
+**Files（予定）:** Modify `src/ui/scene.rs`（形ごとの paint）、`src/ui/appearance.rs`（視差効果を減らすときの抑制）、必要なら `src/audio/transport.rs` の視覚イベント値の利用、`docs/verification.md`。Tests は paint 規則を持つ Module 内。
+
+**Consumes:** 既存の `VisualEvent`（位置・強さ・大きさ・形・寿命）と `VisibleParticles`。**Produces:** 雨の波紋、岩の衝撃輪と欠片、深海の尾とゆらぐ輪郭、イベント値から決める色の幅。表示粒・容量・fps 上限は増やさず、描画側で別の乱数を使わない。
+
+- [ ] 同じイベントから常に同じ見た目になること（イベント値だけから色・形が決まる）を保ち、波紋・尾・欠片を容量の範囲に収める。
+- [ ] 視差効果を減らすでは尾・波紋の広がりを止め、静かな明滅だけにする。
+- [ ] 実アプリをユーザーが見て、形・色・強さを調整する。
+
+**Behavior tests:** 同じイベントの再描画が同じ primitive 列になること、容量・fps 上限、減衰後の寿命終了、Reduced では広がりが無いこと、極端値（強さ・大きさ・位置の端）で有限。**Smoke/gate:** 三環境をユーザーが実アプリで見て判断する。AI の primitive 数や統計は見た目の代用品ではなく、AI だけで completed にできない。
 
 ## 全 SPEC 節の coverage matrix
 
