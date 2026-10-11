@@ -53,6 +53,6 @@ npm run lat -- search "audio world timing"
 - graph ファイルを追加・移動・削除したら [[lat]] の一覧と関係する参照元を更新する。正本文書を移動・複製しない。
 - 仕様全文・Issue の Status・試験件数をここへ転記せず、存在しない API や将来のソースを実装済み node として置かない。
 - `lat check` は wiki link、code reference、索引、概要段落の構造を検査する。通常 Markdown リンクの存在や製品要件との意味的整合まで証明しない。参照した repo 文書は別途読む。
-- 文書変更の統合後に `npm run check` を実行する。実機・試聴・署名・公証・更新の確認は [SPEC](../SPEC.md) と [検証手順](../docs/verification.md) の条件に従い、別の証拠として記録する。
+- 文書変更の統合後に `npm run check` を実行する。実機・試聴・Gatekeeper 承認・更新の確認は [SPEC](../SPEC.md) と [検証手順](../docs/verification.md) の条件に従い、別の証拠として記録する。
 
 この導入は開発ツールと運用文書の整備だけであり、仕様全体の最終承認、実装計画、Cargo、アプリコードの開始許可を追加しない。

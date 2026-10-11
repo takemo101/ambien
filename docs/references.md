@@ -15,8 +15,8 @@
 | 描画資源 | [GPUI の Metal 描画](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_apple/src/metal_renderer.rs)、[Metal family 別の制約](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf) | 固定窓でも必要な描画面・中間面、倍率変更時の資源寿命と物理寸法。固定論理サイズやテクスチャ上限は、常駐メモリ・確保成功・一定負荷の実測ではない。 |
 | 再生予定時刻 | [CPAL の timestamp](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/timestamp.rs) | 生成と再生予定の区別、サンプル位置、出力再初期化後の時計対応。予定時刻の取得だけで物理的な音と光の同期を保証しない。 |
 | DSP の準備と切り替え | [FunDSP の AudioUnit](https://github.com/SamiPerttu/fundsp/blob/8479a70d813d539c67a908f88e65f6b0b344122e/src/audiounit.rs)、[Slot](https://github.com/SamiPerttu/fundsp/blob/8479a70d813d539c67a908f88e65f6b0b344122e/src/slot.rs) | 声・内部バッファの準備と破棄、進行中の切り替えの扱い。汎用 API の名前から、最新選択の優先やコールバック内の無確保を推測しない。 |
-| 更新 | [Sparkle の選定リリース](https://github.com/sparkle-project/Sparkle/releases/tag/2.10.0)、[導入と署名](https://sparkle-project.org/documentation/)、[更新情報の配信](https://sparkle-project.org/documentation/publishing/) | 更新画面・署名・配信設定と、SPEC の手動更新方針の対応。SDK の存在は鍵・配信先・公開権限の準備完了ではない。 |
-| 配布 | [Apple の署名・公証](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) | 完成配布物の署名・公証・初回起動を検証する前提。ツールの存在を、利用可能な署名 ID や公証成功に読み替えない。 |
+| 更新 | [Sparkle の選定リリース](https://github.com/sparkle-project/Sparkle/releases/tag/2.10.0)、[導入と署名](https://sparkle-project.org/documentation/)、[更新情報の配信](https://sparkle-project.org/documentation/publishing/) | 更新画面・署名・配信設定と、SPEC の手動更新方針の対応。SDK の存在は鍵・配信先・公開権限の準備完了ではない。署名しないアプリを更新できるか、置換後の隔離属性・Gatekeeper の扱いは資料から断定せず、ソースと実機で確認する。 |
+| 配布 | [Apple の「開発元不明の Mac アプリを開く」](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) | 署名しない配布物を受け取った Mac での Gatekeeper の警告と、「プライバシーとセキュリティ」で承認する手順の案内。配布ページに記す手順は実機で確かめる。この記事の存在を、Ambien の初回起動の成功や、署名しないアプリの Sparkle 更新の成立の証拠にしない。 |
 
 公式ドキュメントは更新され得る。ソース上の前提と説明が食い違った場合は、食い違いと対象改訂を記録し、動作確認なしに仕様や依存を置き換えない。
 

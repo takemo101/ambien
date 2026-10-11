@@ -1,6 +1,6 @@
 # Ambien Implementation Plan
 
-> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界、雨ノブ・音量・独立消音・受理通知、岩と共通手動交差、深海合成と登録、sleep・出力復旧、accessibility 表示設定と画面構成の通知・窓の再 fit、保存後に fade して終了する coordinator と OS 終了 gate のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・公証・一般公開の権限はこの実装依頼から推定しない。
+> **製品全体の実装計画。** 承認済み [SPEC](../SPEC.md#文書の状態) を基準に P01〜P18 を mikan Issue 化した後、ユーザーは各 Issue の実装・検証・独立レビュー・指摘修正・PR 通常マージを明示的に依頼した。Cargo、固定二窓、雨の合成・標準出力・視覚境界、雨ノブ・音量・独立消音・受理通知、岩と共通手動交差、深海合成と登録、sleep・出力復旧、accessibility 表示設定と画面構成の通知・窓の再 fit、保存後に fade して終了する coordinator と OS 終了 gate のソースを作成した。その他の `src/`、`native/`、`resources/`、`scripts/package-app.sh` は必要な成果の開始時に追加する予定配置である。作成済みコードと実機受け入れを区別し、実際の証拠は [検証記録](verification.md)、作業状態は mikan に置く。鍵生成・認証変更・署名・リポジトリ公開・配布の権限はこの実装依頼から推定しない。
 >
 > **実装 AI 向け:** writing-plans の成果単位・checkbox・境界試験の考え方を使う。未導入の superpowers 実行器や worktree は必須にしない。実行フローは [AGENTS](../AGENTS.md)、[開発手順](development.md)、[Lat 運用](../lat.md/workflow.md) に従う。P01〜P18 は計画の安定参照であり、mikan ID や Status ではない。checkbox は成果の受け入れ項目であって進捗台帳ではなく、進捗は mikan のみで管理する。
 
@@ -22,7 +22,7 @@ P03 受け入れ後の現存 consumer 確認に基づき、ユーザーは P04 �
   - [ ] 実経路を最小実装し、対象試験・境界・失敗注入を通す。実機 smoke を行い、推測・自動試験・実機・ユーザー判断を別々に記録する。
   - [ ] 関係する `docs/architecture.md`、`docs/verification.md`、`docs/detailed-design.md`、`docs/implementation-plan.md` と現存 Lat entry の古くなった案内だけを更新する。SPEC を変更する製品判断は先にユーザーへ戻す。
   - [ ] 必要な全体検査、独立レビュー、指摘修正、許可された PR の通常 merge、but 同期、mikan Report を [開発手順](development.md#mikan-の-issue-進行) に従って完了する。未 merge・未受入を completed にしない。
-- **Rust 検査コマンド:** P01 の実在する単一 Cargo package に対して、`cargo test --locked`（当該 behavior test と package 回帰）、`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo build --locked` を用いる。期待は exit 0 と当該 assertion の成功であり、未実施を成功扱いしない。`cargo run --locked` は開発 app の smoke、`scripts/package-app.sh` は P15/P17 で作成後の署名 bundle 経路に限る。native/Sparkle が必要になると framework と認証前提も必要で、`cargo run` 単体を配布物成功にしない。
+- **Rust 検査コマンド:** P01 の実在する単一 Cargo package に対して、`cargo test --locked`（当該 behavior test と package 回帰）、`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo build --locked` を用いる。期待は exit 0 と当該 assertion の成功であり、未実施を成功扱いしない。`cargo run --locked` は開発 app の smoke、`scripts/package-app.sh` は P15/P17 で作成後の ad-hoc 署名 bundle 経路に限る。native/Sparkle が必要になると framework と更新鍵の前提も必要で、`cargo run` 単体を配布物成功にしない。
 - 文書・Lat の変更後は統合担当が `npm run check:docs` を一度まとめて実行する。これは Rust、通常リンク、意味的整合、実機受け入れの証明ではない。検証結果の形式・安全な音量・停止条件は [検証手順](verification.md#安全な試行条件と中止条件) に従う。
 
 ## 予定ファイルと責務
@@ -37,9 +37,9 @@ P03 受け入れ後の現存 consumer 確認に基づき、ユーザーは P04 �
 | `src/audio/mod.rs`, `render.rs`, `world.rs`, `transport.rs`, `lease.rs`, `timing.rs`, `mix.rs`（すべて `src/audio/` 配下） | worker／typed callback／論理時計／atomic 境界／所有回収／予定時刻／slerp／P02・P04（三環境統合受け入れは P06） |
 | `src/persistence.rs`, `src/lifecycle.rs`, `src/ui/appearance.rs` | 正規化・atomic 保存／保存後終了／OS 外観／P09・P12・P11 |
 | `src/platform/updates.rs`, `native/ambien_bridge.h`, `native/ambien_bridge.m`, `build.rs` | Sparkle、protocol・block・不足終了 selector／P12・P15 |
-| `resources/Info.plist`, `scripts/package-app.sh` | 実 bundle metadata と署名・公証 packaging／P15・P17 |
+| `resources/Info.plist`, `scripts/package-app.sh` | 実 bundle metadata と ad-hoc 署名・DMG packaging（Developer ID 署名・公証なし）／P15・P17 |
 
-テストは対象の上記 Rust ファイルの `#[cfg(test)] mod tests` に置く。純粋規則はその Module、保存の real I/O は `src/persistence.rs` の隔離 tempdir、native の実経路は署名 app と [検証記録](verification.md) に置く。未作成の integration test harness や架空の tool 名を前提にしない。
+テストは対象の上記 Rust ファイルの `#[cfg(test)] mod tests` に置く。純粋規則はその Module、保存の real I/O は `src/persistence.rs` の隔離 tempdir、native の実経路は ad-hoc 署名した app と [検証記録](verification.md) に置く。未作成の integration test harness や架空の tool 名を前提にしない。
 
 ## 隣接作業の共有 Interface
 
@@ -114,7 +114,7 @@ flowchart LR
  P14 --> P17
 ```
 
-線は必要成果の依存であり着手許可ではない。P13 はユーザー試聴、P14 は環境・認証・公開先準備、P16 は署名版 Sparkle 統合 gate、P17/P18 は配布・実機受け入れを含む。これらを AI の test 成功だけで completed にしない。
+線は必要成果の依存であり着手許可ではない。P13 はユーザー試聴、P14 は識別子・配信先・更新鍵・下限 OS 環境の確認、P16 は ad-hoc 署名 bundle での Sparkle 統合 gate、P17/P18 は配布・実機受け入れを含む。これらを AI の test 成功だけで completed にしない。
 
 ## P01 固定したシーンと設定の実窓を操作できる
 
@@ -361,27 +361,28 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **Smoke/gate:** 三環境それぞれと cross をユーザーが実 app で聴き、対象 version/出力/時間/判断を記録する。AI だけで completed にできない。耳の負担/強い peak は即停止、雨だけの限定成功を初回完成へ昇格しない。
 
-## P14 配布識別子・認証・実配信先を準備する
+## P14 配布識別子・配信先・更新鍵・下限 OS 環境を確認する
 
 **DependsOn:** P13。**SPEC:** [配布前提](../SPEC.md#配布前提)、[配布と更新](../SPEC.md#配布と更新)、[仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件)。
 
 **Files:** 証拠記録 `docs/verification.md` のみ。秘密情報を file/Issue に書かない。実設定の挿入は P15 の `resources/Info.plist`、公開物は P17。環境準備をコード実装 Issue として偽装しない。
 
-**Consumes:** SPEC の署名・配信条件、ユーザーの対象別操作権限。**Produces:** P15/P17 が使える実 bundle ID・feed URL・公開鍵・署名IDの公開可能識別、認証が使えるという非秘密の確認、macOS 下限/対応 screen 検証環境。アプリ API の追加なし。
+**Consumes:** SPEC の配布前提、ユーザーの対象別操作権限。**Produces:** P15/P17 が使える実 bundle ID（`com.takemo101.ambien`）・feed URL・Ed25519 公開鍵の公開可能識別、公開前監査の結果、macOS 下限/対応 screen 検証環境の有無（現在は下限の実機が無い）。アプリ API の追加なし。Developer ID・公証に関する準備は含めない。
 
-- [ ] Developer ID と notarization の契約/認証/利用権限をユーザーと準備する。既知の署名ID不足を存在済みにしない。
-- [ ] 別途許可された時だけ Ed25519 鍵を安全に作成・保管し、公開鍵のみ提供する。秘密鍵・notary credential を repository/Issue/docs に貼らない。
-- [ ] 実配布 repository/Pages/HTTPS URL/公開権限と bundle ID、下限 OS の実機環境を確定する。文書管理 repository と混同しない。
+- [ ] bundle ID `com.takemo101.ambien` を確認し、配布元（公開予定の `takemo101/ambien` の GitHub Releases／GitHub Pages）の実 HTTPS URL と制御権を確定する。現在の非公開 repository を公開済みの配布先として扱わず、公開の実行は別途の明示依頼まで行わない。
+- [ ] 別途許可された時だけ Ed25519 鍵を安全に作成・保管し、公開鍵のみ提供する。秘密鍵を repository/Issue/docs に貼らない。
+- [ ] 公開前に repository の秘密情報・個人の環境情報・不要な履歴の混入を監査する（監査は公開の実行ではない）。
+- [ ] 下限 macOS 15 の実機環境の有無を確認する。現在は無く、用意できる見込みも無い。確認できるまで下限の対応を宣言せず、現在の OS だけの確認で代用しない。
 
-**必要な検証:** 署名ID・公証認証の実利用可否、実 HTTPS 配信先の制御権、公開鍵と安全な署名環境の対応、下限実機の availability を記録する。fixture や仮 URL/鍵の test はしない。
+**必要な検証:** 実 HTTPS 配信先の制御権、公開鍵と安全な署名環境の対応、公開前監査の結果、下限実機の availability を記録する。fixture や仮 URL/鍵の test はしない。
 
-**Smoke/gate:** 人が承認した環境で実署名・公証を行える準備と実 URL を観測する（実配布は P17）。AI 単独 completed 不可。認証/公開許可/下限実機のいずれかが無ければ blocked、無断生成や公開で補わない。
+**Smoke/gate:** 人が承認した環境で実 URL と公開鍵を観測する（実配布は P17）。AI 単独 completed 不可。鍵生成・公開の許可が無ければ blocked、無断生成や公開で補わない。下限実機が無い間は下限 OS の対応を宣言せず、P18 の下限確認を未達として残す。
 
 ## P15 Sparkle 標準手動更新を保存・終了 gate に接続する
 
 **DependsOn:** P12、P14。**SPEC:** [アプリ内更新](../SPEC.md#アプリ内更新)、[保存](../SPEC.md#保存)、[配布前提](../SPEC.md#配布前提)。
 
-**Files:** Create `src/platform/updates.rs`, `resources/Info.plist`, `scripts/package-app.sh`; Modify `src/platform/mod.rs`, `src/app.rs`, `src/lifecycle.rs`, `native/ambien_bridge.h`, `native/ambien_bridge.m`, `build.rs`, `Cargo.toml`, `Cargo.lock`。Tests: `updates.rs`, `lifecycle.rs` 内＋実署名 app。
+**Files:** Create `src/platform/updates.rs`, `resources/Info.plist`, `scripts/package-app.sh`; Modify `src/platform/mod.rs`, `src/app.rs`, `src/lifecycle.rs`, `native/ambien_bridge.h`, `native/ambien_bridge.m`, `build.rs`, `Cargo.toml`, `Cargo.lock`。Tests: `updates.rs`, `lifecycle.rs` 内＋ad-hoc 署名した実 app。
 
 **Consumes:** I10 `TerminationCoordinator::request(UpdateInstall) -> AttemptId`、I09 `SaveReceipt`、I08 deadline、P14 実識別子/鍵/URL。**Produces:** I11 Sparkle Adapter、標準 `SPUUpdater`＋`SPUStandardUserDriver` の薄い subclass、reply/block と AttemptId の一度だけの関連付け。実 API であってアプリ側の別 host を作らない。
 
@@ -389,6 +390,7 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 - [ ] ready-to-install reply を wrap、ユーザー Install を保存 receipt まで保留、失敗は original reply(Skip) 一度。ready と Installing stage の再開 reply はともに Dismiss→Skip とし、保存 gate を経ず通常 Quit で後から install される経路を残さない。Installing stage の Install にも同じ保存 gate を使う。標準 UI は super を維持し、Dismiss/veto/dealloc を helper 完全取消 ack にしない。
 - [ ] 成功は original reply(Install)、relaunch postpone block を main で copy/一度 invoke/release し、fade deadline まで延期する。
 - [ ] delegate/controller weak 参照の owner を保持し native OS/Sparkle termination を I10 に合流、古い continuation を無効化する。
+- [ ] 署名しない（ad-hoc 署名のみの）アプリを Sparkle が更新できるか、置換後の隔離属性・Gatekeeper の扱いをソースで確認し、P16 の実機確認へ渡す。成立を仮定せず、成立しなければユーザーが方針を戻すか判断する。
 
 **Behavior tests:** 保存 failure→今回の更新 intent 取消/Install と fade なし/音継続；成功→Install は一度だけ/deadline 前に再起動せず以後 continuation 一度；ready／Installing stage の Dismiss→original Skip と取消 barrier、Installing stage の再開 Install→同じ最新保存 receipt が必要。同じ callback 二度/旧 AttemptId→重複終了なし。defaults automatic=true→起動 policy は手動のみ、UserInitiated 以外の check 拒否。モデル試験は coordinator の因果だけを証明し、native 実 integration の代用品にしない。
 
@@ -398,7 +400,7 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **DependsOn:** P15。**SPEC:** [アプリ内更新](../SPEC.md#アプリ内更新)、[保存と配布](../SPEC.md#保存と配布)、[スレッドと資源](../SPEC.md#スレッドと資源)。
 
-**Files:** Modify `src/platform/updates.rs`, `src/lifecycle.rs`, `native/ambien_bridge.h`, `native/ambien_bridge.m`, `docs/verification.md`。Tests: `updates.rs`, `lifecycle.rs` 内＋署名した隔離旧版/新版。
+**Files:** Modify `src/platform/updates.rs`, `src/lifecycle.rs`, `native/ambien_bridge.h`, `native/ambien_bridge.m`, `docs/verification.md`。Tests: `updates.rs`, `lifecycle.rs` 内＋ad-hoc 署名した隔離旧版/新版。
 
 **Consumes:** I10 `AttemptId` と cancel、I11 P15 Sparkle owner。**Produces:** I11 同 attempt の実 updater agent 終了 barrier と通常 Quit 再許可。
 
@@ -408,23 +410,24 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **Behavior tests:** attempt A cancel中 Quit→その Quit cancelled/host生存；A agent terminated→通常 Quit 許可のみ、自動終了なし；その後明示 Quit→I10 の保存経路。旧 A terminated が B に届く→B 不変；agent 0/2件/host複数→成功 barrier を出さず明示失敗。sessionInProgress=false/cycle finished/fixed sleep 入力→helper ack として採用しない。
 
-**Smoke/技術 gate:** 実署名隔離旧/新版、実 Sparkle helper で Install→保存失敗 Skip→cancel中⌘Q→host生存→実 agent 終了→次の明示⌘Q→通常終了を確認する。ready の Later/Dismiss と Installing stage の再開も同じ保存/取消経路で観測する。process identity/terminated 一意性と helper の終了成立が未証明なら P16 は blocked、P17 公開不可。ソース上 [INFERENCE] や mock integration で completed にしない。
+**Smoke/技術 gate:** ad-hoc 署名の実隔離旧/新版、実 Sparkle helper で Install→保存失敗 Skip→cancel中⌘Q→host生存→実 agent 終了→次の明示⌘Q→通常終了を確認する。ready の Later/Dismiss と Installing stage の再開も同じ保存/取消経路で観測する。あわせて、署名しないアプリを Sparkle が更新でき、置換後の隔離属性・Gatekeeper の扱いが成立するかを実機で観測する。成立しなければユーザーが方針を戻すか判断する。process identity/terminated 一意性と helper の終了成立が未証明なら P16 は blocked、P17 公開不可。ソース上 [INFERENCE] や mock integration で completed にしない。
 
-## P17 同じ署名・公証済み DMG を取得・更新で配布する
+## P17 同じ署名しない DMG を取得・更新で配布する
 
 **DependsOn:** P13、P14、P16。**SPEC:** [配布と更新](../SPEC.md#配布と更新)、[アプリ内更新](../SPEC.md#アプリ内更新)、[配布前提](../SPEC.md#配布前提)。
 
 **Files:** Modify `scripts/package-app.sh`, `resources/Info.plist`, `docs/verification.md`, `docs/development.md`（実在する packaging/公開手順のみ）。外部対象は P14 で確定した配布 Releases/Pages の実 DMG/appcast/release notes。ローカル秘密情報の path を本計画で作らない。
 
-**Consumes:** P14 認証/公開権限/実 URL、P15 bundle、P16 合格 barrier、I09 外部 state 保護。**Produces:** 署名・公証・staple 済み実 DMG と同一 bytes の Ed25519 署名、完全版 appcast、実取得/更新証拠。アプリ Interface 追加なし。
+**Consumes:** P14 の実 URL/鍵/公開許可、P15 bundle、P16 合格 barrier、I09 外部 state 保護。**Produces:** ad-hoc 署名のみの実 DMG（Developer ID 署名・公証・staple なし）と同一 bytes の Ed25519 署名、完全版 appcast、Gatekeeper 承認手順を載せた配布ページ、実取得/更新証拠。アプリ Interface 追加なし。
 
-- [ ] arm64/minOS/version/framework rpath を確認し helper→framework→app を内から外へ署名する。`--deep` 一括署名で代替しない。
-- [ ] DMG を公証し ticket を添付、最終同一 DMG を Ed25519 署名し `generate_appcast --maximum-deltas 0` で完全版情報を生成する。表示版と増加 build version を区別する。
-- [ ] 許可された実 HTTPS Releases/Pages へ公開し redirect/最低OS/署名検証と二版更新を通す。source 公開/mirror を勝手に行わない。
+- [ ] arm64/minOS/version/framework rpath を確認し、Apple Silicon の実行に必要な ad-hoc 署名だけを付ける。Developer ID・Hardened Runtime・公証・staple は行わず、内包物の署名状態と起動は実物で確認する。
+- [ ] 受け取った Mac で出る Gatekeeper の警告と、初回起動に必要な承認手順を配布ページに記し、実機で手順どおりに起動できることを確認する。
+- [ ] 最終同一 DMG を Ed25519 署名し `generate_appcast --maximum-deltas 0` で完全版情報を生成する。表示版と増加 build version を区別する。
+- [ ] 公開前監査（P14）と repository 公開の別途明示依頼を経て、実 HTTPS Releases/Pages へ公開し redirect/最低OS/署名検証と二版更新を通す。許可なく source 公開/mirror をしない。
 
-**必要な behavior/実物検証:** build version 非増加/最低OS不適合→候補へ更新しない；改竄 DMG/署名 mismatch→Installなし；取得/検証失敗→音・state 維持；置換失敗→外部 state bytes を破壊しない（完全 rollback を保証しない）。実 codesign/notarization/staple、配信 hash/Ed25519 対応を記録する。fake feed が返す文字列だけの test を作らない。
+**必要な behavior/実物検証:** build version 非増加/最低OS不適合→候補へ更新しない；改竄 DMG/署名 mismatch→Installなし；取得/検証失敗→音・state 維持；置換失敗→外部 state bytes を破壊しない（完全 rollback を保証しない）。Apple の署名・公証が無いため更新の真正性は Ed25519 署名だけが担保する。実配布物の ad-hoc 署名状態、配信 hash/Ed25519 対応を記録する。fake feed が返す文字列だけの test を作らない。
 
-**Smoke/gate:** 下限 OS で公開 DMG を初回取得→起動、旧署名版→実手動更新→明示 Install→設定復元。起動後に確認操作しない観測期間の更新通信なしを確認する。署名ID/認証/公開許可が不足なら blocked、人の配布受入なしで completed 不可。
+**Smoke/gate:** 対象環境で公開 DMG を初回取得→Gatekeeper の承認手順→起動、旧版→実手動更新→明示 Install→設定復元。起動後に確認操作しない観測期間の更新通信なしを確認する。署名しないアプリの更新と置換後の Gatekeeper の扱いが成立しなければ、ユーザーが方針を戻すか判断する。公開許可・鍵が不足なら blocked、下限 OS 実機が無い間は下限の対応を宣言せず、人の配布受入なしで completed 不可。
 
 ## P18 全 SPEC の実機・実 RT 経路の最終受け入れ
 
@@ -442,7 +445,7 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 
 **Behavior tests/期待:** P02〜P12/P15/P16 の回帰を実 lockfile で実行。最大声数/音源 pool 満杯/visual overflow/epoch切替が同時でも RT bounded・音は visual 不足で停止しない。closure/monitor/native block/observer/Task 寿命を反復後の保持と分けて観測する。数値の norm 成功だけで聴感、固定窓の寸法だけで GPU cost 一定を主張しない。
 
-**Smoke/gate:** signed DMG の全操作、OS sleep/出力変更、対応ディスプレイ変更、失敗→継続/取消/再要求を実施。ユーザーの試聴・ガラス判断、下限 OS、物理測定、実更新を AI だけで completed にできない。未検証・未解決レビュー・統合不足がある限り初回完成版とはしない。
+**Smoke/gate:** 署名しない DMG の全操作、OS sleep/出力変更、対応ディスプレイ変更、失敗→継続/取消/再要求を実施。ユーザーの試聴・ガラス判断、下限 OS、物理測定、実更新を AI だけで completed にできない。下限 OS の実機が無い間は下限の対応を宣言しない。未検証・未解決レビュー・統合不足がある限り初回完成版とはしない。
 
 ## 全 SPEC 節の coverage matrix
 
@@ -451,7 +454,7 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 | SPEC 節 | 設計の責務 | 作業 | 必要な証拠 |
 |---|---|---|---|
 | [文書の状態](../SPEC.md#文書の状態) | 文書/実装/公開権限の境界 | Issue 化 gate・全 P | 明示依頼と実在 paths。未実装の明記 |
-| [成功条件](../SPEC.md#成功条件) | 全体 E2E | P01〜P18 | 三環境ユーザー試聴、実窓、保存、同期、signed DMG |
+| [成功条件](../SPEC.md#成功条件) | 全体 E2E | P01〜P18 | 三環境ユーザー試聴、実窓、保存、同期、unsigned DMG |
 | [対象にしないもの](../SPEC.md#対象にしないもの) | host、合成、登録、更新 scope | P01/P02/P05/P08/P15/P18 | source/review と実 UI。FFT/録音/plugin/OS音量/auto update/自由resize等を追加しない |
 | [体験](../SPEC.md#体験) | ControlState、WorldClock、Movement | P02/P03/P04/P06/P07/P09 | virtual-time 境界と実操作、初回/復元 |
 | [切り替えと途中操作](../SPEC.md#切り替えと途中操作) | GainRamp、PreparedEngine | P04/P06/P18 | slerp/連続 retarget tests、二声の実選択、実三声音と光、RT診断 |
@@ -472,16 +475,16 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 | [消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止) | EngineLease、AudioController recovery | P03/P08/P10/P18 | freeze/lease/rate tests、実sleep/device/mute/hidden |
 | [アクセシビリティ](../SPEC.md#アクセシビリティ) | appearance Adapterと三motion反映 | P11/P18 | 起動/変更の実両窓、audio不変、透明度例外 |
 | [保存](../SPEC.md#保存) | StateDocument、SaveWorker、Coordinator | P09/P11/P12/P15 | real I/O unknown/backup/atomic/revision、実失敗継続/再起動 |
-| [配布と更新](../SPEC.md#配布と更新) | bundle/signing、更新Adapter | P14/P15/P16/P17/P18 | 実署名/公証/staple/取得/更新と権限 |
+| [配布と更新](../SPEC.md#配布と更新) | bundle/ad-hoc 署名、更新Adapter | P14/P15/P16/P17/P18 | 実 ad-hoc 署名/Gatekeeper 承認/取得/更新と権限 |
 | [アプリ内更新](../SPEC.md#アプリ内更新) | 標準driver、保存/終了/取消barrier | P15/P16/P17 | 実framework/helper、保存失敗cancel、二版更新、手動以外通信なし |
-| [配布前提](../SPEC.md#配布前提) | 外部準備 gate | P14/P17/P18 | 実認証/鍵/URL/公開権限/下限OS・画面。secret非公開 |
+| [配布前提](../SPEC.md#配布前提) | 外部準備 gate | P14/P17/P18 | 鍵/URL/公開権限/公開前監査/下限OS・画面（下限OS実機は現在無し）。secret非公開 |
 | [構成と Interface](../SPEC.md#構成と-interface) | I01〜I11、単一GPUI host | P01〜P12/P15/P16 | consumer型一致/所有 review とE2E、別hostなし |
 | [依存の選定](../SPEC.md#依存の選定) | fixed lockと実API境界 | P01/P02/P15/P18 | 実lockfile/build、使用ノード/ABI/依存寿命診断 |
 | [スレッドと資源](../SPEC.md#スレッドと資源) | atomic mailbox/ring、lease、worker | P02/P03/P04/P06/P08/P10/P12/P18 | interleavings と実RT alloc/drop/wait/I/O/容量/資源回収 |
 | [検証条件](../SPEC.md#検証条件) | 証拠分類/最終gate | 全 P/P18 | 各子節をversion/環境付きで照合、未確認を隠さない |
 | [音と操作](../SPEC.md#音と操作) | synth/mix/control/world | P02〜P07/P13/P18 | 境界・連続性・時間tests、各ユーザー試聴とRT測定 |
 | [窓・高DPI・同期](../SPEC.md#窓高dpi同期) | scene/timing/platform/recovery | P01/P08/P10/P11/P18 | 実窓/screen/DPI/sync/sleep/appearance と対応範囲 |
-| [保存と配布](../SPEC.md#保存と配布) | persistence/lifecycle/update/package | P09/P12/P14〜P18 | real I/O、cross終了、signed DMG/失敗更新/実helper |
+| [保存と配布](../SPEC.md#保存と配布) | persistence/lifecycle/update/package | P09/P12/P14〜P18 | real I/O、cross終了、unsigned DMG/失敗更新/実helper |
 | [調査根拠](../SPEC.md#調査根拠) | 固定一次ソースと推論の区別 | 全 P | 使用改訂/実APIのsource evidence と実機証拠を分離 |
 | [仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件) | 承認、mikan/but/Lat flow | Issue 化 gate・全 P | 対象別権限、review/merge/sync/Report、ユーザーgate |
 
@@ -500,7 +503,7 @@ Interface: Consumes/ProducesのI契約の正確な型・署名・寿命・失敗
 behavior tests: 入力→期待値、境界/容量/連続性/失敗ケース、exact test source
 実経路smoke: 対象version/環境、実UI/音/OS/helper/配布物の操作と観測
 受入: 必要な自動/実機/ユーザー証拠、独立review、通常merge、but同期、Report
-権限: 実装/Cargo、PR、環境準備、鍵/署名、公証、公開の許可を個別記載
+権限: 実装/Cargo、PR、環境準備、鍵、ad-hoc 署名、リポジトリ公開の許可を個別記載
 停止条件: そのPの具体gate不成立・失敗/未レビュー/未統合/未受入
 SPEClinks: 当該PのSPEC最新節、詳細設計の責務、検証記録へのリンク
 ```
@@ -513,8 +516,8 @@ SPEClinks: 当該PのSPEC最新節、詳細設計の責務、検証記録への�
 - **P08/P18:** CPAL の estimates、latency query failure、Bluetooth/WindowServer、dry DSP delay の物理同期は実出力測定が必要。数学的時刻対応だけで目標達成を宣言しない。
 - **P10/P18:** CPAL 内 monitor/closure の寿命と worker join 不在の影響は実 lockfile/失敗注入で診断する。EngineLease はアプリ engine 回収の設計で、依存全資源の無漏れ保証ではない。
 - **P11/P18:** 固定 GPUI でも描画面/中間面と旧資源コストは残る。下限 OS と対応 screen/DPI の実測が必要。resize/fullscreen/巨大任意窓や GPUI サイズ patch へ scope を広げない。
-- **P12/P15/P16:** additive 終了 selector、native block ABI/寿命、実 updater agent の一意同定と terminated barrier は統合 gate。取消後の通常 Quit が実署名版で成立しなければ公開へ進まない。
+- **P12/P15/P16:** additive 終了 selector、native block ABI/寿命、実 updater agent の一意同定と terminated barrier は統合 gate。取消後の通常 Quit が ad-hoc 署名の実 bundle で成立しなければ公開へ進まない。署名しないアプリを Sparkle が更新できるか、置換後の隔離属性・Gatekeeper の扱いは未確認で、ソースと実機で確認し、成立しなければユーザーが方針を戻すか判断する。
 - **P13:** 三環境の心地よさ・初期値はユーザー試聴でしか確定しない。保存例/finite 出力を代用品にしない。
-- **P14/P17/P18:** Developer ID/公証認証/鍵の安全管理/実URL/公開権限/下限実機と人の配布受け入れは未成立前提。実装許可と PR 許可からこれらの権限を推測しない。
+- **P14/P17/P18:** 配布 repository の公開権限・Ed25519 鍵の安全管理・実URL・公開前監査・下限実機（現在は無い）と、Gatekeeper 承認手順の実機確認・人の配布受け入れは未成立前提。実装許可と PR 許可からこれらの権限を推測しない。
 
 これらは未記入設計ではなく、作業の完了・公開を止める具体的な観測/外部前提である。技術不成立なら原因と残る証拠を mikan/検証記録に残し、成功に見える fallback・fake feed・古い receipt・固定待ち時間で通さない。

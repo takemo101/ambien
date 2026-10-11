@@ -6,7 +6,7 @@
 
 - **確認済みソース**：固定改訂の一次資料で確認したライブラリの Interface・Implementation。節内の URL が根拠である。
 - **計画 Interface／設計**：製品全体の型・関数・規則を示す代表断片。実際に作成した部分は以下の現存ソースへの参照と区別し、断片をコンパイル済みコードの転載として扱わない。
-- **限定検証**：固定二窓は build・幾何試験・実 GPUI/NSWindow の状態観測を実施し、2x主画面でガラス・シーン／設定操作・最小化と復帰・system appearance・全OSタイリングの成功回答を得た。診断を除去した shipping source に外部 AX／foreground CGEvent の E2E runner を実行し、設定・窓の lifecycle と、両窓からの ⌘Q による実 PID 消失・exit0 を確認した。過去の physical 終了報告と host 生存の不一致の原因特定とは区別する。別1x画面・倍率切替・負荷、音質、RT、物理同期、署名・公証・更新へ一般化しない。証拠は [検証記録](verification.md) に置く。
+- **限定検証**：固定二窓は build・幾何試験・実 GPUI/NSWindow の状態観測を実施し、2x主画面でガラス・シーン／設定操作・最小化と復帰・system appearance・全OSタイリングの成功回答を得た。診断を除去した shipping source に外部 AX／foreground CGEvent の E2E runner を実行し、設定・窓の lifecycle と、両窓からの ⌘Q による実 PID 消失・exit0 を確認した。過去の physical 終了報告と host 生存の不一致の原因特定とは区別する。別1x画面・倍率切替・負荷、音質、RT、物理同期、更新・配布へ一般化しない。証拠は [検証記録](verification.md) に置く。
 
 ユーザーの追加依頼に基づき Cargo、P01 の固定二窓、P02 の雨の合成・標準出力・視覚境界、P03 の雨ノブ・音量・独立消音・受理通知、P04 の岩と最終形の共通手動交差、P05 の深海合成と登録を作成した。P02 の雨・左右の光・シーン閉鎖中の音継続・再表示、P03 のフォーム操作・独立消音にはユーザーの確認を得た。P04 は実標準出力の寄与gains・途中再選択・消音中の世界とImpactを観測した。P05 の実factory端点波形と同じ気泡のevent記録はoffline観測であり、native／CPAL・試聴の受け入れとは分離する。新しい選択フォームのnative観測とその限界は検証記録で区別する。その他の予定配置は、必要な成果の開始時に実装する。実装・Git・鍵生成・署名・公開の権限は [次に進む条件](../SPEC.md#仕様の管理と次に進む条件) に従う。両窓の連続 resize・zoom・fullscreen、GPUI サイズ制御パッチ、新しい内部 resize 操作は採らない。最新の [固定サイズと内部描画](../SPEC.md#固定サイズと内部描画) が窓設計の基準である。
 
@@ -39,7 +39,7 @@
 | `src/platform/mod.rs`・`macos.rs`・`updates.rs` | 借用 AppKit、OS 通知、Sparkle Adapter。独自 host／設定 UI を作らない |
 | `native/ambien_bridge.h`・`.m` | 必要な ObjC protocol・copy した blocks・KVO・終了 selector の接続 |
 | `Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` | 最初の実装時に SPEC の依存と実解決版を固定 |
-| `build.rs`・`resources/Info.plist`・`scripts/package-app.sh` | native 接続・実 bundle metadata・署名／公証／DMG が必要になった作業で追加 |
+| `build.rs`・`resources/Info.plist`・`scripts/package-app.sh` | native 接続・実 bundle metadata・ad-hoc 署名／DMG が必要になった作業で追加 |
 
 依存方向は UI／App → controls／registry、audio → controls／registry、persistence → registry／controls、platform → App／lifecycle とする。Voice は GPUI・ファイル・Sparkle に依存しない。UI は Voice を借用しない。復旧や保存に voice 名の分岐を追加しない。順序とファイルの追加時点は [実装計画](implementation-plan.md) を参照する。
 
@@ -720,7 +720,7 @@ Blocks は main の Adapter owner が copy／release し、one-shot の consumed
 
 ### Cancelと通常Quitの競合barrier
 
-**ソースに基づく条件付き設計、実署名版未検証**。Skip 直後の通常 Quit が agent の host 終了監視を通じて install を再開しないよう、実 progress agent の終了を観測する。
+**ソースに基づく条件付き設計、ad-hoc 署名の実 bundle で未検証**。Skip 直後の通常 Quit が agent の host 終了監視を通じて install を再開しないよう、実 progress agent の終了を観測する。
 
 1. ユーザー update check 開始前から `NSWorkspace.runningApplications` の KVO を登録する。現在 bundle の実 Sparkle framework 内 `Updater.app` の canonical bundle／executable URL を NSBundle で求め、一致する一意 candidate を追跡する。bundle 名や Sparkle 共通 ID だけで同定しない。
 2. ready より前にその **同じ NSRunningApplication instance** を strong 保持し、`terminated` の Initial＋New KVO を登録する。PID の再検索／launchDate 必須／cancel 後「見当たらない」判定を使わない。同じ host の別 instance が無く、agent が自分を対象とする前提を確認する。
@@ -730,7 +730,7 @@ Blocks は main の Adapter owner が copy／release し、one-shot の consumed
 
 確認済み：[progress agent 起動と URL](https://github.com/sparkle-project/Sparkle/blob/eef1a539a373c1f1a320624b1130fc5de7b2e100/InstallerLauncher/SUInstallerLauncher.m#L478-L545)、[cancel 送信と早い abort](https://github.com/sparkle-project/Sparkle/blob/eef1a539a373c1f1a320624b1130fc5de7b2e100/Sparkle/SPUInstallerDriver.m#L562-L571)、[installer cleanup](https://github.com/sparkle-project/Sparkle/blob/eef1a539a373c1f1a320624b1130fc5de7b2e100/Autoupdate/AppInstaller.m#L832-L862)、[agent の host KVO](https://github.com/sparkle-project/Sparkle/blob/eef1a539a373c1f1a320624b1130fc5de7b2e100/Sparkle/InstallerProgress/InstallerProgressAppController.m#L315-L348)、[複数 host の制約](https://github.com/sparkle-project/Sparkle/blob/eef1a539a373c1f1a320624b1130fc5de7b2e100/Sparkle/InstallerProgress/InstallerProgressAppController.m#L291-L304)。公開 [runningApplications](https://developer.apple.com/documentation/appkit/nsworkspace/runningapplications) と [isTerminated](https://developer.apple.com/documentation/appkit/nsrunningapplication/isterminated) を使う。LSUIElement の agent には [didTerminate 通知](https://developer.apple.com/documentation/appkit/nsworkspace/didterminateapplicationnotification) が出ないため、それを ack にしない。
 
-この barrier は installer 全 cleanup 完了の証明ではない。正しい host が生存し、Install を出しておらず、正しい agent が死亡したという条件下で、以後の通常 Quit→agent の host completion→install の経路が閉じるという推論である。private IPC、kill、launchd job 削除はしない。実同梱署名 helper／隔離した旧新版で、保存失敗→取消→連打 Quit→agent gone→再明示 Quit→旧 bundle が置換されないところまで確認して初めて成立とする。
+この barrier は installer 全 cleanup 完了の証明ではない。正しい host が生存し、Install を出しておらず、正しい agent が死亡したという条件下で、以後の通常 Quit→agent の host completion→install の経路が閉じるという推論である。private IPC、kill、launchd job 削除はしない。実同梱 helper を含む ad-hoc 署名の隔離した旧新版で、保存失敗→取消→連打 Quit→agent gone→再明示 Quit→旧 bundle が置換されないところまで確認して初めて成立とする。
 
 ### 手動更新policy
 
@@ -740,13 +740,13 @@ Blocks は main の Adapter owner が copy／release し、one-shot の consumed
 
 ## 配布の前提と成果物
 
-[配布前提](../SPEC.md#配布前提) は実 credentials／権限／下限OS環境の gate であり、本書で確保済みにしない。現時点で有効な Developer ID が準備済みとは扱わず、契約・公証認証・Ed25519 鍵・実 URL／公開権限を別々に確認する。文書管理用 private repository は配布用 public Releases／Pages の代用品ではない。秘密鍵・認証は repo／Issue／docs に記録しない。
+[配布前提](../SPEC.md#配布前提) は実鍵／権限／下限OS環境の gate であり、本書で確保済みにしない。Developer ID 署名・公証は行わない方針で、bundle ID `com.takemo101.ambien`・Ed25519 鍵・実 URL／公開権限・公開前監査（秘密情報・個人の環境情報・不要な履歴の混入）を別々に確認する。配布元は公開した `takemo101/ambien` の Releases／Pages であり、現在の非公開 repository は公開済みの配布先ではない。公開の実行は別途の明示依頼まで行わない。下限 macOS 15 の実機は無く、確認できるまで下限の対応を宣言しない。秘密鍵は repo／Issue／docs に記録しない。
 
 実装時の bundle は arm64、最低 OS、CFBundleIdentifier、増加する CFBundleVersion と表示用 short version、NSHighResolutionCapable、SUFeedURL、SUPublicEDKey、上記 policy、`Contents/Frameworks/Sparkle.framework`、`@executable_path/../Frameworks` rpath を実配布構成で設定する。URL／ID／key は承認された実値のみ。native bridge は標準 framework headers へリンクし、GPUI が NSApplication を所有する。
 
-配布作業は内包 helper／XPC→framework→app の順で Developer ID／Hardened Runtime／timestamp を付け、必要な entitlement をその実内包物に限定する。`codesign --deep` で一括署名して正しいとしない。app を含む DMG を公証・staple し、その **同じ最終 DMG bytes** を Sparkle Ed25519 署名して、full update の appcast を `generate_appcast --maximum-deltas 0` で作る。appcast は増加 version／表示 version／minimum OS／実 DMG URL／length／Ed25519 signature／実 release notes URL を対応させる。別の未公証 DMG を更新だけに使わない。[Sparkle 導入](https://sparkle-project.org/documentation/)、[publishing](https://sparkle-project.org/documentation/publishing/)、[Apple 公証](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+配布作業は、app に Apple Silicon の実行に必要な ad-hoc 署名だけを付け、Developer ID・Hardened Runtime・公証・staple は行わない。内包物の署名状態と起動は実物で確認する。その **同じ最終 DMG bytes** を Sparkle Ed25519 署名して、full update の appcast を `generate_appcast --maximum-deltas 0` で作る。appcast は増加 version／表示 version／minimum OS／実 DMG URL／length／Ed25519 signature／実 release notes URL を対応させる。別の DMG を更新だけに使わない。受け取った Mac の Gatekeeper の警告と初回起動の承認手順は配布ページに記し、実機で確認する。Apple の署名・公証が無いため、更新の真正性は Ed25519 署名だけが担保する。署名しないアプリを Sparkle が更新でき、置換後の隔離属性・Gatekeeper の扱いが成立するかは未確認で、ソースと実機で確かめ、成立しなければユーザーが方針を戻すか判断する。[Sparkle 導入](https://sparkle-project.org/documentation/)、[publishing](https://sparkle-project.org/documentation/publishing/)
 
-HTTPS Pages と Releases redirect、公開権限、実初回取得、隔離2versionの手動更新・保存復元・署名不一致・download／replace failure は別の観測。signed feed追加、delta、beta、sandbox、新 telemetry は範囲外。鍵・認証が無いのは準備 gate、toolchain／ABI／framework link が成立しないのは技術 gate、署名／公証／HTTP failure は操作の失敗であり区別する。許可が揃う前に外部準備を実行しない。
+HTTPS Pages と Releases redirect、公開権限、実初回取得（Gatekeeper の承認手順を含む）、隔離2versionの手動更新・保存復元・署名不一致・download／replace failure は別の観測。signed feed追加、delta、beta、sandbox、新 telemetry は範囲外。鍵・公開権限が無いのは準備 gate、toolchain／ABI／framework link が成立しないのは技術 gate、Ed25519 検証／HTTP failure は操作の失敗であり区別する。許可が揃う前に外部準備を実行しない。
 
 ## SPEC責務の対応表
 
@@ -755,7 +755,7 @@ HTTPS Pages と Releases redirect、公開権限、実初回取得、隔離2vers
 | SPEC 見出し | 本書の設計節 | 対応作業／必要な証拠 |
 |---|---|---|
 | [文書の状態](../SPEC.md#文書の状態) | 文書の位置づけ | 実装と文書承認を分離、計画全体の開始条件 |
-| [成功条件](../SPEC.md#成功条件) | 合成・窓・時計・配布、未検証gate | P13・P17・P18／ユーザー試聴、実同期、下限OS signed DMG |
+| [成功条件](../SPEC.md#成功条件) | 合成・窓・時計・配布、未検証gate | P13・P17・P18／ユーザー試聴、実同期、下限OS・署名しないDMG |
 | [対象にしないもの](../SPEC.md#対象にしないもの) | Module 分離、DSP、固定窓、手動更新policy | 全作業／除外を増やさず対象外を実装しない review |
 | [体験](../SPEC.md#体験) | 操作のcoherency、世界と移動 | P03・P07／UI 操作・virtual time |
 | [切り替えと途中操作](../SPEC.md#切り替えと途中操作) | 多声slerp、Voice 準備 | P04・P06／最終手動規則と二声実選択、第三声・連打・端点・実音と無確保経路 |
@@ -776,7 +776,7 @@ HTTPS Pages と Releases redirect、公開権限、実初回取得、隔離2vers
 | [消音・スリープ・出力停止](../SPEC.md#消音スリープ出力停止) | EngineLease、復旧、世界時計 | P10／sleep・機器切替・残り秒・rate再準備 |
 | [アクセシビリティ](../SPEC.md#アクセシビリティ) | appearance、native通知 | P11／起動・変更・3 motion反映・opaque例外 |
 | [保存](../SPEC.md#保存) | LoadOutcome、unknown、atomic、flush | P09・P12／isolated real I/O、破損・ReadOnly・最新receipt |
-| [配布と更新](../SPEC.md#配布と更新) | 配布の前提と成果物 | P14・P17／実識別子・署名・公証・配信 |
+| [配布と更新](../SPEC.md#配布と更新) | 配布の前提と成果物 | P14・P17／実識別子・ad-hoc 署名・Gatekeeper 承認・配信 |
 | [アプリ内更新](../SPEC.md#アプリ内更新) | 標準driver、保存beforeInstall、cancel barrier | P15・P16・P17／実標準UI・保存失敗・agent gone・2version |
 | [配布前提](../SPEC.md#配布前提) | credentials と技術gateの分離 | P14／実権限・下限OS・公開鍵、準備は今回実行無し |
 | [構成と Interface](../SPEC.md#構成と-interface) | 予定配置、全計画 Interface | 全作業／責務・所有・失敗の review |
@@ -785,7 +785,7 @@ HTTPS Pages と Releases redirect、公開権限、実初回取得、隔離2vers
 | [検証条件](../SPEC.md#検証条件) | 対応表、未検証gate | P18／全要件の実証拠と残る制約 |
 | [音と操作](../SPEC.md#音と操作) | 合成、slerp、coherency | P13・P18／各声試聴・最大実経路 |
 | [窓・高DPI・同期](../SPEC.md#窓高dpi同期) | 窓、時刻、容量、復旧 | P11・P18／対応画面・資源・音光・停止復帰 |
-| [保存と配布](../SPEC.md#保存と配布) | 保存、lifecycle、配布 | P09・P12・P16・P17・P18／実fail・署名版更新・復元 |
+| [保存と配布](../SPEC.md#保存と配布) | 保存、lifecycle、配布 | P09・P12・P16・P17・P18／実fail・署名しないアプリの更新・復元 |
 | [調査根拠](../SPEC.md#調査根拠) | 各節のprimary URL、根拠 | 固定一次ソースと実測を混同しない |
 | [仕様の管理と次に進む条件](../SPEC.md#仕様の管理と次に進む条件) | 文書の位置づけ、権限 | [開発手順](development.md)／別の実装許可・Issue化判断 |
 
@@ -803,7 +803,7 @@ native 通知の補助依存は `async-channel=2.5.0`（native→main だけ）�
 
 | gate | 現在の状態と、未成立時の扱い |
 |---|---|
-| 実 GPUI／Ely／native／CPAL／FunDSP の build と ABI | 現行環境で固定依存を build し、実 GPUI 窓・標準 CPAL stream・FunDSP tick 経路を実行した。外部 native E2E と雨のユーザー確認を得た。下限 OS・署名版や他機器へ一般化しない |
+| 実 GPUI／Ely／native／CPAL／FunDSP の build と ABI | 現行環境で固定依存を build し、実 GPUI 窓・標準 CPAL stream・FunDSP tick 経路を実行した。外部 native E2E と雨のユーザー確認を得た。下限 OS・配布版や他機器へ一般化しない |
 | 固定窓と desktop tiling | 現行一次画面で実 NSWindow の外枠・制約・flags を観測し、2x主画面の全OSタイリングにユーザーの成功回答を得た。native quit の識別と最終候補の状態は検証記録を参照。別1x画面・倍率切替・負荷へ一般化せず、位置固定や GPUI patch へ無断変更しない |
 | 高DPI資源と透明性 | 対応画面・倍率で未実測。固定粒／30fpsだけでGPU一定・確保成功を主張しない |
 | RTとEngineLease | 競合・旧 epoch・閉鎖 gate・worker 回収と Rust callback／満杯 pool の scoped heap を試験した。native backend 全失敗経路・最悪 timing・最大三声・依存 monitor の残留は独立に確認する |
@@ -811,7 +811,7 @@ native 通知の補助依存は `async-channel=2.5.0`（native→main だけ）�
 | 音質・initial値 | 雨・岩・深海と遷移はP13でユーザー試聴により確定した（[検証記録](verification.md)）。確定は個人の聴感判断で、実機・出力機器・長時間の背景利用・第三環境選択の聴感などの未確認範囲は検証記録に残す |
 | 保存・終了 | 実I/O、latest ack、directory sync failure、fadeの予定deadline、OS termination追加selectorは未検証 |
 | Sparklecancel／agent同定 | 条件付きソース推論。実agent事前一意同定・host一意性・terminated KVO・取消後通常QuitがP16で成立しなければ技術未解決、公開不可 |
-| 署名・鍵・配信権限 | SPECの前提が未準備。仮値で代用せずP14、人の承認と実credentialsが必要 |
-| 下限OSとsignedDMG／2version更新 | 未観測。現在OS・文書検査・mock helperを代用品にしない |
+| 鍵・配信権限・公開前監査 | SPECの前提が未準備。仮値で代用せずP14、人の承認と実鍵が必要。repository の公開は別途の明示依頼まで行わない |
+| 下限OS・署名しないDMG／2version更新 | 未観測。下限OS（macOS 15）の実機は無く、確認できるまで下限の対応を宣言しない。署名しないアプリを Sparkle が更新できるか、置換後の隔離属性・Gatekeeperの扱いも未確認で、成立しなければユーザーが方針を戻すか判断する。現在OS・文書検査・mock helperを代用品にしない |
 
-固定二窓の build・幾何試験・実 GPUI/NSWindow の限定観測と2x主画面でのユーザー回答、shipping source の外部 native E2E による menu／両窓 foreground ⌘Q の PID 消失・exit0 の履歴を保持する。P02 では標準 stream の build/play と sample 世界時計、Rust callback／満杯 pool の scoped heap 試験、出力 error bitset への注入、実 GPUI host quit の worker join を観測した。ロック中の失敗履歴と、その後の外部 native E2E 成功・雨のユーザー確認は別の観測として記録する。三環境の音質・初期値確定、物理同期、native backend の全 RT 失敗経路・最悪 timing、別1x画面・倍率切替・負荷、保存・更新・署名・公証・公開は未確認である。証拠は [検証記録](verification.md) で区別し、[実装計画](implementation-plan.md) と [検証手順](verification.md) に従う。文書検査や build から未観測の合格を作らない。
+固定二窓の build・幾何試験・実 GPUI/NSWindow の限定観測と2x主画面でのユーザー回答、shipping source の外部 native E2E による menu／両窓 foreground ⌘Q の PID 消失・exit0 の履歴を保持する。P02 では標準 stream の build/play と sample 世界時計、Rust callback／満杯 pool の scoped heap 試験、出力 error bitset への注入、実 GPUI host quit の worker join を観測した。ロック中の失敗履歴と、その後の外部 native E2E 成功・雨のユーザー確認は別の観測として記録する。三環境の音質・初期値確定、物理同期、native backend の全 RT 失敗経路・最悪 timing、別1x画面・倍率切替・負荷、保存・更新・ad-hoc 署名・Gatekeeper 承認・公開は未確認である。証拠は [検証記録](verification.md) で区別し、[実装計画](implementation-plan.md) と [検証手順](verification.md) に従う。文書検査や build から未観測の合格を作らない。
