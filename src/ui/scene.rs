@@ -19,6 +19,7 @@ use crate::{
     controls::{Normalized, VisualIntensity},
     ui::{
         appearance::{AccessibilityState, Motion},
+        backdrop,
         look::{Mark, ParticleInput, look},
     },
 };
@@ -302,7 +303,21 @@ impl SceneView {
         self.particles.refresh_at(source, now);
     }
 
-    fn paint(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+    /// The world time at the latest accepted frame, advanced by the wall time since that
+    /// frame's header so the drift is smooth between audio callbacks.
+    fn world_seconds(&self) -> f64 {
+        let Some(header) = self.particles.state else {
+            return 0.0;
+        };
+        let elapsed = self
+            .particles
+            .present
+            .get()
+            .saturating_sub(header.present.get());
+        header.world.get() + elapsed as f64 / 1e9
+    }
+
+    fn paint(&self, bounds: Bounds<Pixels>, dark: bool, window: &mut Window) {
         if !is_drawable_viewport(bounds) {
             return;
         }
@@ -310,6 +325,25 @@ impl SceneView {
             return;
         };
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            let mut colors = [[0.0_f32; 3]; backdrop::MAX_SITUATIONS];
+            for (slot, definition) in colors.iter_mut().zip(source.registry.definitions()) {
+                *slot = definition.visual.color;
+            }
+            let field = backdrop::backdrop(
+                &backdrop::Input {
+                    world_seconds: self.world_seconds(),
+                    contributions: &self.particles.contributions,
+                    breath: &self.particles.breath,
+                    colors: &colors,
+                    size: [bounds.size.width.into(), bounds.size.height.into()],
+                    dark,
+                },
+                self.intensity,
+                self.motion,
+            );
+            for item in field.items() {
+                paint_soft(window, bounds, item);
+            }
             for (index, definition) in source.registry.definitions().iter().enumerate() {
                 let intensity = self.particles.contributions[index] * self.particles.breath[index];
                 if intensity > 0.0 {
@@ -418,6 +452,24 @@ fn disc_bounds(
     )
 }
 
+/// One soft backdrop light. GPUI's shadow is a Gaussian whose sigma is `blur_radius`, so the
+/// shadow alone is the whole light: a hard-edged disc on top would show as a crisp circle. Plain
+/// alpha, never additive, so it reads the same on a light or a dark window.
+fn paint_soft(window: &mut Window, viewport: Bounds<Pixels>, item: &backdrop::Item) {
+    let bounds = disc_bounds(viewport, item.center, [0.0, 0.0], item.radius);
+    window.paint_drop_shadows(
+        bounds,
+        px(item.radius).into(),
+        &[BoxShadow {
+            color: rgba(item.rgb, item.opacity),
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(item.blur),
+            spread_radius: px(0.0),
+            inset: false,
+        }],
+    );
+}
+
 fn paint_glow_at(
     window: &mut Window,
     viewport: Bounds<Pixels>,
@@ -485,6 +537,7 @@ fn film_alpha(opaque: bool, veil: f32) -> f32 {
 impl Render for SceneView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.weak_entity();
+        let dark = cx.theme().is_dark();
         let root = div()
             .size_full()
             .track_focus(&self.focus)
@@ -503,7 +556,7 @@ impl Render for SceneView {
                 |_, _, _| (),
                 move |bounds, (), window, cx| {
                     // Borrow the fixed cache during paint; don't clone a particle vector each frame.
-                    let _ = view.update(cx, |view, _| view.paint(bounds, window));
+                    let _ = view.update(cx, |view, _| view.paint(bounds, dark, window));
                 },
             )
             .size_full(),
