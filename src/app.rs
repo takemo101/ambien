@@ -1214,6 +1214,7 @@ fn open_window<V: Render + 'static>(
         |window, cx| cx.new(|cx| constructor(window, cx)),
     )?;
     handle.update(cx, |_, window, cx| {
+        crate::platform::macos::apply_blur_material(window);
         if let Err(error) = constrain_window(window, &prepared) {
             window.remove_window();
             return Err(error);

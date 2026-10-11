@@ -13,7 +13,7 @@ use std::{
 use block2::RcBlock;
 use gpui::{Bounds, DisplayId, Pixels, point, px, size};
 use objc2::{
-    MainThreadMarker,
+    MainThreadMarker, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject, Imp, ProtocolObject, Sel},
     sel,
@@ -1364,6 +1364,43 @@ pub(crate) fn prepare_window(
         bounds: Bounds::new(origin, content_size),
         display_id,
     })
+}
+
+/// `NSVisualEffectMaterialUnderWindowBackground`: the behind-window material AppKit offers for a
+/// window's own background. GPUI picks `Selection`, which on this macOS draws no blur at all.
+const BLUR_MATERIAL: isize = 21;
+
+/// Gives the window's blurred background a material that really blurs what is behind the window.
+///
+/// GPUI adds a `BlurredView` (an `NSVisualEffectView`) under the content when the window
+/// background is `Blurred`, and its colourless `Selection` material shows the desktop unblurred
+/// on current macOS. Nothing happens when the window has no such view (not `Blurred`).
+pub(crate) fn apply_blur_material(window: &gpui::Window) {
+    let Some(_mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: WindowHandle guarantees this NSView for the borrowed GPUI Window; the access is on
+    // the main thread and no native object escapes this scope.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let Some(native) = view.window() else {
+        return;
+    };
+    let Some(content) = native.contentView() else {
+        return;
+    };
+    for sub in content.subviews().iter() {
+        if sub.class().name().to_bytes() == b"BlurredView" {
+            // SAFETY: `BlurredView` subclasses NSVisualEffectView, which has `setMaterial:` taking
+            // an NSInteger enum value.
+            let _: () = unsafe { msg_send![&*sub, setMaterial: BLUR_MATERIAL] };
+        }
+    }
 }
 
 pub(crate) fn capture_placement(

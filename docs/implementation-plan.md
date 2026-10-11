@@ -118,6 +118,7 @@ flowchart LR
  P23 --> P24 --> P25
  P13 --> P27
  P21 --> P28
+ P14 --> P29
  P25 --> P26
  P14 --> P15 --> P16 --> P17 --> P18
  P13 --> P17
@@ -593,6 +594,18 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 - [ ] 内容が窓に収まらないときだけスクロールバーを出し、つまみの大きさ・位置が正しい。
 
 **Behavior tests:** つまみの大きさ・位置・ドラッグから scroll 量への変換の純粋関数（収まるときは出さない、端、極端値）。**Smoke/gate:** 実アプリで設定窓を見てユーザーが判断する。見えない accessibility 文字列は実 AX で確認する。
+
+## P29 ぼかしが効いていない不具合の修正
+
+**DependsOn:** P14（ぼかし・透明度の設定がある）。**SPEC:** [窓](../SPEC.md#窓)のシーンの背景。
+
+**Files（予定）:** Modify `src/platform/macos.rs`（`apply_blur_material`）・`src/ui/scene.rs`・`src/app.rs`・`docs/verification.md`・`docs/detailed-design.md`。
+
+**Produces:** 「ぼかし」が入のとき背後が実際にぼかされる。GPUI の `BlurredView` の素材を、ぼかしが働く `underWindowBackground` へ替える小さな Adapter。窓を開くときと表面の設定を変えるときに適用する。
+
+- [ ] 「ぼかし」入で、窓の背後の細かい模様がぼけて見える。切では見えたまま。
+
+**Behavior tests:** 純粋に試験できる規則はない。**Smoke/gate:** 鮮明な市松模様の窓を背面に置いた実測（ぼかし入切の差）と、ユーザーが実デスクトップで見て判断する。
 
 ## 全 SPEC 節の coverage matrix
 
