@@ -341,10 +341,10 @@ impl Render for SettingsView {
                         .description(match controls.visuals {
                             VisualIntensity::Calm => "控えめ（大きい粒だけ、ガラスの静けさ）",
                             VisualIntensity::Standard => {
-                                "標準（小さい粒が光り、色の場がゆっくり漂います）"
+                                "標準（小さい粒、漂う色の場、ガラス玉の質感）"
                             }
                             VisualIntensity::Vivid => {
-                                "派手（標準に加えて、色の帯がオーロラのように流れます）"
+                                "派手（標準に加えて、オーロラ・きらめき・彗星・虹色の輪・ボケ）"
                             }
                         })
                         .child(

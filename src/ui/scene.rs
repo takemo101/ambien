@@ -380,6 +380,7 @@ impl SceneView {
                         rgb: color,
                         large: event.large,
                         intensity: self.intensity,
+                        dark,
                     },
                     self.motion,
                 );
@@ -524,6 +525,29 @@ fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
         } => {
             let bounds = disc_bounds(viewport, position, offset, radius);
             window.paint_quad(fill(bounds, rgba(rgb, opacity)).corner_radii(px(radius)));
+        }
+        Mark::Cross {
+            arm,
+            width,
+            rgb,
+            opacity,
+        } => {
+            let color = rgba(rgb, opacity);
+            let centre = disc_bounds(viewport, position, [0.0, 0.0], 0.0).origin;
+            window.paint_quad(fill(
+                Bounds::new(
+                    centre - point(px(arm), px(width / 2.0)),
+                    size(px(arm * 2.0), px(width)),
+                ),
+                color,
+            ));
+            window.paint_quad(fill(
+                Bounds::new(
+                    centre - point(px(width / 2.0), px(arm)),
+                    size(px(width), px(arm * 2.0)),
+                ),
+                color,
+            ));
         }
     }
 }

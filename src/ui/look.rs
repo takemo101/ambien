@@ -9,8 +9,9 @@ use std::f32::consts::TAU;
 
 use crate::{controls::VisualIntensity, situations::VisualShape, ui::appearance::Motion};
 
-/// The most marks one particle can have (a rock impact: core, shock ring and four shards).
-pub(crate) const MAX_MARKS: usize = 6;
+/// The most marks one particle can have (a vivid drop: core, two ripples, bead, bloom, bokeh,
+/// glint, two prism fringes and a three-bead tail).
+pub(crate) const MAX_MARKS: usize = 14;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mark {
@@ -35,6 +36,13 @@ pub(crate) enum Mark {
         rgb: [f32; 3],
         opacity: f32,
     },
+    /// A thin plus sign (a glint): two crossing bars of the given half length.
+    Cross {
+        arm: f32,
+        width: f32,
+        rgb: [f32; 3],
+        opacity: f32,
+    },
 }
 
 /// Everything the look depends on. `opacity` is the particle's fade envelope for this frame.
@@ -51,6 +59,9 @@ pub(crate) struct ParticleInput {
     /// A large particle is drawn at every intensity; a small one only above calm.
     pub(crate) large: bool,
     pub(crate) intensity: VisualIntensity,
+    /// The window is on a dark appearance. Vivid's bloom brightens on dark and becomes a deeper
+    /// colour film on light.
+    pub(crate) dark: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +130,138 @@ fn finite_or_zero(value: f32) -> f32 {
     if value.is_finite() { value } else { 0.0 }
 }
 
+fn lighten(rgb: [f32; 3], amount: f32) -> [f32; 3] {
+    rgb.map(|channel| (channel + (1.0 - channel) * amount).clamp(0.0, 1.0))
+}
+
+fn deepen(rgb: [f32; 3], keep: f32) -> [f32; 3] {
+    rgb.map(|channel| (channel * keep).clamp(0.0, 1.0))
+}
+
+/// The colour turned part of the way around the rainbow by rotating its channels: `forward`
+/// takes red's place from green, otherwise from blue.
+fn rotate(rgb: [f32; 3], forward: bool, amount: f32) -> [f32; 3] {
+    let turned = if forward {
+        [rgb[1], rgb[2], rgb[0]]
+    } else {
+        [rgb[2], rgb[0], rgb[1]]
+    };
+    std::array::from_fn(|index| {
+        (rgb[index] + (turned[index] - rgb[index]) * amount).clamp(0.0, 1.0)
+    })
+}
+
+/// A brief twinkle that is dark when born and expired and brightest in the middle.
+fn twinkle(age: f32) -> f32 {
+    (std::f32::consts::PI * age.clamp(0.0, 1.0)).sin().powi(2)
+}
+
+/// What standard and vivid add on top of a large particle's calm marks. `size` is the event
+/// radius and the animated core radius, `state` the strength, age and opacity, `unit` two values
+/// from the serial. The caller has already left out reduced motion (core light only).
+fn texture(
+    look: &mut Look,
+    input: &ParticleInput,
+    rgb: [f32; 3],
+    size: [f32; 2],
+    state: [f32; 3],
+    unit: [f32; 2],
+) {
+    let [radius, core] = size;
+    let [_, age, opacity] = state;
+    let [phase, second] = unit;
+    let dark = input.dark;
+    // A glass bead: a thin rim and a bright highlight toward the light, top left.
+    let vivid = input.intensity == VisualIntensity::Vivid;
+    if vivid {
+        // This GPUI has no additive blend, so the dark bloom is a larger, lighter glow laid over
+        // the core; light mode gets a deeper colour film instead of a brightening. It is pushed
+        // before the bead so the rim and highlight stay on top of it.
+        if dark {
+            look.push(Mark::Glow {
+                offset: [0.0, 0.0],
+                radius: core * 2.0,
+                rgb: lighten(rgb, 0.35),
+                opacity: opacity * 0.35,
+            });
+        } else {
+            look.push(Mark::Glow {
+                offset: [0.0, 0.0],
+                radius: core * 1.6,
+                rgb: deepen(rgb, 0.75),
+                opacity: opacity * 0.28,
+            });
+        }
+    }
+    if core >= 1.0 {
+        look.push(Mark::Ring {
+            radius: core,
+            width: 1.0,
+            rgb: if dark {
+                lighten(rgb, 0.5)
+            } else {
+                deepen(rgb, 0.6)
+            },
+            opacity: opacity * 0.55,
+        });
+        look.push(Mark::Dot {
+            offset: [-core * 0.32, -core * 0.34],
+            radius: (core * 0.24).max(0.8),
+            rgb: [1.0, 1.0, 1.0],
+            opacity: opacity * 0.6,
+        });
+    }
+    if !vivid {
+        return;
+    }
+    // An out-of-focus disc beside the particle, its place and size from the serial.
+    let bearing = TAU * phase;
+    let distance = core * (1.8 + 1.2 * second);
+    look.push(Mark::Dot {
+        offset: [bearing.cos() * distance, bearing.sin() * distance],
+        radius: core * (0.9 + 0.5 * phase),
+        rgb,
+        opacity: opacity * 0.12,
+    });
+    look.push(Mark::Cross {
+        arm: core * 1.8,
+        width: 1.0,
+        rgb: lighten(rgb, 0.6),
+        opacity: opacity * 0.7 * twinkle(age),
+    });
+    match input.shape {
+        VisualShape::Point | VisualShape::Impact => {
+            // Rainbow fringes just outside the ripple or shock ring.
+            let ring = if input.shape == VisualShape::Point {
+                radius * (1.2 + 3.6 * age)
+            } else {
+                radius * (1.0 + 2.6 * age)
+            };
+            for (index, forward) in [true, false].into_iter().enumerate() {
+                look.push(Mark::Ring {
+                    radius: ring * (1.08 + 0.1 * index as f32),
+                    width: 1.0,
+                    rgb: rotate(rgb, forward, 0.75),
+                    opacity: opacity * 0.35,
+                });
+            }
+            if input.shape == VisualShape::Point {
+                // A falling drop drags a comet tail of fading beads above it.
+                for step in 1..=3_u8 {
+                    let step = f32::from(step);
+                    look.push(Mark::Dot {
+                        offset: [0.0, -radius * 1.4 * step * (1.0 - 0.6 * age)],
+                        radius: (core * (0.5 - 0.1 * step)).max(0.8),
+                        rgb,
+                        opacity: opacity * 0.4 / step,
+                    });
+                }
+            }
+        }
+        VisualShape::SlowGlow => {}
+    }
+}
+
 /// The marks of one particle. Reduced motion keeps only the still core light: no ripple, shard,
 /// trail or wobble spreads.
 pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
@@ -127,18 +270,27 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
     let radius = finite_or_zero(input.radius).max(0.0);
     let strength = finite_or_zero(input.strength).clamp(0.0, 1.0);
     let rgb = tinted(input.rgb, input.serial, strength);
-    let (phase, _) = unit_pair(input.serial ^ 0xa5a5_a5a5_5a5a_5a5a);
+    let (phase, second) = unit_pair(input.serial ^ 0xa5a5_a5a5_5a5a_5a5a);
     let mut look = Look::new();
     if !input.large {
         // Small particles show only when the viewer asked for more than the calm scene: a
-        // faint, tiny, still dot, the cheapest possible mark.
+        // faint, tiny, still dot, the cheapest possible mark; vivid adds a brief twinkle.
         if input.intensity != VisualIntensity::Calm {
+            let dot = (radius * 0.5).clamp(0.8, 2.0);
             look.push(Mark::Dot {
                 offset: [0.0, 0.0],
-                radius: (radius * 0.5).clamp(0.8, 2.0),
+                radius: dot,
                 rgb,
                 opacity: opacity * 0.7,
             });
+            if input.intensity == VisualIntensity::Vivid && motion != Motion::Reduced {
+                look.push(Mark::Cross {
+                    arm: dot * 3.0,
+                    width: 0.8,
+                    rgb: lighten(rgb, 0.6),
+                    opacity: opacity * 0.5 * twinkle(age),
+                });
+            }
         }
         return look;
     }
@@ -231,6 +383,16 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
             }
         }
     }
+    if !still && input.intensity != VisualIntensity::Calm {
+        texture(
+            &mut look,
+            input,
+            rgb,
+            [radius, core],
+            [strength, age, opacity],
+            [phase, second],
+        );
+    }
     look
 }
 
@@ -248,6 +410,7 @@ mod tests {
             serial,
             large: true,
             intensity: VisualIntensity::Calm,
+            dark: true,
             rgb: [0.5, 0.72, 0.92],
         }
     }
@@ -364,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn a_small_particle_is_nothing_when_calm_and_one_still_dot_when_standard_or_vivid() {
+    fn a_small_particle_is_nothing_when_calm_a_dot_when_standard_and_twinkles_when_vivid() {
         let small = |intensity, motion| {
             look(
                 &ParticleInput {
@@ -382,7 +545,6 @@ mod tests {
             assert!(small(VisualIntensity::Calm, motion).is_empty());
             for intensity in [VisualIntensity::Standard, VisualIntensity::Vivid] {
                 let marks = small(intensity, motion);
-                assert_eq!(marks.len(), 1);
                 let Mark::Dot {
                     offset,
                     radius,
@@ -390,7 +552,7 @@ mod tests {
                     ..
                 } = marks[0]
                 else {
-                    panic!("a small particle is a plain dot");
+                    panic!("a small particle leads with a plain dot");
                 };
                 assert_eq!(offset, [0.0, 0.0]);
                 assert!((0.8..=2.0).contains(&radius), "stays tiny, got {radius}");
@@ -398,62 +560,171 @@ mod tests {
                     opacity > 0.0 && opacity < 0.6,
                     "fainter than a large particle"
                 );
+                let twinkles = intensity == VisualIntensity::Vivid && motion == Motion::Full;
+                assert_eq!(marks.len(), if twinkles { 2 } else { 1 });
+                if twinkles {
+                    assert!(matches!(marks[1], Mark::Cross { .. }));
+                }
+            }
+        }
+    }
+
+    fn marks_of(input: &ParticleInput, motion: Motion) -> Vec<Mark> {
+        look(input, motion).marks().copied().collect()
+    }
+
+    fn at(shape: VisualShape, intensity: VisualIntensity, dark: bool) -> ParticleInput {
+        ParticleInput {
+            intensity,
+            dark,
+            ..input(shape, 0.5, 0.9, 41)
+        }
+    }
+
+    #[test]
+    fn calm_is_the_same_in_dark_and_light_and_has_no_texture() {
+        for shape in SHAPES {
+            let dark = marks_of(&at(shape, VisualIntensity::Calm, true), Motion::Full);
+            let light = marks_of(&at(shape, VisualIntensity::Calm, false), Motion::Full);
+            assert_eq!(dark, light);
+            assert!(!dark.iter().any(|mark| matches!(mark, Mark::Cross { .. })));
+        }
+    }
+
+    #[test]
+    fn standard_adds_a_glass_bead_and_vivid_adds_glints_bloom_and_more() {
+        for shape in SHAPES {
+            let count = |intensity| marks_of(&at(shape, intensity, true), Motion::Full).len();
+            let calm = count(VisualIntensity::Calm);
+            // A rim ring and a highlight dot.
+            assert_eq!(count(VisualIntensity::Standard), calm + 2, "{shape:?}");
+            assert!(count(VisualIntensity::Vivid) > calm + 2, "{shape:?}");
+            let standard = marks_of(&at(shape, VisualIntensity::Standard, true), Motion::Full);
+            assert!(
+                !standard
+                    .iter()
+                    .any(|mark| matches!(mark, Mark::Cross { .. })),
+                "standard has no glints"
+            );
+            let vivid = marks_of(&at(shape, VisualIntensity::Vivid, true), Motion::Full);
+            assert!(vivid.iter().any(|mark| matches!(mark, Mark::Cross { .. })));
+        }
+    }
+
+    #[test]
+    fn reduced_motion_keeps_only_the_core_light_at_every_intensity() {
+        for shape in SHAPES {
+            let calm = marks_of(&at(shape, VisualIntensity::Calm, true), Motion::Reduced);
+            assert_eq!(calm.len(), 1);
+            for intensity in [VisualIntensity::Standard, VisualIntensity::Vivid] {
+                for dark in [true, false] {
+                    assert_eq!(
+                        marks_of(&at(shape, intensity, dark), Motion::Reduced),
+                        calm,
+                        "{shape:?} {intensity:?}"
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn extreme_values_give_finite_valid_marks_within_the_capacity() {
+    fn vivid_blooms_lighter_on_dark_and_lays_a_deeper_film_on_light() {
+        let bloom = |dark| {
+            let marks = marks_of(
+                &at(VisualShape::Point, VisualIntensity::Vivid, dark),
+                Motion::Full,
+            );
+            let mut glows = marks.iter().filter_map(|mark| match *mark {
+                Mark::Glow { rgb, radius, .. } => Some((rgb, radius)),
+                _ => None,
+            });
+            let (_, core) = glows.next().expect("the core light");
+            let (rgb, radius) = glows.next().expect("vivid adds a second, larger glow");
+            assert!(radius > core);
+            rgb
+        };
+        let calm_core = tinted([0.5, 0.72, 0.92], 41, 0.9);
+        let (dark, light) = (bloom(true), bloom(false));
+        for channel in 0..3 {
+            assert!(dark[channel] >= calm_core[channel], "dark brightens");
+            assert!(light[channel] <= calm_core[channel], "light deepens");
+        }
+        assert_ne!(dark, light);
+    }
+
+    #[test]
+    fn every_intensity_gives_finite_valid_marks_within_the_capacity() {
         let extremes = [0.0, 1.0, -1.0, 1e9, f32::NAN, f32::INFINITY];
         for shape in SHAPES {
             for motion in [Motion::Full, Motion::Reduced] {
-                for &age in &extremes {
-                    for &strength in &extremes {
-                        for &radius in &extremes {
-                            let look = look(
-                                &ParticleInput {
-                                    shape,
-                                    age,
-                                    opacity: age,
-                                    radius,
-                                    strength,
-                                    serial: u64::MAX,
-                                    large: true,
-                                    intensity: VisualIntensity::Calm,
-                                    rgb: [1.0, 0.0, 0.5],
-                                },
-                                motion,
-                            );
-                            assert!(look.marks().count() <= MAX_MARKS);
-                            for mark in look.marks() {
-                                let (numbers, opacity) = match *mark {
-                                    Mark::Glow {
-                                        offset,
-                                        radius,
-                                        rgb,
-                                        opacity,
+                for intensity in [
+                    VisualIntensity::Calm,
+                    VisualIntensity::Standard,
+                    VisualIntensity::Vivid,
+                ] {
+                    for (large, dark) in [(true, true), (true, false), (false, true)] {
+                        for &age in &extremes {
+                            for &strength in &extremes {
+                                for &radius in &extremes {
+                                    let look = look(
+                                        &ParticleInput {
+                                            shape,
+                                            age,
+                                            opacity: age,
+                                            radius,
+                                            strength,
+                                            serial: u64::MAX,
+                                            large,
+                                            intensity,
+                                            dark,
+                                            rgb: [1.0, 0.0, 0.5],
+                                        },
+                                        motion,
+                                    );
+                                    assert!(look.marks().count() <= MAX_MARKS);
+                                    for mark in look.marks() {
+                                        let (numbers, opacity) = match *mark {
+                                            Mark::Glow {
+                                                offset,
+                                                radius,
+                                                rgb,
+                                                opacity,
+                                            }
+                                            | Mark::Dot {
+                                                offset,
+                                                radius,
+                                                rgb,
+                                                opacity,
+                                            } => (
+                                                vec![
+                                                    offset[0], offset[1], radius, rgb[0], rgb[1],
+                                                    rgb[2],
+                                                ],
+                                                opacity,
+                                            ),
+                                            Mark::Ring {
+                                                radius,
+                                                width,
+                                                rgb,
+                                                opacity,
+                                            } => (
+                                                vec![radius, width, rgb[0], rgb[1], rgb[2]],
+                                                opacity,
+                                            ),
+                                            Mark::Cross {
+                                                arm,
+                                                width,
+                                                rgb,
+                                                opacity,
+                                            } => {
+                                                (vec![arm, width, rgb[0], rgb[1], rgb[2]], opacity)
+                                            }
+                                        };
+                                        assert!(numbers.iter().all(|value| value.is_finite()));
+                                        assert!((0.0..=1.0).contains(&opacity));
                                     }
-                                    | Mark::Dot {
-                                        offset,
-                                        radius,
-                                        rgb,
-                                        opacity,
-                                    } => (
-                                        [offset[0], offset[1], radius, rgb[0], rgb[1], rgb[2]]
-                                            .to_vec(),
-                                        opacity,
-                                    ),
-                                    Mark::Ring {
-                                        radius,
-                                        width,
-                                        rgb,
-                                        opacity,
-                                    } => {
-                                        ([radius, width, rgb[0], rgb[1], rgb[2]].to_vec(), opacity)
-                                    }
-                                };
-                                assert!(numbers.iter().all(|value| value.is_finite()));
-                                assert!((0.0..=1.0).contains(&opacity));
+                                }
                             }
                         }
                     }
