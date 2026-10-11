@@ -1,13 +1,28 @@
-use std::{fmt, marker::PhantomData, ptr::NonNull, rc::Rc, sync::Arc, thread::ThreadId};
+use std::{
+    fmt,
+    marker::PhantomData,
+    ptr::NonNull,
+    rc::Rc,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::ThreadId,
+};
 
 use block2::RcBlock;
 use gpui::{Bounds, DisplayId, Pixels, point, px, size};
-use objc2::{MainThreadMarker, rc::Retained, runtime::ProtocolObject};
+use objc2::{
+    MainThreadMarker,
+    rc::Retained,
+    runtime::{AnyClass, AnyObject, Imp, ProtocolObject, Sel},
+    sel,
+};
 use objc2_app_kit::{
-    NSApplicationDidChangeScreenParametersNotification, NSScreen, NSView, NSWindow, NSWindowButton,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
-    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidWakeNotification,
-    NSWorkspaceWillSleepNotification,
+    NSApplication, NSApplicationDidChangeScreenParametersNotification, NSApplicationTerminateReply,
+    NSScreen, NSView, NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWorkspace, NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_core_audio::{
     AudioObjectAddPropertyListenerBlock, AudioObjectGetPropertyData,
@@ -22,7 +37,7 @@ use objc2_core_audio::{
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioStreamBasicDescription};
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    ns_string,
+    NSUInteger, ns_string,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -292,6 +307,129 @@ impl Drop for EnvironmentMonitor {
             eprintln!("Ambien environment monitor shutdown: {error}");
         }
     }
+}
+
+/// The OS asked to terminate and the app could not (yet) commit. AppKit's own
+/// termination stays in charge: the app only decides when it may proceed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TerminationGateError {
+    MainThreadRequired,
+    DelegateClassMissing,
+    /// GPUI (or a later version of it) now implements the selector itself. Replacing or
+    /// wrapping its implementation is forbidden, so this is an integration failure.
+    SelectorAlreadyImplemented,
+    AlreadyInstalled,
+    AddMethodFailed,
+}
+
+impl fmt::Display for TerminationGateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MainThreadRequired => "the termination gate must be installed on the main thread",
+            Self::DelegateClassMissing => "the GPUI application delegate class was not found",
+            Self::SelectorAlreadyImplemented => {
+                "applicationShouldTerminate: is already implemented by the delegate"
+            }
+            Self::AlreadyInstalled => "the termination gate is already installed",
+            Self::AddMethodFailed => "the runtime refused to add applicationShouldTerminate:",
+        })
+    }
+}
+
+impl std::error::Error for TerminationGateError {}
+
+struct TerminationGate {
+    // Only signals: the AppKit callback never re-enters GPUI.
+    on_request: Box<dyn Fn() + Send + Sync>,
+    permitted: AtomicBool,
+    pending_reply: AtomicBool,
+}
+
+static TERMINATION_GATE: OnceLock<TerminationGate> = OnceLock::new();
+
+const TERMINATE_NOW: NSUInteger = NSApplicationTerminateReply::TerminateNow.0;
+const TERMINATE_LATER: NSUInteger = NSApplicationTerminateReply::TerminateLater.0;
+
+extern "C-unwind" fn application_should_terminate(
+    _this: *mut AnyObject,
+    _command: Sel,
+    _sender: *mut AnyObject,
+) -> NSUInteger {
+    let Some(gate) = TERMINATION_GATE.get() else {
+        return TERMINATE_NOW;
+    };
+    if gate.permitted.load(Ordering::SeqCst) {
+        return TERMINATE_NOW;
+    }
+    // Not committed: AppKit waits for replyToApplicationShouldTerminate:. The request
+    // is handed to the main app owner, which merges it into the active attempt.
+    gate.pending_reply.store(true, Ordering::SeqCst);
+    (gate.on_request)();
+    TERMINATE_LATER
+}
+
+/// Adds `applicationShouldTerminate:` to GPUI's existing application delegate class so
+/// ⌘Q, Dock Quit and OS shutdown all wait for the same termination attempt. Only an
+/// absent selector is added; an existing implementation is never replaced or wrapped.
+pub(crate) fn install_termination_gate(
+    on_request: impl Fn() + Send + Sync + 'static,
+) -> Result<(), TerminationGateError> {
+    MainThreadMarker::new().ok_or(TerminationGateError::MainThreadRequired)?;
+    // SAFETY: a NUL-terminated class name; the runtime returns null when absent.
+    let class = unsafe { objc2::ffi::objc_lookUpClass(c"GPUIApplicationDelegate".as_ptr()) };
+    install_on_class(class, on_request)
+}
+
+fn install_on_class(
+    class: *const AnyClass,
+    on_request: impl Fn() + Send + Sync + 'static,
+) -> Result<(), TerminationGateError> {
+    if class.is_null() {
+        return Err(TerminationGateError::DelegateClassMissing);
+    }
+    let selector = sel!(applicationShouldTerminate:);
+    // SAFETY: `class` is a live class pointer from the runtime.
+    if !unsafe { objc2::ffi::class_getInstanceMethod(class, selector) }.is_null() {
+        return Err(TerminationGateError::SelectorAlreadyImplemented);
+    }
+    TERMINATION_GATE
+        .set(TerminationGate {
+            on_request: Box::new(on_request),
+            permitted: AtomicBool::new(false),
+            pending_reply: AtomicBool::new(false),
+        })
+        .map_err(|_| TerminationGateError::AlreadyInstalled)?;
+    // SAFETY: the implementation has exactly the signature the type encoding declares
+    // (NSUInteger return, receiver, selector, one object argument).
+    let added = unsafe {
+        let implementation: Imp = std::mem::transmute::<
+            extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> NSUInteger,
+            Imp,
+        >(application_should_terminate);
+        objc2::ffi::class_addMethod(class.cast_mut(), selector, implementation, c"Q@:@".as_ptr())
+    };
+    if added.as_bool() {
+        Ok(())
+    } else {
+        Err(TerminationGateError::AddMethodFailed)
+    }
+}
+
+/// Main-thread: end the attempt's hold on the OS request. `proceed` lets termination
+/// continue (it is allowed from now on); otherwise it is cancelled. Returns whether AppKit
+/// was waiting on a reply, in which case the reply was sent here and the caller must not
+/// quit again. Without a gate (installation failed) nothing is pending.
+pub(crate) fn finish_termination(proceed: bool) -> Result<bool, MainThreadRequired> {
+    let mtm = MainThreadMarker::new().ok_or(MainThreadRequired)?;
+    let Some(gate) = TERMINATION_GATE.get() else {
+        return Ok(false);
+    };
+    gate.permitted.store(proceed, Ordering::SeqCst);
+    if gate.pending_reply.swap(false, Ordering::SeqCst) {
+        NSApplication::sharedApplication(mtm).replyToApplicationShouldTerminate(proceed);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 type OutputChangeBlock = RcBlock<dyn Fn(u32, NonNull<AudioObjectPropertyAddress>)>;
@@ -1888,6 +2026,87 @@ mod tests {
         assert_eq!(
             content_pixels(f64::from(f32::from_bits(1)) * 0.25),
             Err(WindowGeometryError::InvalidGeometry)
+        );
+    }
+
+    extern "C-unwind" fn existing_should_terminate(
+        _this: &AnyObject,
+        _command: Sel,
+        _sender: *mut AnyObject,
+    ) -> NSUInteger {
+        TERMINATE_NOW
+    }
+
+    #[test]
+    fn the_termination_gate_is_additive_defers_until_permitted_and_never_replaces() {
+        use objc2::{ClassType, msg_send, runtime::ClassBuilder};
+        use objc2_foundation::NSObject;
+        use std::sync::atomic::AtomicUsize;
+
+        assert_eq!(
+            install_on_class(std::ptr::null(), || {}),
+            Err(TerminationGateError::DelegateClassMissing)
+        );
+
+        // A class that already implements the selector is an integration failure and
+        // its implementation keeps answering.
+        let mut builder = ClassBuilder::new(c"AmbienGateFixtureImplemented", NSObject::class())
+            .expect("fixture class name is unused");
+        // SAFETY: the method signature matches applicationShouldTerminate:.
+        unsafe {
+            builder.add_method(
+                sel!(applicationShouldTerminate:),
+                existing_should_terminate as extern "C-unwind" fn(_, _, _) -> _,
+            );
+        }
+        let implemented = builder.register();
+        assert_eq!(
+            install_on_class(implemented, || {}),
+            Err(TerminationGateError::SelectorAlreadyImplemented)
+        );
+        assert!(
+            TERMINATION_GATE.get().is_none(),
+            "a refused install leaves no gate"
+        );
+
+        // A class without it gets the gate, and only the gate.
+        let absent = ClassBuilder::new(c"AmbienGateFixtureAbsent", NSObject::class())
+            .expect("fixture class name is unused")
+            .register();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        install_on_class(absent, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        // SAFETY: a plain NSObject subclass instance and the declared selector.
+        let object: Retained<AnyObject> = unsafe { msg_send![absent, new] };
+        let ask = || -> NSUInteger {
+            unsafe {
+                msg_send![&*object, applicationShouldTerminate: std::ptr::null_mut::<AnyObject>()]
+            }
+        };
+        let gate = TERMINATION_GATE.get().unwrap();
+        assert_eq!(ask(), TERMINATE_LATER, "not committed: AppKit must wait");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(gate.pending_reply.load(Ordering::SeqCst));
+        assert_eq!(ask(), TERMINATE_LATER);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "each OS request is signalled"
+        );
+        gate.permitted.store(true, Ordering::SeqCst);
+        assert_eq!(ask(), TERMINATE_NOW, "once committed the quit goes through");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+        // The gate cannot be installed twice, not even on another class.
+        let another = ClassBuilder::new(c"AmbienGateFixtureAnother", NSObject::class())
+            .expect("fixture class name is unused")
+            .register();
+        assert_eq!(
+            install_on_class(another, || {}),
+            Err(TerminationGateError::AlreadyInstalled)
         );
     }
 

@@ -4,6 +4,7 @@ use cpal::{FromSample, SizedSample};
 
 use crate::{
     controls::ControlState,
+    lifecycle::AttemptId,
     situations::{
         Registry, SituationIndex, Voice, VoiceFrame, VoiceLatencyFrames, VoicePreparation,
         VoicePreparationError, synthesis::WorldRandom,
@@ -71,6 +72,8 @@ fn callback_playback(info: &cpal::OutputCallbackInfo, errors: &ErrorCell) -> Opt
 // Implementation constants, not product timing controls. Volume, mute and
 // recovery use independent finite smoothstep envelopes.
 const OUTPUT_RAMP_MILLISECONDS: u32 = 20;
+// The shutdown fade after a successful final save (detailed design: first implementation).
+const SHUTDOWN_RAMP_MILLISECONDS: u32 = 100;
 
 const MANUAL_CROSSFADE: Duration = Duration::from_secs(2);
 
@@ -87,8 +90,12 @@ struct OutputRamp {
 
 impl OutputRamp {
     fn new(value: f32, rate: u32) -> Self {
+        Self::with_milliseconds(value, rate, OUTPUT_RAMP_MILLISECONDS)
+    }
+
+    fn with_milliseconds(value: f32, rate: u32, milliseconds: u32) -> Self {
         debug_assert!(rate > 0);
-        let frames = (u64::from(rate) * u64::from(OUTPUT_RAMP_MILLISECONDS)).div_ceil(1_000) as u32;
+        let frames = (u64::from(rate) * u64::from(milliseconds)).div_ceil(1_000) as u32;
         let step_seconds = 1.0 / f64::from(rate);
         let duration_seconds = f64::from(frames) * step_seconds;
         Self {
@@ -137,6 +144,11 @@ impl OutputRamp {
         }
         self.current
     }
+
+    /// Reached `value` for good: no more movement and exactly at the endpoint.
+    fn settled_at(&self, value: f32) -> bool {
+        self.elapsed_seconds >= self.duration_seconds && self.current == value
+    }
 }
 
 struct PreparedVoice {
@@ -160,6 +172,9 @@ pub(crate) struct PreparedEngine {
     volume_gain: OutputRamp,
     mute_gain: OutputRamp,
     recovery_gain: OutputRamp,
+    shutdown_gain: OutputRamp,
+    shutdown_attempt: Option<AttemptId>,
+    shutdown_published: bool,
     rate_prepared: bool,
     world: WorldClock,
     movement: Movement,
@@ -233,6 +248,13 @@ impl PreparedEngine {
             mute_gain,
             world: WorldClock::new(sample_rate)?,
             recovery_gain: OutputRamp::new(1.0, sample_rate),
+            shutdown_gain: OutputRamp::with_milliseconds(
+                1.0,
+                sample_rate,
+                SHUTDOWN_RAMP_MILLISECONDS,
+            ),
+            shutdown_attempt: None,
+            shutdown_published: false,
             rate_prepared: true,
             movement,
             wander,
@@ -281,6 +303,18 @@ impl PreparedEngine {
             self.world.now(),
         );
         changed
+    }
+
+    /// A new attempt starts one fade to silence. Once begun it is never undone: the
+    /// coordinator only requests it after the final save succeeded.
+    fn accept_shutdown(&mut self) {
+        if let Some(attempt) = self.mailbox.shutdown_request()
+            && self.shutdown_attempt != Some(attempt)
+        {
+            self.shutdown_attempt = Some(attempt);
+            self.shutdown_published = false;
+            self.shutdown_gain.retarget(0.0);
+        }
     }
 
     fn publish_receipt(&mut self, epoch: StreamEpoch) -> bool {
@@ -337,6 +371,7 @@ impl PreparedEngine {
             self.world.prepare_rate(rate)?;
             self.volume_gain.prepare_rate(rate);
             self.mute_gain.prepare_rate(rate);
+            self.shutdown_gain.prepare_rate(rate);
             self.rate_prepared = true;
         }
         self.accept_controls();
@@ -391,6 +426,7 @@ impl PreparedEngine {
             return;
         }
         self.accept_controls();
+        self.accept_shutdown();
         let rate = self.world.sample_rate();
         let delta_seconds = 1.0 / f64::from(rate);
         self.mix.prepare_interval(rate);
@@ -462,10 +498,16 @@ impl PreparedEngine {
                 }
             }
             // The first newly generated sample is exactly silent. Recovery is
-            // independent of both user envelopes, including frozen edits.
+            // independent of both user envelopes, including frozen edits. The
+            // shutdown fade is a fourth, independent envelope.
             let recovery = self.recovery_gain.current;
             self.recovery_gain.advance();
-            let gain = f64::from(self.volume_gain.advance() * self.mute_gain.advance() * recovery);
+            let gain = f64::from(
+                self.volume_gain.advance()
+                    * self.mute_gain.advance()
+                    * recovery
+                    * self.shutdown_gain.advance(),
+            );
             stereo[0] *= gain;
             stereo[1] *= gain;
             if stereo
@@ -481,6 +523,21 @@ impl PreparedEngine {
             } else {
                 output[0] = T::from_sample(stereo[0]);
                 output[1] = T::from_sample(stereo[1]);
+            }
+            if let Some(attempt) = self.shutdown_attempt
+                && !self.shutdown_published
+                && self.shutdown_gain.settled_at(0.0)
+            {
+                // The final (silent) sample ends one frame after its start; keep the
+                // stream until then so no part of the fade is cut off.
+                let Ok(deadline) =
+                    presentation_time(playback, frame_offset + 1, self.state_delay, rate)
+                else {
+                    errors.report_timing_fault();
+                    return;
+                };
+                self.mailbox.publish_shutdown_deadline(attempt, deadline);
+                self.shutdown_published = true;
             }
             let phase = self.movement.phase();
             if self.until_state == 0 || self.published_phase != Some(phase) {
@@ -2425,5 +2482,100 @@ mod tests {
         assert_eq!(retained.ack_manual_revision, controls.manual_revision);
         assert_eq!(retained.display_dominant, target);
         assert_eq!(retained.world, held_world);
+    }
+
+    fn render_blocks(
+        engine: &mut PreparedEngine,
+        errors: &ErrorCell,
+        start: u64,
+        frames: usize,
+    ) -> Vec<f32> {
+        // 2 ms blocks at 48 kHz; playback advances exactly with the generated frames.
+        let mut out = Vec::with_capacity(frames * 2);
+        let mut done = 0_usize;
+        while done < frames {
+            let count = (frames - done).min(96);
+            let mut block = vec![0.0_f32; count * 2];
+            let playback = start + (done as u64) * 1_000_000_000 / 48_000;
+            engine.render_f32(&mut block, 2, MachNanos::new(playback), errors);
+            out.extend_from_slice(&block);
+            done += count;
+        }
+        out
+    }
+
+    #[test]
+    fn shutdown_fade_reaches_exact_silence_and_reports_the_final_sample_time() {
+        let epoch = StreamEpoch::new(1).unwrap();
+        let errors = ErrorCell::new(epoch);
+        let mut engine = prepared(2_024);
+        let mut reference = prepared(2_024);
+        let start = 7_000_000_000_u64;
+        // Warm up so the rain is actually audible when the fade begins.
+        let warm = render_blocks(&mut engine, &errors, start, 48_000);
+        render_blocks(&mut reference, &errors, start, 48_000);
+        assert!(
+            warm.iter().any(|sample| sample.abs() > 0.0),
+            "audible before"
+        );
+
+        let attempt = AttemptId::from_raw(1).unwrap();
+        let begin = start + 1_000_000_000;
+        engine.mailbox.request_shutdown(attempt);
+        // Half the fade: no deadline yet, the stream must still be held.
+        let first = render_blocks(&mut engine, &errors, begin, 2_400);
+        assert_eq!(engine.mailbox.shutdown_deadline(attempt), None);
+        // The rest of the fade and beyond.
+        let rest = render_blocks(&mut engine, &errors, begin + 50_000_000, 4_800);
+        let deadline = engine
+            .mailbox
+            .shutdown_deadline(attempt)
+            .expect("a finished fade reports its final sample time");
+        // Exactly 100 ms of fade (4800 frames at 48 kHz) plus the final sample's own frame.
+        let fade_end = begin + 100_000_000;
+        assert!(
+            deadline.get() >= fade_end,
+            "deadline {deadline:?} before the fade ended"
+        );
+        assert!(deadline.get() <= fade_end + 2 * 1_000_000_000 / 48_000);
+        // The fade is a smooth decrease to exact silence, never an abrupt cut.
+        let early_peak = first[..480]
+            .iter()
+            .fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        let late_peak = first[first.len() - 480..]
+            .iter()
+            .fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        assert!(late_peak <= early_peak + 1e-6);
+        assert!(
+            rest[2 * 2_400..].iter().all(|sample| *sample == 0.0),
+            "silent after 100 ms"
+        );
+        // Another attempt's id never inherits this deadline.
+        assert_eq!(
+            engine
+                .mailbox
+                .shutdown_deadline(AttemptId::from_raw(2).unwrap()),
+            None
+        );
+        // The world and voices kept generating through the fade (independent output gain).
+        render_blocks(&mut reference, &errors, begin, 7_200);
+        assert_eq!(engine.world(), reference.world());
+        assert_eq!(errors.take_bits(), 0);
+    }
+
+    #[test]
+    fn without_a_shutdown_request_output_gain_is_untouched() {
+        let epoch = StreamEpoch::new(1).unwrap();
+        let errors = ErrorCell::new(epoch);
+        let mut engine = prepared(2_025);
+        render_blocks(&mut engine, &errors, 0, 24_000);
+        assert_eq!(
+            engine
+                .mailbox
+                .shutdown_deadline(AttemptId::from_raw(1).unwrap()),
+            None
+        );
+        assert!(engine.shutdown_gain.settled_at(1.0));
+        assert_eq!(errors.take_bits(), 0);
     }
 }

@@ -2093,8 +2093,25 @@ func persistence(_ executable: URL, artifacts: URL) throws -> String {
                         "Persistence notification duplicated the settings window")
             try require(try number(mute(window)) == 1 && candidate.alive(),
                         "Persistence failure changed mute or terminated audio host")
+            if name == "save-failed" {
+                // A genuine write failure must keep the app, its sound and the failure notice.
+                try candidate.menu("終了")
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.5))
+                try require(candidate.alive(), "Quit terminated the app despite a failed final save")
+                try require(CFEqual(try candidate.settings(), window), "Settings window lost after refused Quit")
+                let refusedAt = try world(window)
+                // Editing resumed: an accepted edit refreshes the displayed receipt, whose
+                // world time shows the audio kept running through the refused Quit.
+                try foreground(candidate, window)
+                try focus(slider(window, label: "アプリの音量")); try key(candidate, window, code: 124)
+                revision += 1
+                try expectReceipt(candidate, window, settings: revision, manual: 0)
+                try require(try world(window) > refusedAt + 0.3, "Audio stopped after the refused Quit")
+                try require(try line(window, prefix: prefix) != nil, "Failure notice vanished after the refused Quit")
+                try require(chmod(directory.path, 0o700) == 0, "Cannot restore owned fixture directory mode")
+            }
             try candidate.menu("終了"); try candidate.expectExit()
-            evidence.append("\(name): actionable UI/menu=\(notice); audio world \(before)→\(after), accepted revision\(revision)/0, normal menu Quit pid=\(candidate.pid)")
+            evidence.append("\(name): actionable UI/menu=\(notice); audio world \(before)→\(after), accepted revision\(revision)/0, menu Quit pid=\(candidate.pid)")
         }
         if backupExpected {
             let files = try manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
@@ -2107,6 +2124,14 @@ func persistence(_ executable: URL, artifacts: URL) throws -> String {
             try require(try Data(contentsOf: backup) == original, "Original backup bytes changed")
             try require((try document(fixtureState))["version"] as? Int == 1, "Writable defaults were not saved after backup")
             evidence.append("\(name): original byte-identical in \(files[0].lastPathComponent)/state.json, new version1 state saved")
+        } else if name == "save-failed" {
+            // Quit was refused while the write failed. After the user-visible failure is gone the
+            // same Quit saved the final state; the old bytes are intentionally replaced.
+            let saved = try document(fixtureState)
+            try require(saved["version"] as? Int == 1 && (saved["mute"] as? Bool) == true,
+                        "Retried Quit did not save the final state after the write failure cleared")
+            try require(try Data(contentsOf: fixtureState) != original, "Final state was not written")
+            evidence.append("\(name): Quit refused during the genuine write failure (alive, notice kept, audio world progressing); after restoring the owned directory mode the same menu Quit saved version1 state and exited normally")
         } else {
             try require(try Data(contentsOf: fixtureState) == original, "Protected original was overwritten")
             evidence.append("\(name): original state.json remains byte-identical")

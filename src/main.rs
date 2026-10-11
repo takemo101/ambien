@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod controls;
+mod lifecycle;
 mod persistence;
 mod platform;
 #[cfg(test)]
