@@ -116,6 +116,7 @@ flowchart LR
  P21 --> P22
  P21 --> P23
  P23 --> P24 --> P25
+ P13 --> P27
  P25 --> P26
  P14 --> P15 --> P16 --> P17 --> P18
  P13 --> P17
@@ -564,6 +565,19 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 - [ ] Reduced では核の光だけ。
 
 **Behavior tests:** 頂点の決定性・有限性・星形（頂点が回転方向に単調）・辺の数の範囲、岩の mark に Ring／Dot が出ないこと、段階ごとの数が SPEC の範囲、Reduced、極端値の有限性。**Smoke/gate:** 三段階をダーク・ライトで実アプリを見てユーザーが判断する。多角形の描画負荷は実機で確認する。
+
+## P27 岩の衝突音をビリヤードの玉の音にする
+
+**DependsOn:** P13（岩の音の既存実装）。**SPEC:** [岩の音](../SPEC.md#岩の音)、[初期のシチュエーションとノブ](../SPEC.md#初期のシチュエーションとノブ)。
+
+**Files（予定）:** Modify `src/situations/rock.rs`（衝突の音色・立ち上がり・響き・部屋の響き・転がり）、`docs/verification.md`、`docs/detailed-design.md`。
+
+**Produces:** 鋭い立ち上がりと1〜4kHz 付近の澄んだ短い響きの硬い衝突音。小さな広間程度の残響。低く小さな転がり。
+
+- [ ] 衝突の共振の Q と中心周波数が各 sample rate（8k〜384k）で有効範囲に入り、準備に失敗しない。
+- [ ] 全ノブの端点・全 rate で有限・ピーク有界・callback で heap を使わない。
+
+**Behavior tests:** 既存の岩の音の test を新しい音色の機械的条件に更新する（端点・rate・ピーク・heap・追従・量0）。**Smoke/gate:** ユーザーが実アプリで試聴して判断する（音の好みは AI が決めない）。
 
 ## 全 SPEC 節の coverage matrix
 
