@@ -16,7 +16,7 @@ use crate::{
         timing::MachNanos,
         transport::{VISIBLE_CAPACITY, VisualEvent, WorldVisualHeader},
     },
-    controls::Normalized,
+    controls::{Normalized, VisualIntensity},
     ui::{
         appearance::{AccessibilityState, Motion},
         look::{Mark, ParticleInput, look},
@@ -142,6 +142,7 @@ pub(crate) struct SceneView {
     motion: Motion,
     opaque: bool,
     veil: f32,
+    intensity: VisualIntensity,
     _visibility: Subscription,
     _placement: Subscription,
 }
@@ -153,6 +154,7 @@ impl SceneView {
         audio: Arc<AudioShared>,
         accessibility: AccessibilityState,
         veil: Normalized,
+        intensity: VisualIntensity,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -176,6 +178,7 @@ impl SceneView {
             motion: accessibility.motion(),
             opaque: accessibility.reduce_transparency,
             veil: veil.get(),
+            intensity,
             _visibility: visibility,
             _placement: placement,
         };
@@ -191,6 +194,7 @@ impl SceneView {
         accessibility: AccessibilityState,
         blur: bool,
         veil: Normalized,
+        intensity: VisualIntensity,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -198,6 +202,7 @@ impl SceneView {
         self.motion = accessibility.motion();
         self.opaque = accessibility.reduce_transparency;
         self.veil = veil.get();
+        self.intensity = intensity;
         cx.notify();
     }
 
@@ -339,6 +344,8 @@ impl SceneView {
                         strength: event.strength.get(),
                         serial: event.serial,
                         rgb: color,
+                        large: event.large,
+                        intensity: self.intensity,
                     },
                     self.motion,
                 );
@@ -569,6 +576,7 @@ mod tests {
             strength: Normalized::ONE,
             radius: LogicalPixels::new(2.0).unwrap(),
             shape: VisualShape::Point,
+            large: true,
             lifetime: Duration::from_nanos(50),
             serial: 0,
         }));
@@ -620,6 +628,7 @@ mod tests {
             strength: Normalized::ONE,
             radius: LogicalPixels::new(5.0).unwrap(),
             shape: VisualShape::Point,
+            large: true,
             lifetime: Duration::from_nanos(200),
             serial: 0,
         };

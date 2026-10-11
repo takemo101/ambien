@@ -7,7 +7,7 @@
 
 use std::f32::consts::TAU;
 
-use crate::{situations::VisualShape, ui::appearance::Motion};
+use crate::{controls::VisualIntensity, situations::VisualShape, ui::appearance::Motion};
 
 /// The most marks one particle can have (a rock impact: core, shock ring and four shards).
 pub(crate) const MAX_MARKS: usize = 6;
@@ -48,6 +48,9 @@ pub(crate) struct ParticleInput {
     pub(crate) strength: f32,
     pub(crate) serial: u64,
     pub(crate) rgb: [f32; 3],
+    /// A large particle is drawn at every intensity; a small one only above calm.
+    pub(crate) large: bool,
+    pub(crate) intensity: VisualIntensity,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -126,6 +129,19 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
     let rgb = tinted(input.rgb, input.serial, strength);
     let (phase, _) = unit_pair(input.serial ^ 0xa5a5_a5a5_5a5a_5a5a);
     let mut look = Look::new();
+    if !input.large {
+        // Small particles show only when the viewer asked for more than the calm scene: a
+        // faint, tiny, still dot, the cheapest possible mark.
+        if input.intensity != VisualIntensity::Calm {
+            look.push(Mark::Dot {
+                offset: [0.0, 0.0],
+                radius: (radius * 0.5).clamp(0.8, 2.0),
+                rgb,
+                opacity: opacity * 0.7,
+            });
+        }
+        return look;
+    }
     let core = radius * motion.shape_scale(input.shape, age);
     let still = motion == Motion::Reduced;
     match input.shape {
@@ -230,6 +246,8 @@ mod tests {
             radius: 6.0,
             strength,
             serial,
+            large: true,
+            intensity: VisualIntensity::Calm,
             rgb: [0.5, 0.72, 0.92],
         }
     }
@@ -346,6 +364,45 @@ mod tests {
     }
 
     #[test]
+    fn a_small_particle_is_nothing_when_calm_and_one_still_dot_when_standard_or_vivid() {
+        let small = |intensity, motion| {
+            look(
+                &ParticleInput {
+                    large: false,
+                    intensity,
+                    ..input(VisualShape::Point, 0.3, 0.2, 5)
+                },
+                motion,
+            )
+            .marks()
+            .copied()
+            .collect::<Vec<Mark>>()
+        };
+        for motion in [Motion::Full, Motion::Reduced] {
+            assert!(small(VisualIntensity::Calm, motion).is_empty());
+            for intensity in [VisualIntensity::Standard, VisualIntensity::Vivid] {
+                let marks = small(intensity, motion);
+                assert_eq!(marks.len(), 1);
+                let Mark::Dot {
+                    offset,
+                    radius,
+                    opacity,
+                    ..
+                } = marks[0]
+                else {
+                    panic!("a small particle is a plain dot");
+                };
+                assert_eq!(offset, [0.0, 0.0]);
+                assert!((0.8..=2.0).contains(&radius), "stays tiny, got {radius}");
+                assert!(
+                    opacity > 0.0 && opacity < 0.6,
+                    "fainter than a large particle"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn extreme_values_give_finite_valid_marks_within_the_capacity() {
         let extremes = [0.0, 1.0, -1.0, 1e9, f32::NAN, f32::INFINITY];
         for shape in SHAPES {
@@ -361,6 +418,8 @@ mod tests {
                                     radius,
                                     strength,
                                     serial: u64::MAX,
+                                    large: true,
+                                    intensity: VisualIntensity::Calm,
                                     rgb: [1.0, 0.0, 0.5],
                                 },
                                 motion,

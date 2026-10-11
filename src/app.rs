@@ -434,13 +434,17 @@ impl AppModel {
         Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
         let audio = self.audio.shared();
         let accessibility = self.accessibility;
-        let (blur, veil) = (self.controls.blur, self.controls.veil);
+        let (blur, veil, intensity) = (
+            self.controls.blur,
+            self.controls.veil,
+            self.controls.visuals,
+        );
         self.scene = Some(open_window(
             WindowRole::Scene,
             accessibility,
             blur,
             self.placement.as_ref(),
-            move |window, cx| SceneView::new(window, cx, audio, accessibility, veil),
+            move |window, cx| SceneView::new(window, cx, audio, accessibility, veil, intensity),
             cx,
         )?);
         let handle = self.scene.expect("the scene was just opened");
@@ -589,7 +593,12 @@ impl AppModel {
         if changed {
             self.schedule_save(cx);
         }
-        if changed && matches!(edit, ControlEdit::Blur(_) | ControlEdit::Veil(_)) {
+        if changed
+            && matches!(
+                edit,
+                ControlEdit::Blur(_) | ControlEdit::Veil(_) | ControlEdit::Visuals(_)
+            )
+        {
             self.apply_surface(cx);
         }
         self.update_settings(cx);
@@ -758,11 +767,15 @@ impl AppModel {
     /// Pushes the blur choice, glass density and accessibility to the live scene. A scene
     /// opened later reads the same values when it is created.
     fn apply_surface(&mut self, cx: &mut Context<Self>) {
-        let (accessibility, blur, veil) =
-            (self.accessibility, self.controls.blur, self.controls.veil);
+        let (accessibility, blur, veil, intensity) = (
+            self.accessibility,
+            self.controls.blur,
+            self.controls.veil,
+            self.controls.visuals,
+        );
         if let Some(handle) = self.scene
             && let Err(error) = handle.update(cx, |view, window, cx| {
-                view.set_surface(accessibility, blur, veil, window, cx);
+                view.set_surface(accessibility, blur, veil, intensity, window, cx);
             })
         {
             eprintln!("Ambien: シーンの背景を反映できません: {error}");

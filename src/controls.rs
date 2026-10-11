@@ -45,11 +45,41 @@ impl Revision {
     }
 }
 
+/// The scene's level of visual effect; never changes sound or world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum VisualIntensity {
+    #[default]
+    Calm,
+    Standard,
+    Vivid,
+}
+
+impl VisualIntensity {
+    /// The saved name.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Calm => "calm",
+            Self::Standard => "standard",
+            Self::Vivid => "vivid",
+        }
+    }
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "calm" => Some(Self::Calm),
+            "standard" => Some(Self::Standard),
+            "vivid" => Some(Self::Vivid),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ControlEdit {
     Volume(Normalized),
     Blur(bool),
     Veil(Normalized),
+    Visuals(VisualIntensity),
     Mute(bool),
     Wander(bool),
     DwellMinMinutes(u32),
@@ -108,6 +138,7 @@ struct CommonFields {
     volume: Normalized,
     blur: bool,
     veil: Normalized,
+    visuals: VisualIntensity,
     mute: bool,
     wander: bool,
     dwell_min_minutes: u32,
@@ -121,6 +152,7 @@ impl From<&ControlState> for CommonFields {
             volume: state.volume,
             blur: state.blur,
             veil: state.veil,
+            visuals: state.visuals,
             mute: state.mute,
             wander: state.wander,
             dwell_min_minutes: state.dwell_min_minutes,
@@ -137,6 +169,8 @@ pub(crate) struct ControlState {
     pub blur: bool,
     /// Amount of colour film over the scene, 0..=1. Display only.
     pub veil: Normalized,
+    /// How much the scene shows: calm (large particles only), standard or vivid. Display only.
+    pub visuals: VisualIntensity,
     pub mute: bool,
     pub wander: bool,
     pub dwell_min_minutes: u32,
@@ -173,6 +207,7 @@ impl ControlState {
             volume: Normalized::new(0.3).expect("SPEC volume is normalized"),
             blur: true,
             veil: Normalized::ZERO,
+            visuals: VisualIntensity::Calm,
             mute: false,
             wander: true,
             dwell_min_minutes: 12,
@@ -220,6 +255,11 @@ impl ControlState {
             ControlEdit::Veil(value) => {
                 let mut common = CommonFields::from(&*self);
                 common.veil = value;
+                self.set_common(common)
+            }
+            ControlEdit::Visuals(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.visuals = value;
                 self.set_common(common)
             }
             ControlEdit::Mute(value) => {
@@ -319,6 +359,7 @@ impl ControlState {
         self.volume = common.volume;
         self.blur = common.blur;
         self.veil = common.veil;
+        self.visuals = common.visuals;
         self.mute = common.mute;
         self.wander = common.wander;
         self.dwell_min_minutes = common.dwell_min_minutes;
@@ -338,6 +379,7 @@ impl ControlState {
         self.volume = source.volume;
         self.blur = source.blur;
         self.veil = source.veil;
+        self.visuals = source.visuals;
         self.mute = source.mute;
         self.wander = source.wander;
         self.dwell_min_minutes = source.dwell_min_minutes;
@@ -506,6 +548,40 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(state.settings_revision.get(), 2);
+    }
+
+    #[test]
+    fn visual_intensity_defaults_to_calm_round_trips_its_name_and_is_a_display_only_edit() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        assert_eq!(state.visuals, VisualIntensity::Calm);
+        for (intensity, name) in [
+            (VisualIntensity::Calm, "calm"),
+            (VisualIntensity::Standard, "standard"),
+            (VisualIntensity::Vivid, "vivid"),
+        ] {
+            assert_eq!(intensity.name(), name);
+            assert_eq!(VisualIntensity::from_name(name), Some(intensity));
+        }
+        assert_eq!(VisualIntensity::from_name("loud"), None);
+        assert_eq!(VisualIntensity::from_name(""), None);
+        let target = state.manual_target;
+        assert!(
+            state
+                .apply(ControlEdit::Visuals(VisualIntensity::Vivid))
+                .unwrap()
+        );
+        assert_eq!(state.visuals, VisualIntensity::Vivid);
+        assert_eq!(state.manual_target, target);
+        assert_eq!(state.manual_revision, Revision::INITIAL);
+        assert!(state.wander);
+        assert_eq!(state.settings_revision.get(), 1);
+        assert!(
+            !state
+                .apply(ControlEdit::Visuals(VisualIntensity::Vivid))
+                .unwrap()
+        );
+        assert_eq!(state.settings_revision.get(), 1);
     }
 
     #[test]
