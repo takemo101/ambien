@@ -762,7 +762,7 @@ mod tests {
                                     opacity,
                                     ..
                                 } => (offset, radius, opacity),
-                                Mark::Cross { .. } => ([0.0; 2], 0.0, 0.0),
+                                Mark::Cross { .. } | Mark::Shards { .. } => ([0.0; 2], 0.0, 0.0),
                             };
                             assert!(
                                 offset

@@ -21,7 +21,7 @@ use crate::{
     ui::{
         appearance::{AccessibilityState, Motion},
         backdrop,
-        look::{Budget, Mark, ParticleInput, look, vertices},
+        look::{Budget, Mark, ParticleInput, look, spikes, vertices},
     },
 };
 
@@ -615,7 +615,49 @@ fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
                 color,
             ));
         }
+        Mark::Shards {
+            arm,
+            width,
+            seed,
+            rgb,
+            opacity,
+        } => {
+            let centre = disc_bounds(viewport, position, [0.0, 0.0], 0.0).origin;
+            for (angle, share) in spikes(seed) {
+                paint_spike(window, centre, angle, arm * share, width, rgb, opacity);
+            }
+        }
         Mark::Poly { .. } => paint_poly(window, viewport, position, mark),
+    }
+}
+
+/// One spike of a rock's glint: a thin diamond from just behind `centre` out to `length` along
+/// `angle`, `width` across at its widest. A path that cannot be built is skipped.
+fn paint_spike(
+    window: &mut Window,
+    centre: gpui::Point<Pixels>,
+    angle: f32,
+    length: f32,
+    width: f32,
+    rgb: [f32; 3],
+    opacity: f32,
+) {
+    let (sin, cos) = angle.sin_cos();
+    let along = |distance: f32, across: f32| {
+        centre
+            + point(
+                px(cos * distance - sin * across),
+                px(sin * distance + cos * across),
+            )
+    };
+    let mut builder = PathBuilder::fill();
+    builder.move_to(along(length, 0.0));
+    builder.line_to(along(length * 0.18, width * 0.5));
+    builder.line_to(along(-length * 0.14, 0.0));
+    builder.line_to(along(length * 0.18, -width * 0.5));
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, rgba(rgb, opacity));
     }
 }
 
