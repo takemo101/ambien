@@ -611,6 +611,10 @@ clamp は global visibleFrame で外枠全体について行い、最後に相�
 
 登録後に初回再読 signal を入れる。window observer は close 時解除、global observer は app owner が所有。shutdown は **元 center で observer 解除→channel close→Task drop**。Retained token の drop だけで登録が解除されたとしない。Task を detach しない。
 
+現存経路は [`src/ui/appearance.rs`](../src/ui/appearance.rs) の `AccessibilityState`（reduce motion／transparency）、`Motion`（粒の包絡・形の拡大・背景 glow の膨らみ）、容量1の `change_channel`（`Queued`／`Coalesced`／`Closed`）と、[`src/platform/macos.rs`](../src/platform/macos.rs) の `EnvironmentMonitor`（workspace の `notificationCenter` の accessibility 表示設定変更と、既定 center の画面構成変更を各 center の token で登録）、`read_display_options`、`read_screen_layout`、`refit_window` である。ブロックが捕捉するのは `Send + Sync` の通知関数だけで、App／NSView は持たない。`AppModel` が monitor・notifier・Task を所有し、起動時に一度読んで GPUI／Ely の reduced motion を設定してから窓を開く。通知後は owner Task が最新値を再読し、変化した accessibility だけを反映する。scene は `set_accessibility` で背景を Opaque／Blurred に切り替え、Opaque では Ely palette の `bg` を塗る。音声 control・revision・粒 cache は変えない。system の light／dark は両窓の `observe_window_appearance` が Theme mode へ反映し、シーンの再表示前にも再読する。
+
+窓の再 fit は、画面構成（各 screen の frame／visibleFrame）が前回と異なる通知、またはシーン／設定窓が別 display へ移ったときだけ行う。accessibility の切替だけでは、利用者が置いた窓を動かさない。`refit_target` は現在の窓寸法ではなく役割の固定基準から計算し、狭い画面で縮めた寸法を引き継がない。`refit_window` は変更前に取得・検査をすべて終え、画面を取得できないときは最後の有限寸法と制約を保持する。AppKit の `setFrame` は resize／move callback を同期的に呼ぶが、GPUI の handler は呼出し元が保持する App borrow により更新を捨てるため、frame を変更したときは同じ `handle.update` 内で `Window::bounds_changed` を呼び、viewport・scale・display と bounds observer を最新にする。`App::defer` は同じ borrow の中で実行されるため、この問題の回避策にならない。
+
 ### 高DPIと確保コスト
 
 固定 content でも物理 surface は倍率で変わる。paint の logical radius に倍率を再乗算せず、GPU／GPUI が物理 pixel へ変換する。画面面積に比例して音粒・event・表示粒を増やさない。GPUI の BGRA8 surface、最大3枚の drawable、パス用 intermediate、MSAA、atlas、旧資源寿命、WindowServer、Blur は別の実資源として観測する。[Metal resize](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_apple/src/metal_renderer.rs#L390-L435)

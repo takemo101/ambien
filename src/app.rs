@@ -2,9 +2,9 @@ use std::{error::Error, path::PathBuf, sync::Arc, time::Duration};
 
 use ely::theme::{Mode, Theme};
 use gpui::{
-    App, AppContext, Context, DisplayId, Entity, Global, KeyBinding, Menu, MenuItem, Render,
-    SharedString, Subscription, Task, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowId, WindowOptions, actions,
+    AnyWindowHandle, App, AppContext, Context, DisplayId, Entity, Global, KeyBinding, Menu,
+    MenuItem, Render, SharedString, Subscription, Task, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId, WindowOptions, actions,
 };
 
 use crate::{
@@ -12,11 +12,13 @@ use crate::{
     controls::{ControlEdit, ControlState, Revision},
     persistence::{LoadedState, SaveError, SaveSnapshot, SaveStage, SaveStartup, SaveWorker},
     platform::macos::{
-        PowerMonitor, WindowGeometryError, WindowPlacement, WindowRole, capture_placement,
-        constrain_window, prepare_window,
+        EnvironmentMonitor, PowerMonitor, ScreenLayout, WindowGeometryError, WindowPlacement,
+        WindowRole, capture_placement, constrain_window, prepare_window, read_display_options,
+        read_screen_layout, refit_window,
     },
     situations::{Registry, SituationIndex},
     ui::{
+        appearance::{AccessibilityState, ChangeNotifier, change_channel},
         scene::SceneView,
         settings::{SettingsNotices, SettingsView},
     },
@@ -60,7 +62,14 @@ pub(crate) struct AppModel {
     placement_display: Option<DisplayId>,
     // The global root keeps subscriptions alive; callbacks do not own the root.
     _window_closed: Option<Subscription>,
+    scene_appearance: Option<Subscription>,
     settings_appearance: Option<Subscription>,
+    settings_display: Option<DisplayId>,
+    screen_layout: Option<ScreenLayout>,
+    accessibility: AccessibilityState,
+    environment: Option<EnvironmentMonitor>,
+    environment_changes: Option<ChangeNotifier>,
+    environment_task: Option<Task<()>>,
 }
 
 pub(crate) fn start(cx: &mut App) {
@@ -114,11 +123,40 @@ pub(crate) fn start(cx: &mut App) {
         ),
     };
     let (audio, updates) = AudioController::start(registry, controls.clone(), signals, power_ready);
+    let accessibility = read_display_options()
+        .map(AccessibilityState::from)
+        .unwrap_or_else(|error| {
+            eprintln!("Ambien: 表示のアクセシビリティを読めません: {error}");
+            AccessibilityState::default()
+        });
+    accessibility.apply_to_app(cx);
+    let (change_notifier, change_receiver) = change_channel();
+    let environment = {
+        let notifier = change_notifier.clone();
+        // The native block only signals; the newest state is read on the main thread.
+        match EnvironmentMonitor::new(move || {
+            notifier.notify();
+        }) {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                eprintln!("Ambien: 環境変更通知を登録できません: {error}");
+                None
+            }
+        }
+    };
+    let owner_notifier = change_notifier.clone();
     let owner = cx.new(move |_| AppModel {
         scene: None,
         settings: None,
         _window_closed: None,
+        scene_appearance: None,
         settings_appearance: None,
+        settings_display: None,
+        screen_layout: read_screen_layout().ok(),
+        accessibility,
+        environment,
+        environment_changes: Some(owner_notifier),
+        environment_task: None,
         audio,
         power_monitor,
         controls,
@@ -135,6 +173,23 @@ pub(crate) fn start(cx: &mut App) {
         last_resume,
         placement,
         placement_display: None,
+    });
+    // Re-read once after registration so a change made before it was observed is not missed.
+    change_notifier.notify();
+    let environment_task = owner.update(cx, |_, cx| {
+        cx.spawn(async move |owner, cx| {
+            while change_receiver.recv().await.is_ok() {
+                if owner
+                    .update(cx, |model, cx| model.environment_changed(cx))
+                    .is_err()
+                {
+                    break; // The application owner has been released.
+                }
+            }
+        })
+    });
+    owner.update(cx, |model, _| {
+        model.environment_task = Some(environment_task)
     });
     cx.set_global(AppRoot(owner.clone()));
 
@@ -154,6 +209,16 @@ pub(crate) fn start(cx: &mut App) {
             if let Err(error) = model.flush_latest(cx) {
                 model.record_save_error(error, cx);
             }
+            // Observer removal, then channel close, then the owner Task; never detach it.
+            if let Some(mut monitor) = model.environment.take()
+                && let Err(error) = monitor.shutdown()
+            {
+                eprintln!("Ambien: 環境通知の解除に失敗しました: {error}");
+            }
+            if let Some(changes) = model.environment_changes.take() {
+                changes.close();
+            }
+            model.environment_task = None;
             if let Some(mut monitor) = model.power_monitor.take()
                 && let Err(error) = monitor.shutdown()
             {
@@ -262,6 +327,21 @@ pub(crate) fn dispatch_control_edit(edit: ControlEdit, cx: &mut App) {
     });
 }
 
+pub(crate) fn dispatch_settings_display(
+    window_id: WindowId,
+    display: Result<DisplayId, WindowGeometryError>,
+    cx: &mut App,
+) {
+    cx.defer(move |cx| {
+        let Some(owner) = cx.try_global::<AppRoot>().map(|root| root.0.clone()) else {
+            return;
+        };
+        owner.update(cx, |model, cx| {
+            model.settings_display_changed(window_id, display, cx);
+        });
+    });
+}
+
 pub(crate) fn dispatch_scene_placement_changed(
     window_id: WindowId,
     placement: Result<(WindowPlacement, DisplayId), WindowGeometryError>,
@@ -286,14 +366,20 @@ impl AppModel {
             })?;
             return Ok(());
         }
+        // A scene reopened after both windows closed has no appearance observer to lean on.
+        Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
         let audio = self.audio.shared();
+        let accessibility = self.accessibility;
         self.scene = Some(open_window(
             WindowRole::Scene,
+            accessibility,
             self.placement.as_ref(),
-            move |window, cx| SceneView::new(window, cx, audio),
+            move |window, cx| SceneView::new(window, cx, audio, accessibility),
             cx,
         )?);
         let handle = self.scene.expect("the scene was just opened");
+        self.scene_appearance =
+            Some(handle.update(cx, |_, window, _| follow_system_appearance(window))?);
         let placement = handle.update(cx, |_, window, _| capture_placement(window))?;
         self.scene_placement_changed(handle.window_id(), placement, cx);
         Ok(())
@@ -319,6 +405,7 @@ impl AppModel {
         let notices = self.settings_notices();
         let handle = open_window(
             WindowRole::Settings,
+            self.accessibility,
             None,
             move |window, cx| {
                 SettingsView::new(
@@ -333,13 +420,14 @@ impl AppModel {
             },
             cx,
         )?;
-        self.settings_appearance = Some(handle.update(cx, |_, window, _| {
-            window.observe_window_appearance(|_, cx| {
-                cx.defer(|cx| {
-                    Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
-                });
-            })
-        })?);
+        self.settings_appearance =
+            Some(handle.update(cx, |_, window, _| follow_system_appearance(window))?);
+        // The first bounds callback only records the display this window was fitted to.
+        self.settings_display = handle
+            .update(cx, |_, window, _| capture_placement(window))
+            .ok()
+            .and_then(Result::ok)
+            .map(|(_, display)| display);
         self.settings = Some(handle);
         Ok(())
     }
@@ -506,6 +594,7 @@ impl AppModel {
             .is_some_and(|window| window.window_id() == window_id)
         {
             self.scene = None;
+            self.scene_appearance = None;
         }
         if self
             .settings
@@ -513,6 +602,87 @@ impl AppModel {
         {
             self.settings = None;
             self.settings_appearance = None;
+            self.settings_display = None;
+        }
+    }
+
+    /// Re-reads the newest native state after any environment notification. A burst of
+    /// notifications leaves one pending signal, so stale values are never queued.
+    fn environment_changed(&mut self, cx: &mut Context<Self>) {
+        match read_display_options() {
+            Ok(options) => self.apply_accessibility(options.into(), cx),
+            Err(error) => eprintln!("Ambien: 表示のアクセシビリティを読めません: {error}"),
+        }
+        // An accessibility change must not move a window the user placed. Re-fit only when
+        // the screens or workareas themselves changed.
+        match read_screen_layout() {
+            Ok(layout) if self.screen_layout.as_ref() != Some(&layout) => {
+                self.screen_layout = Some(layout);
+                self.refit(WindowRole::Scene, cx);
+                self.refit(WindowRole::Settings, cx);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Ambien: 画面構成を読めません: {error}"),
+        }
+    }
+
+    /// Re-fits one live fixed window from its baseline for its current screen. Failure
+    /// leaves the last finite size and constraints in place. The untyped handle does not
+    /// lease the window's root view, which the bounds observers triggered by
+    /// `bounds_changed` update themselves.
+    fn refit(&mut self, role: WindowRole, cx: &mut Context<Self>) {
+        let (name, handle) = match role {
+            WindowRole::Scene => ("シーン", self.scene.map(AnyWindowHandle::from)),
+            WindowRole::Settings => ("設定", self.settings.map(AnyWindowHandle::from)),
+        };
+        let result = handle
+            .map(|handle| handle.update(cx, |_, window, cx| refit_and_sync(window, role, cx)));
+        match result {
+            None | Some(Ok(Ok(()))) => {}
+            Some(Ok(Err(error))) => {
+                eprintln!("Ambien: {name}窓を現在の画面へ収め直せません: {error}")
+            }
+            Some(Err(error)) => eprintln!("Ambien: {name}窓を現在の画面へ収め直せません: {error}"),
+        }
+    }
+
+    fn settings_display_changed(
+        &mut self,
+        window_id: WindowId,
+        display: Result<DisplayId, WindowGeometryError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .settings
+            .is_none_or(|window| window.window_id() != window_id)
+        {
+            return; // A retired settings window cannot refit its replacement.
+        }
+        // An unreadable display keeps the last known fit; the first capture is only recorded.
+        let Ok(display) = display else {
+            return;
+        };
+        if self
+            .settings_display
+            .replace(display)
+            .is_some_and(|old| old != display)
+        {
+            self.refit(WindowRole::Settings, cx);
+        }
+    }
+
+    fn apply_accessibility(&mut self, accessibility: AccessibilityState, cx: &mut Context<Self>) {
+        if accessibility == self.accessibility {
+            return;
+        }
+        self.accessibility = accessibility;
+        accessibility.apply_to_app(cx);
+        if let Some(handle) = self.scene
+            && let Err(error) = handle.update(cx, |view, window, cx| {
+                view.set_accessibility(accessibility, window, cx);
+            })
+        {
+            eprintln!("Ambien: シーンへアクセシビリティを反映できません: {error}");
         }
     }
 
@@ -573,8 +743,14 @@ impl AppModel {
         }
         match placement {
             Ok((placement, display)) => {
+                // A move onto another display re-fits from the baseline. The first capture
+                // only records the display the window was just fitted to.
+                let moved = self.placement_display.is_some_and(|old| old != display);
                 if self.remember_placement(placement, display, cx) {
                     self.schedule_save(cx);
+                }
+                if moved {
+                    self.refit(WindowRole::Scene, cx);
                 }
             }
             Err(error) => self.record_save_error(
@@ -699,8 +875,33 @@ impl AppModel {
     }
 }
 
+/// Re-fits a window and, when AppKit changed its frame, tells GPUI. AppKit's resize/move
+/// callbacks run synchronously inside `refit_window`, but GPUI's handlers need the App
+/// borrow that the caller holds and silently drop the update.
+fn refit_and_sync(
+    window: &mut Window,
+    role: WindowRole,
+    cx: &mut App,
+) -> Result<(), WindowGeometryError> {
+    if refit_window(window, role)? {
+        window.bounds_changed(cx);
+    }
+    Ok(())
+}
+
+/// Follows the system light/dark appearance for this window's lifetime. The Theme is
+/// global, so every observer re-reads the current appearance rather than a stale one.
+fn follow_system_appearance(window: &mut Window) -> Subscription {
+    window.observe_window_appearance(|_, cx| {
+        cx.defer(|cx| {
+            Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
+        });
+    })
+}
+
 fn open_window<V: Render + 'static>(
     role: WindowRole,
+    accessibility: AccessibilityState,
     saved: Option<&WindowPlacement>,
     constructor: impl FnOnce(&mut Window, &mut Context<V>) -> V,
     cx: &mut Context<AppModel>,
@@ -730,7 +931,7 @@ fn open_window<V: Render + 'static>(
                 appears_transparent: true,
                 ..Default::default()
             },
-            WindowBackgroundAppearance::Blurred,
+            accessibility.scene_background(),
         ),
         WindowRole::Settings => (
             TitlebarOptions {
