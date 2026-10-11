@@ -5,9 +5,9 @@ use std::{
 
 use ely::theme::ActiveTheme;
 use gpui::{
-    Bounds, BoxShadow, ContentMask, Context, FocusHandle, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, Rgba, Styled, Subscription, Task, Window, canvas,
-    div, fill, point, px, size,
+    BorderStyle, Bounds, BoxShadow, ContentMask, Context, FocusHandle, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba, Styled, Subscription, Task,
+    Window, canvas, div, fill, outline, point, px, size,
 };
 
 use crate::{
@@ -17,7 +17,10 @@ use crate::{
         transport::{VISIBLE_CAPACITY, VisualEvent, WorldVisualHeader},
     },
     controls::Normalized,
-    ui::appearance::{AccessibilityState, Motion},
+    ui::{
+        appearance::{AccessibilityState, Motion},
+        look::{Mark, ParticleInput, look},
+    },
 };
 
 struct VisibleParticles {
@@ -323,12 +326,25 @@ impl SceneView {
                 let Some((age, opacity)) = self.particles.particle_frame(event, self.motion) else {
                     continue;
                 };
-                let radius = event.radius.get() * self.motion.shape_scale(event.shape, age);
                 let position = [event.x.get(), event.y.get()];
                 let color = source.registry.definitions()[event.situation.get()]
                     .visual
                     .color;
-                paint_glow(window, bounds, position, radius, color, opacity);
+                let look = look(
+                    &ParticleInput {
+                        shape: event.shape,
+                        age,
+                        opacity,
+                        radius: event.radius.get(),
+                        strength: event.strength.get(),
+                        serial: event.serial,
+                        rgb: color,
+                    },
+                    self.motion,
+                );
+                for mark in look.marks() {
+                    paint_mark(window, bounds, position, mark);
+                }
             }
         });
     }
@@ -368,14 +384,44 @@ fn paint_glow(
     rgb: [f32; 3],
     opacity: f32,
 ) {
-    let color: gpui::Hsla = Rgba {
+    paint_glow_at(window, viewport, position, [0.0, 0.0], radius, rgb, opacity);
+}
+
+fn rgba(rgb: [f32; 3], opacity: f32) -> gpui::Hsla {
+    Rgba {
         r: rgb[0],
         g: rgb[1],
         b: rgb[2],
         a: opacity,
     }
-    .into();
+    .into()
+}
+
+/// Bounds of a disc centred on a normalized position plus a logical-pixel offset.
+fn disc_bounds(
+    viewport: Bounds<Pixels>,
+    position: [f32; 2],
+    offset: [f32; 2],
+    radius: f32,
+) -> Bounds<Pixels> {
     let bounds = glow_bounds(viewport, position, radius);
+    Bounds::new(
+        bounds.origin + point(px(offset[0]), px(offset[1])),
+        bounds.size,
+    )
+}
+
+fn paint_glow_at(
+    window: &mut Window,
+    viewport: Bounds<Pixels>,
+    position: [f32; 2],
+    offset: [f32; 2],
+    radius: f32,
+    rgb: [f32; 3],
+    opacity: f32,
+) {
+    let color = rgba(rgb, opacity);
+    let bounds = disc_bounds(viewport, position, offset, radius);
     window.paint_drop_shadows(
         bounds,
         px(radius).into(),
@@ -388,6 +434,39 @@ fn paint_glow(
         }],
     );
     window.paint_quad(fill(bounds, color).corner_radii(px(radius)));
+}
+
+fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2], mark: &Mark) {
+    match *mark {
+        Mark::Glow {
+            offset,
+            radius,
+            rgb,
+            opacity,
+        } => paint_glow_at(window, viewport, position, offset, radius, rgb, opacity),
+        Mark::Ring {
+            radius,
+            width,
+            rgb,
+            opacity,
+        } => {
+            let bounds = disc_bounds(viewport, position, [0.0, 0.0], radius);
+            window.paint_quad(
+                outline(bounds, rgba(rgb, opacity), BorderStyle::default())
+                    .border_widths(px(width))
+                    .corner_radii(px(radius)),
+            );
+        }
+        Mark::Dot {
+            offset,
+            radius,
+            rgb,
+            opacity,
+        } => {
+            let bounds = disc_bounds(viewport, position, offset, radius);
+            window.paint_quad(fill(bounds, rgba(rgb, opacity)).corner_radii(px(radius)));
+        }
+    }
 }
 
 /// Opacity of the theme-coloured film laid over the scene. Reduce transparency lays it fully

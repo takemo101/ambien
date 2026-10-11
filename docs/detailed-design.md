@@ -549,7 +549,7 @@ P02 の声 factory は worker で rate・DSP・固定 delay を準備し、`Voic
 
 `canvas` の paint callback で normalized x/y を **そのフレームの最新 bounds** へ写す。radius は論理 px のまま、縦横別 scale や Retina 二重倍率を掛けない。`paint_quad`／`paint_drop_shadows(&[BoxShadow])` と content mask を使用し、円・柔らかな影を現在 bounds で clip する。[GPUI Window paint](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/window.rs)
 
-雨は点、岩は衝突、深海は SlowGlow を `VisualShape` で描く。色は registry の VisualStyle、強さは時刻対応した situation gain／breath に従い、全体 volume／mute は絵に掛けない。空またはゼロ領域は paint を休む。viewport の更新は scene の配置を変えるだけで control revision を変えない。window size に依存した shader／履歴画像を持たず、window 全面の offscreen を毎 frame 生成しない。
+雨は点、岩は衝突、深海は SlowGlow を `VisualShape` で描く。1粒の見た目は純粋関数 [`ui::look::look`](../src/ui/look.rs) がイベントの値（形・強さ・半径・serial）と年齢だけから決め、最大6個の mark（Glow／Ring／Dot）を返す。雨は着地の波紋（強い粒は2重）、岩は衝撃輪と3〜4個の欠片、深海はゆらぐ輪郭と3個の尾で、色の幅は serial から決める明るさと暖寒の傾きである。描画側で乱数を使わず、Reduced motion では広がらない核の光だけにする。scene はその mark を `paint_quad`（輪は outline、欠片・尾は塗りだけ、核の光だけ `paint_drop_shadows` を併用）で描く。色は registry の VisualStyle、強さは時刻対応した situation gain／breath に従い、全体 volume／mute は絵に掛けない。空またはゼロ領域は paint を休む。viewport の更新は scene の配置を変えるだけで control revision を変えない。window size に依存した shader／履歴画像を持たず、window 全面の offscreen を毎 frame 生成しない。
 
 `request_animation_frame` だけでは上限 cadence にならない。visible scene だけが timer Task を保持し、期限の notify で必要な更新を要求する。`window.is_visible()`／`observe_window_visibility` を使い、完全 occlusion／最小化時は task を停止、復帰時は live 読取を一度行ってから task を再開する。cadence は SPEC の最大 fps から決め、OS の resize／露出による redraw は animation と別。settings を同じ毎 frame Task に入れず、control／dominant／output／receipt／failure／appearance の離散変化だけ notify。gain／breath／world秒で設定窓を常時 notify しない。
 
