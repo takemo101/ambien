@@ -16,7 +16,7 @@ use parking_lot::{Condvar, Mutex};
 use serde_json::{Map, Value};
 
 use crate::{
-    controls::{ControlState, Normalized, Revision},
+    controls::{ControlState, Normalized, Revision, VisualIntensity},
     platform::macos::WindowPlacement,
     situations::{Registry, SituationIndex},
 };
@@ -428,6 +428,16 @@ fn normalize(root: &Map<String, Value>, registry: &Registry) -> (LoadedState, Op
     ) as f32)
     .expect("clamped volume is normalized");
     controls.blur = boolean(root.get("blur"), controls.blur, "blur", &mut repairs);
+    controls.visuals = match root.get("visuals") {
+        None => controls.visuals,
+        Some(value) => value
+            .as_str()
+            .and_then(VisualIntensity::from_name)
+            .unwrap_or_else(|| {
+                repairs.push("visuals".into());
+                controls.visuals
+            }),
+    };
     controls.veil = Normalized::new(number(
         root.get("veil"),
         f64::from(controls.veil.get()),
@@ -560,6 +570,7 @@ impl StateDocument {
         root.insert("volume".into(), Value::from(controls.volume.get()));
         root.insert("blur".into(), Value::from(controls.blur));
         root.insert("veil".into(), Value::from(controls.veil.get()));
+        root.insert("visuals".into(), Value::from(controls.visuals.name()));
         root.insert("mute".into(), Value::from(controls.mute));
         root.insert("wander".into(), Value::from(controls.wander));
         root.insert(
@@ -1243,6 +1254,38 @@ mod tests {
         assert_eq!(saved["window"]["future"], original["window"]["future"]);
         assert_eq!(saved["window"]["x"], json!(2.0));
         assert_eq!(saved["window"]["display_uuid"], Value::Null);
+    }
+
+    #[test]
+    fn visual_intensity_defaults_to_calm_repairs_unknown_names_and_round_trips() {
+        let fixture = Fixture::new();
+        let registry = registry();
+        fixture.write(&json!({"version":1}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.visuals, VisualIntensity::Calm);
+        assert!(notice.is_none());
+        for bad in [json!("loud"), json!(3), json!(true), json!(null)] {
+            fixture.write(&json!({"version":1, "visuals": bad}));
+            let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+            assert_eq!(state.controls.visuals, VisualIntensity::Calm);
+            assert!(notice.unwrap().contains("visuals"));
+        }
+        fixture.write(&json!({"version":1, "visuals": "standard"}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.visuals, VisualIntensity::Standard);
+        assert!(notice.is_none());
+        let (worker, startup, _notices) =
+            SaveWorker::start(fixture.path(), registry.clone()).unwrap();
+        startup.recv_blocking().unwrap();
+        let revision = Revision::from_raw(1);
+        let mut request = snapshot(&registry, 0.5);
+        request.controls.visuals = VisualIntensity::Vivid;
+        worker.submit(revision, request).unwrap();
+        worker.flush(revision).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(fixture.path()).unwrap()).unwrap();
+        assert_eq!(saved["visuals"], json!("vivid"));
+        let (state, _, _, _) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.visuals, VisualIntensity::Vivid);
     }
 
     #[test]

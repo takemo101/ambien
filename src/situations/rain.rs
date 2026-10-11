@@ -45,6 +45,8 @@ static KNOBS: [KnobDefinition; 2] = [
 // Loudness trim, settled in P13 listening: the raw rain measured -40.8 dBFS RMS at 100% app
 // volume; this balances it with the other voices, keeping peak headroom.
 const OUTPUT_TRIM: f32 = 2.0;
+/// Grain strength from which a drop is a large one, drawn at every intensity.
+const LARGE_FROM: f32 = 0.63;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.50, 0.72, 0.92],
     shape: VisualShape::Point,
@@ -396,15 +398,17 @@ impl Voice for RainVoice {
             let lifetime = 0.11 + self.random.unit() * 0.17;
             grain.start(0.0015, lifetime, center, bandwidth, x, frame.sample_rate);
             grain.strength = strength;
-            // Only the large/near accepted sound grains are selected for light.
-            // Ring overwrite/failure cannot alter admission or audio PRNG.
-            if self.contributing && strength >= 0.63 {
+            // Every accepted grain is published; the large/near ones are marked so the scene can
+            // draw only those at the calm level. Ring overwrite/failure cannot alter admission
+            // or the audio PRNG.
+            if self.contributing {
                 events.emit(ParticleVisual {
                     x: Normalized::new(x).expect("bounded world position"),
                     y: Normalized::new(y).expect("bounded world position"),
                     strength: Normalized::new(strength).expect("bounded grain strength"),
                     radius: LogicalPixels::new(1.3 + strength * 2.4).expect("finite radius"),
                     shape: VISUAL.shape,
+                    large: strength >= LARGE_FROM,
                     lifetime: Duration::from_secs_f64(lifetime),
                 });
             }
@@ -591,6 +595,32 @@ mod tests {
             &mut events,
         );
         voice.render_sample()
+    }
+
+    #[test]
+    fn every_drop_is_published_and_only_the_strong_ones_are_marked_large() {
+        let knobs = [Normalized::ONE, Normalized::ZERO];
+        let ring = VisualRing::new(crate::audio::transport::EVENT_CAPACITY, 1);
+        let mut voice = voice(Normalized::ONE, Normalized::ZERO);
+        for sample in 0..96_000 {
+            step(&mut voice, &knobs, &ring, sample);
+        }
+        let mut visible = [None; crate::audio::transport::VISIBLE_CAPACITY];
+        let count = ring.read_live_into(
+            StreamEpoch::new(1).unwrap(),
+            MachNanos::new(96_000),
+            &mut visible,
+        );
+        assert!(count > 0);
+        let events = || visible.iter().take(count).flatten();
+        assert!(events().any(|event| event.large), "strong drops are large");
+        assert!(
+            events().any(|event| !event.large),
+            "weak drops are published too"
+        );
+        for event in events() {
+            assert_eq!(event.large, event.strength.get() >= LARGE_FROM);
+        }
     }
 
     #[test]

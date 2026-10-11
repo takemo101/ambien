@@ -551,6 +551,8 @@ P02 の声 factory は worker で rate・DSP・固定 delay を準備し、`Voic
 
 雨は点、岩は衝突、深海は SlowGlow を `VisualShape` で描く。1粒の見た目は純粋関数 [`ui::look::look`](../src/ui/look.rs) がイベントの値（形・強さ・半径・serial）と年齢だけから決め、最大6個の mark（Glow／Ring／Dot）を返す。雨は着地の波紋（強い粒は2重）、岩は衝撃輪と3〜4個の欠片、深海はゆらぐ輪郭と3個の尾で、色の幅は serial から決める明るさと暖寒の傾きである。描画側で乱数を使わず、Reduced motion では広がらない核の光だけにする。scene はその mark を `paint_quad`（輪は outline、欠片・尾は塗りだけ、核の光だけ `paint_drop_shadows` を併用）で描く。色は registry の VisualStyle、強さは時刻対応した situation gain／breath に従い、全体 volume／mute は絵に掛けない。空またはゼロ領域は paint を休む。viewport の更新は scene の配置を変えるだけで control revision を変えない。window size に依存した shader／履歴画像を持たず、window 全面の offscreen を毎 frame 生成しない。
 
+「演出の強さ」（`visuals`: `calm`／`standard`／`vivid`）は表示専用で、`ControlState` の共通設定として保存・即時反映するが音声 mailbox へは渡さない。各 situation は受理した粒をすべて視覚イベントとして発行し、従来の閾値以上の粒に `large` を付ける（深海は深さの暗さを掛ける前の強さで判定する）。`large` は event ring の shape 語の1 bit に載せ、`VisualRing` の保持順位は「large、強さ、新しさ」の順なので、小さい粒が大きい粒を押し出さない。`look` は小さい粒を、控えめでは何も描かず、標準・派手では小さな淡い点1個にする。大きい粒の見た目は段階に依らない（P23 以降の段階別の質感を除く）。
+
 `request_animation_frame` だけでは上限 cadence にならない。visible scene だけが timer Task を保持し、期限の notify で必要な更新を要求する。`window.is_visible()`／`observe_window_visibility` を使い、完全 occlusion／最小化時は task を停止、復帰時は live 読取を一度行ってから task を再開する。cadence は SPEC の最大 fps から決め、OS の resize／露出による redraw は animation と別。settings を同じ毎 frame Task に入れず、control／dominant／output／receipt／failure／appearance の離散変化だけ notify。gain／breath／world秒で設定窓を常時 notify しない。
 
 ### Ely実Interfaceとcontrolled form

@@ -883,6 +883,7 @@ mod tests {
                 strength: Normalized::ONE,
                 radius: crate::audio::transport::LogicalPixels::new(1.0).unwrap(),
                 shape: crate::situations::VisualShape::Point,
+                large: true,
                 lifetime: Duration::from_secs(1),
             });
         }

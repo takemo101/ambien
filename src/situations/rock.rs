@@ -55,6 +55,8 @@ static KNOBS: [KnobDefinition; 3] = [
 // to 24 simultaneous maximal collisions under 0.9, so the trim is not bounded by peaks.
 const OUTPUT_TRIM: f32 = 6.0;
 const MAX_COLLISIONS: usize = 24;
+/// Collision strength from which an impact is a large one, drawn at every intensity.
+const LARGE_FROM: f32 = 0.68;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.65, 0.65, 0.65],
     shape: VisualShape::Impact,
@@ -509,19 +511,18 @@ impl Voice for RockVoice {
                 (strength, scale)
             };
             grain.start(self.tone, strength, x, y, scale, frame.sample_rate);
-            // Admission and every physical choice precede visual publication.
-            // Sparse stronger impacts share the actual audio pan/scale/lifetime;
-            // ring overwrite cannot change sound or the world random sequence.
-            if strength >= 0.68 {
-                events.emit(ParticleVisual {
-                    x: Normalized::new(x).expect("bounded collision x"),
-                    y: Normalized::new(grain.y).expect("bounded collision y"),
-                    strength: Normalized::new(grain.strength).expect("bounded collision strength"),
-                    radius: LogicalPixels::new(grain.radius).expect("finite collision radius"),
-                    shape: VISUAL.shape,
-                    lifetime: Duration::from_secs_f64(grain.lifetime),
-                });
-            }
+            // Admission and every physical choice precede visual publication. Every collision is
+            // published; stronger ones are marked large and share the actual audio pan, scale and
+            // lifetime. Ring overwrite cannot change sound or the world random sequence.
+            events.emit(ParticleVisual {
+                x: Normalized::new(x).expect("bounded collision x"),
+                y: Normalized::new(grain.y).expect("bounded collision y"),
+                strength: Normalized::new(grain.strength).expect("bounded collision strength"),
+                radius: LogicalPixels::new(grain.radius).expect("finite collision radius"),
+                shape: VISUAL.shape,
+                large: strength >= LARGE_FROM,
+                lifetime: Duration::from_secs_f64(grain.lifetime),
+            });
         }
     }
 

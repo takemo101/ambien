@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ely::{
+    buttons::SegmentedControl,
     forms::{FormField, Radio, Slider, Switch},
     primitives::FocusScope,
     theme::ActiveTheme,
@@ -14,7 +15,7 @@ use gpui::{
 use crate::{
     app::dispatch_control_edit,
     audio::{AudioSource, transport::ControlReceipt},
-    controls::{ControlEdit, ControlState, Normalized},
+    controls::{ControlEdit, ControlState, Normalized, VisualIntensity},
     situations::{KnobIndex, Registry, SituationIndex},
 };
 
@@ -332,6 +333,41 @@ impl Render for SettingsView {
                                                 );
                                             }
                                         })),
+                                ),
+                        ),
+                )
+                .child(
+                    FormField::new("visuals-field", "演出の強さ")
+                        .description(match controls.visuals {
+                            VisualIntensity::Calm => "控えめ（大きい粒だけ、ガラスの静けさ）",
+                            VisualIntensity::Standard => "標準（小さい粒も淡い点で光ります）",
+                            VisualIntensity::Vivid => {
+                                "派手（いまは標準と同じ。背景やきらめきは今後追加します）"
+                            }
+                        })
+                        .child(
+                            div()
+                                .id("visuals-a11y")
+                                .role(Role::Group)
+                                .w_full()
+                                .aria_label("演出の強さ")
+                                .child(
+                                    SegmentedControl::new("visuals", controls.visuals.name())
+                                        .segment("calm", "控えめ", None)
+                                        .segment("standard", "標準", None)
+                                        .segment("vivid", "派手", None)
+                                        .on_change(
+                                            |value: &SharedString, _, cx: &mut gpui::App| {
+                                                if let Some(visuals) =
+                                                    VisualIntensity::from_name(value.as_ref())
+                                                {
+                                                    dispatch_control_edit(
+                                                        ControlEdit::Visuals(visuals),
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        ),
                                 ),
                         ),
                 )

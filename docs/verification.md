@@ -1066,3 +1066,20 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 - 実窓での見え方（波紋・衝撃輪・欠片・尾・色の幅の好み、ガラスの静けさを損なわないか）は、ユーザーの目視が必要で、未観測。
 - 多数の粒が同時に表示されたときの描画負荷は、実機で測っていない。1粒の mark は最大6個で、核の光だけが影と円の2 primitive、輪・欠片・尾は影を使わない1 primitive なので、強い岩の衝突は最大7 primitive になる。表示粒の上限512では最悪3584 primitive で、従来の最大1024から増える。
 - 視差効果を減らすでの見え方は、実窓では観測していない。
+
+## P21 演出の強さの設定と小さい粒の発光
+
+2026-10-11、macOS 27.0.1（26A434）、arm64。設定「演出の強さ」（`visuals`: `calm`／`standard`／`vivid`、既定 `calm`）を追加し、各 situation が受理した粒をすべて視覚イベントとして発行して、閾値以上の粒に `large` を付けた。控えめでは小さい粒を描かず（P20 の見た目と同一）、標準・派手では小さな淡い点として描く。音・世界・イベントの内容は変えず、`large` は event ring の shape 語の1 bit に載せた。
+
+### AI 側の確認
+
+- `cargo fmt --all --check`、`cargo clippy --all-targets --locked --offline -- -D warnings`、`cargo test --locked --offline` は成功（220 tests、追加は controls／persistence／look／transport／rain の各1 test）。
+- 追加した test は、`visuals` の既定・名前の往復・不明値の修復・保存の往復、設定が手動意図にならず設定世代だけを進めること、小さい粒が控えめで何も描かれず標準・派手で淡い点1個になること、ring が `large` を保つことと、満杯の cache で強い小さい粒が大きい粒を押し出さないこと、雨が弱い粒も発行し `large` が閾値と一致することである。
+- 既存の音の test（容量・有限性・heap 0）は変更なしで成功した。小さい粒の発行は world の乱数を引かない。
+- 実窓の見え方と native E2E は、このセッションが画面ロック中のため行っていない。
+
+### 未確認範囲
+
+- 標準・派手での小さい粒の見え方・数・明るさの好み、控えめが従来と同じに見えること（実窓では未観測）。
+- 全粒を発行したことによる、実機でのイベント量と描画負荷（雨は量最大で毎秒約46個）。
+- 設定窓の「演出の強さ」の SegmentedControl の実窓での操作（macOS の実機・AX では未観測）。

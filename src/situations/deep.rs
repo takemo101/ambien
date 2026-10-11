@@ -47,6 +47,9 @@ static KNOBS: [KnobDefinition; 2] = [
 // volume; this brings it level with the other voices.
 const OUTPUT_TRIM: f32 = 4.0;
 const MAX_BUBBLES: usize = 24;
+/// Bubble strength (before depth dimming) from which a bubble is a large one, drawn at every
+/// intensity.
+const LARGE_FROM: f32 = 0.68;
 const PITCH_SECONDS: f64 = 1.0 / 200.0;
 // Bubbles per second at full air (it was 3.6), and the shares of birth events that start a
 // cluster of quick bubbles or one big air bubble.
@@ -345,19 +348,19 @@ impl DeepVoice {
             return false;
         };
         grain.start(self.tone, strength, x, y, scale, self.sample_rate);
-        // Select stronger admitted bubbles BEFORE depth dimming. The same
-        // physical pan, dimmed strength, radius and slowed lifetime drive
-        // sound and SlowGlow; visual capacity never feeds back into audio.
-        if strength >= 0.68 {
-            events.emit(ParticleVisual {
-                x: Normalized::new(x).expect("bounded bubble x"),
-                y: Normalized::new(grain.y).expect("bounded bubble y"),
-                strength: Normalized::new(grain.strength).expect("bounded bubble strength"),
-                radius: LogicalPixels::new(grain.radius).expect("finite bubble radius"),
-                shape: VISUAL.shape,
-                lifetime: Duration::from_secs_f64(grain.lifetime),
-            });
-        }
+        // Every admitted bubble is published; the large ones are chosen BEFORE depth dimming and
+        // marked, so depth never changes which bubbles show at the calm level. The same physical
+        // pan, dimmed strength, radius and slowed lifetime drive sound and SlowGlow; visual
+        // capacity never feeds back into audio.
+        events.emit(ParticleVisual {
+            x: Normalized::new(x).expect("bounded bubble x"),
+            y: Normalized::new(grain.y).expect("bounded bubble y"),
+            strength: Normalized::new(grain.strength).expect("bounded bubble strength"),
+            radius: LogicalPixels::new(grain.radius).expect("finite bubble radius"),
+            shape: VISUAL.shape,
+            large: strength >= LARGE_FROM,
+            lifetime: Duration::from_secs_f64(grain.lifetime),
+        });
         true
     }
 

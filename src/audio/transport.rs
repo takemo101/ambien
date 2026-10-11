@@ -31,6 +31,7 @@ pub(crate) struct ParticleVisual {
     pub(crate) strength: Normalized,
     pub(crate) radius: LogicalPixels,
     pub(crate) shape: VisualShape,
+    pub(crate) large: bool,
     pub(crate) lifetime: Duration,
 }
 
@@ -45,6 +46,8 @@ pub(crate) struct VisualEvent {
     pub(crate) strength: Normalized,
     pub(crate) radius: LogicalPixels,
     pub(crate) shape: VisualShape,
+    /// A large particle is drawn at every intensity; a small one only at standard and vivid.
+    pub(crate) large: bool,
     pub(crate) lifetime: Duration,
     pub(crate) serial: u64,
 }
@@ -123,6 +126,7 @@ impl<'a> VisualWriter<'a> {
             strength: particle.strength,
             radius: particle.radius,
             shape: particle.shape,
+            large: particle.large,
             lifetime: particle.lifetime,
             serial: 0,
         });
@@ -361,8 +365,9 @@ fn contains_serial(events: &[Option<VisualEvent>], serial: u64) -> bool {
 }
 
 fn stronger(left: VisualEvent, right: VisualEvent) -> bool {
-    left.strength.get() > right.strength.get()
-        || (left.strength == right.strength && left.serial > right.serial)
+    // A large particle outranks any small one; among equals, the stronger and then newer wins.
+    (left.large, left.strength.get(), left.serial)
+        > (right.large, right.strength.get(), right.serial)
 }
 
 fn begin_publication(sequence: &AtomicU64) -> Option<u64> {
@@ -374,6 +379,10 @@ fn begin_publication(sequence: &AtomicU64) -> Option<u64> {
     sequence.store(next - 1, Ordering::SeqCst);
     Some(next)
 }
+
+// The shape word also carries whether the particle is a large one (drawn in every intensity).
+const SHAPE_MASK: u32 = 0xff;
+const LARGE_BIT: u32 = 1 << 8;
 
 struct EventSlot {
     sequence: AtomicU64,
@@ -425,7 +434,10 @@ impl EventSlot {
             .store(event.strength.get().to_bits(), Ordering::SeqCst);
         self.radius
             .store(event.radius.get().to_bits(), Ordering::SeqCst);
-        self.shape.store(event.shape as u32, Ordering::SeqCst);
+        self.shape.store(
+            event.shape as u32 | if event.large { LARGE_BIT } else { 0 },
+            Ordering::SeqCst,
+        );
         self.lifetime.store(lifetime, Ordering::SeqCst);
         self.sequence.store(sequence, Ordering::SeqCst);
         true
@@ -453,12 +465,13 @@ impl EventSlot {
             y: Normalized::new(f32::from_bits(self.y.load(Ordering::SeqCst)))?,
             strength: Normalized::new(f32::from_bits(self.strength.load(Ordering::SeqCst)))?,
             radius: LogicalPixels::new(f32::from_bits(self.radius.load(Ordering::SeqCst)))?,
-            shape: match self.shape.load(Ordering::SeqCst) {
+            shape: match self.shape.load(Ordering::SeqCst) & SHAPE_MASK {
                 0 => VisualShape::Point,
                 1 => VisualShape::Impact,
                 2 => VisualShape::SlowGlow,
                 _ => return None,
             },
+            large: self.shape.load(Ordering::SeqCst) & LARGE_BIT != 0,
             lifetime: Duration::from_nanos(self.lifetime.load(Ordering::SeqCst)),
         };
         (self.sequence.load(Ordering::SeqCst) == before).then_some(event)
@@ -928,6 +941,7 @@ mod tests {
             strength: Normalized::new(strength).unwrap(),
             radius: LogicalPixels::new(2.0).unwrap(),
             shape: VisualShape::Point,
+            large: true,
             lifetime: Duration::from_nanos(100),
             serial: 0,
         }
@@ -949,6 +963,7 @@ mod tests {
             strength: Normalized::ONE,
             radius: LogicalPixels::new(2.0).unwrap(),
             shape: VisualShape::Point,
+            large: true,
             lifetime: Duration::from_nanos(100),
         };
         writer.set_contributing(false);
@@ -986,6 +1001,7 @@ mod tests {
             strength: Normalized::ONE,
             radius: LogicalPixels::new(2.0).unwrap(),
             shape: VisualShape::Point,
+            large: true,
             lifetime: Duration::from_secs(u64::MAX),
         };
         assert!(!writer.emit(particle));
@@ -1089,6 +1105,32 @@ mod tests {
             VISIBLE_CAPACITY
         );
         assert!(cache.iter().all(|item| item.unwrap().strength.get() > 0.0));
+    }
+
+    #[test]
+    fn a_large_particle_is_kept_over_a_stronger_small_one_when_the_cache_is_full() {
+        let ring = VisualRing::new(EVENT_CAPACITY, 1);
+        for world in 1..=VISIBLE_CAPACITY as u64 {
+            assert!(ring.push_event(event(world, 0, 0.05)));
+        }
+        // A small event that is far stronger than every large one still ranks below them.
+        let mut small = event(VISIBLE_CAPACITY as u64 + 1, 0, 1.0);
+        small.large = false;
+        assert!(ring.push_event(small));
+        let mut cache = [None; VISIBLE_CAPACITY];
+        assert_eq!(
+            ring.read_live_into(epoch(1), MachNanos::new(1), &mut cache),
+            VISIBLE_CAPACITY
+        );
+        assert!(cache.iter().all(|item| item.unwrap().large));
+        // The flag survives the ring.
+        let mut flagged = [None; VISIBLE_CAPACITY];
+        let only_small = VisualRing::new(EVENT_CAPACITY, 1);
+        let mut one = event(1, 0, 0.5);
+        one.large = false;
+        assert!(only_small.push_event(one));
+        only_small.read_live_into(epoch(1), MachNanos::new(1), &mut flagged);
+        assert!(!flagged[0].unwrap().large);
     }
 
     #[test]
