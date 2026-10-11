@@ -108,6 +108,11 @@ impl OutputStatus {
         matches!(self, Self::Running { .. })
     }
 
+    /// Running with nothing to report: no xrun and no denied real-time priority.
+    pub(crate) fn is_normal(&self) -> bool {
+        matches!(self, Self::Running { notices, .. } if *notices == 0)
+    }
+
     pub(crate) fn text(&self) -> String {
         match self {
             Self::Starting => "標準出力を準備しています。".into(),
@@ -873,5 +878,22 @@ mod tests {
         assert!(
             matches!(shared.snapshot().0, OutputStatus::Failed { reason, .. } if reason == "output paused")
         );
+    }
+
+    #[test]
+    fn only_a_running_output_with_no_warning_counts_as_normal() {
+        let running = |notices| OutputStatus::Running {
+            epoch: StreamEpoch::new(1).unwrap(),
+            sample_rate: 48_000,
+            channels: 2,
+            format: cpal::SampleFormat::F32,
+            notices,
+        };
+        assert!(running(0).is_normal());
+        // A delayed or non-real-time output is still "running" but must not look normal: the
+        // settings window shows it as a notice.
+        assert!(!running(ErrorCode::XRUN).is_normal());
+        assert!(!running(ErrorCode::REALTIME_DENIED).is_normal());
+        assert!(!OutputStatus::Starting.is_normal());
     }
 }

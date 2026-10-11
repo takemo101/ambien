@@ -479,15 +479,7 @@ impl AppModel {
             self.controls.blur,
             None,
             move |window, cx| {
-                SettingsView::new(
-                    window,
-                    cx,
-                    status.text(),
-                    source,
-                    controls,
-                    receipt,
-                    notices,
-                )
+                SettingsView::new(window, cx, &status, source, controls, receipt, notices)
             },
             cx,
         )?;
@@ -617,7 +609,7 @@ impl AppModel {
         });
         if let Err(error) = handle.update(cx, |view, _, cx| {
             view.update_audio(
-                status.text(),
+                &status,
                 source,
                 Some(&self.controls),
                 receipt,
