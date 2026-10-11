@@ -20,7 +20,7 @@ use crate::{
     ui::{
         appearance::{AccessibilityState, Motion},
         backdrop,
-        look::{Mark, ParticleInput, look, mark_cap},
+        look::{Budget, Mark, ParticleInput, look},
     },
 };
 
@@ -361,8 +361,9 @@ impl SceneView {
                     );
                 }
             }
-            // When many particles are alive each gets fewer decoration marks; the core light is
-            // always the first mark, so it is never the one given up.
+            // When many particles are alive each gets fewer decoration marks, and the frame has a
+            // fixed number of blurred shadows; the core light is always the first mark, so it is
+            // never the one given up.
             let live = self
                 .particles
                 .events
@@ -370,7 +371,7 @@ impl SceneView {
                 .flatten()
                 .filter(|event| self.particles.particle_frame(event, self.motion).is_some())
                 .count();
-            let cap = mark_cap(live);
+            let mut budget = Budget::new(live);
             for event in self.particles.events.iter().flatten() {
                 let Some((age, opacity)) = self.particles.particle_frame(event, self.motion) else {
                     continue;
@@ -394,8 +395,10 @@ impl SceneView {
                     },
                     self.motion,
                 );
-                for mark in look.marks().take(cap) {
-                    paint_mark(window, bounds, position, mark);
+                for (index, mark) in look.marks().enumerate() {
+                    if budget.allows(index, mark) {
+                        paint_mark(window, bounds, position, mark);
+                    }
                 }
             }
         });
@@ -514,6 +517,25 @@ fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
             rgb,
             opacity,
         } => paint_glow_at(window, viewport, position, offset, radius, rgb, opacity),
+        Mark::Haze {
+            offset,
+            radius,
+            rgb,
+            opacity,
+        } => {
+            let bounds = disc_bounds(viewport, position, offset, radius);
+            window.paint_drop_shadows(
+                bounds,
+                px(radius).into(),
+                &[BoxShadow {
+                    color: rgba(rgb, opacity),
+                    offset: point(px(0.0), px(0.0)),
+                    blur_radius: px(radius * 0.6),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }],
+            );
+        }
         Mark::Ring {
             offset,
             radius,
