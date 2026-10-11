@@ -1,17 +1,32 @@
 //! What one visible particle looks like, decided from its event values alone.
 //!
-//! The same event at the same age always gives the same marks: colour spread, ripple, shards and
-//! trail all come from the event's own numbers (shape, strength, radius, serial) and its age, never
-//! from a random source in the painter. The result is a few plain marks the scene turns into
-//! quads; nothing here allocates or touches the GPU, so the rules are testable on their own.
+//! The same event at the same age always gives the same marks: colour spread, ripples, splash,
+//! shards, bubbles and every texture all come from the event's own numbers (shape, strength,
+//! radius, serial) and its age, never from a random source in the painter. The result is a few
+//! hundred bytes of plain marks the scene turns into quads; nothing here allocates or touches the
+//! GPU, so the rules are testable on their own.
+
+mod scatter;
 
 use std::f32::consts::TAU;
 
 use crate::{controls::VisualIntensity, situations::VisualShape, ui::appearance::Motion};
+use scatter::{Scatter, lead_ring_radius, scatter};
 
-/// The most marks one particle can have (a vivid drop: core, two ripples, bead, bloom, bokeh,
-/// glint, two prism fringes and a three-bead tail).
-pub(crate) const MAX_MARKS: usize = 14;
+/// The most marks one particle can have (a vivid rock impact: core, shock ring, up to twenty
+/// shards, sparks, dust and the texture marks).
+pub(crate) const MAX_MARKS: usize = 48;
+
+/// The most decoration marks the scene draws in one frame, over every live particle.
+pub(crate) const MARK_BUDGET: usize = 1800;
+/// A particle always keeps at least this many marks (its core light comes first).
+const MIN_MARKS: usize = 6;
+
+/// How many marks each live particle may draw this frame, so the total stays near the budget:
+/// the finest decorations are given up first and the core light never is.
+pub(crate) fn mark_cap(live: usize) -> usize {
+    (MARK_BUDGET / live.max(1)).clamp(MIN_MARKS, MAX_MARKS)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mark {
@@ -22,8 +37,9 @@ pub(crate) enum Mark {
         rgb: [f32; 3],
         opacity: f32,
     },
-    /// A thin circle: a ripple or a shock wave, centred on the particle.
+    /// A thin circle: a ripple, a shock wave or a bubble's outline, at an offset from the particle.
     Ring {
+        offset: [f32; 2],
         radius: f32,
         width: f32,
         rgb: [f32; 3],
@@ -195,6 +211,7 @@ fn texture(
     }
     if core >= 1.0 {
         look.push(Mark::Ring {
+            offset: [0.0, 0.0],
             radius: core,
             width: 1.0,
             rgb: if dark {
@@ -232,13 +249,10 @@ fn texture(
     match input.shape {
         VisualShape::Point | VisualShape::Impact => {
             // Rainbow fringes just outside the ripple or shock ring.
-            let ring = if input.shape == VisualShape::Point {
-                radius * (1.2 + 3.6 * age)
-            } else {
-                radius * (1.0 + 2.6 * age)
-            };
+            let ring = lead_ring_radius(input.shape, radius, age);
             for (index, forward) in [true, false].into_iter().enumerate() {
                 look.push(Mark::Ring {
+                    offset: [0.0, 0.0],
                     radius: ring * (1.08 + 0.1 * index as f32),
                     width: 1.0,
                     rgb: rotate(rgb, forward, 0.75),
@@ -296,92 +310,32 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
     }
     let core = radius * motion.shape_scale(input.shape, age);
     let still = motion == Motion::Reduced;
-    match input.shape {
-        VisualShape::Point => {
-            look.push(Mark::Glow {
-                offset: [0.0, 0.0],
-                radius: core,
+    // A deep bubble's outline breathes a little; the others hold their size.
+    let wobble = if input.shape == VisualShape::SlowGlow && !still {
+        1.0 + 0.07 * (TAU * (age * 1.5 + phase)).sin()
+    } else {
+        1.0
+    };
+    look.push(Mark::Glow {
+        offset: [0.0, 0.0],
+        radius: core * wobble,
+        rgb,
+        opacity,
+    });
+    if !still {
+        scatter(
+            &mut look,
+            &Scatter {
+                shape: input.shape,
+                intensity: input.intensity,
                 rgb,
+                radius,
+                strength,
+                age,
                 opacity,
-            });
-            if !still {
-                // A drop landing: a ripple spreads out and thins away; a strong drop sends a
-                // second, later ripple after it.
-                look.push(Mark::Ring {
-                    radius: radius * (1.2 + 3.6 * age),
-                    width: 1.4,
-                    rgb,
-                    opacity: opacity * 0.7,
-                });
-                if strength >= 0.8 && age > 0.2 {
-                    let later = (age - 0.2) / 0.8;
-                    look.push(Mark::Ring {
-                        radius: radius * (1.0 + 3.0 * later),
-                        width: 1.0,
-                        rgb,
-                        opacity: opacity * 0.4,
-                    });
-                }
-            }
-        }
-        VisualShape::Impact => {
-            look.push(Mark::Glow {
-                offset: [0.0, 0.0],
-                radius: core,
-                rgb,
-                opacity,
-            });
-            if !still {
-                // A shock ring that thins as it spreads, and a few shards thrown out of it in
-                // directions that belong to this impact.
-                look.push(Mark::Ring {
-                    radius: radius * (1.0 + 2.6 * age),
-                    width: 0.5 + 1.5 * (1.0 - age),
-                    rgb,
-                    opacity: opacity * 0.9,
-                });
-                let shards = if strength > 0.8 { 4 } else { 3 };
-                let reach = radius * (0.6 + 2.8 * age.powf(0.7));
-                for index in 0..shards {
-                    let angle = TAU * (index as f32 / shards as f32 + phase);
-                    look.push(Mark::Dot {
-                        offset: [angle.cos() * reach, angle.sin() * reach],
-                        radius: (radius * 0.16 * (1.0 - age)).max(0.8),
-                        rgb,
-                        opacity: opacity * 0.8,
-                    });
-                }
-            }
-        }
-        VisualShape::SlowGlow => {
-            // The outline breathes a little; a bubble also leaves a short trail of beads below
-            // it as it rises.
-            let wobble = if still {
-                1.0
-            } else {
-                1.0 + 0.07 * (TAU * (age * 1.5 + phase)).sin()
-            };
-            look.push(Mark::Glow {
-                offset: [0.0, 0.0],
-                radius: core * wobble,
-                rgb,
-                opacity,
-            });
-            if !still {
-                for step in 1..=3_u8 {
-                    let step = f32::from(step);
-                    look.push(Mark::Dot {
-                        offset: [
-                            (TAU * (phase + step * 0.31)).sin() * radius * 0.15,
-                            radius * 0.9 * step * (0.4 + age),
-                        ],
-                        radius: (radius * (0.55 - 0.12 * step)).max(0.8),
-                        rgb,
-                        opacity: opacity * (0.45 / step),
-                    });
-                }
-            }
-        }
+                serial: input.serial,
+            },
+        );
     }
     if !still && input.intensity != VisualIntensity::Calm {
         texture(
@@ -472,40 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn full_motion_adds_the_ripple_shards_and_trail_of_each_shape() {
-        let count = |shape, strength| {
-            look(&input(shape, 0.5, strength, 3), Motion::Full)
-                .marks()
-                .count()
-        };
-        let rings = |shape, strength| {
-            look(&input(shape, 0.5, strength, 3), Motion::Full)
-                .marks()
-                .filter(|mark| matches!(mark, Mark::Ring { .. }))
-                .count()
-        };
-        let dots = |shape, strength| {
-            look(&input(shape, 0.5, strength, 3), Motion::Full)
-                .marks()
-                .filter(|mark| matches!(mark, Mark::Dot { .. }))
-                .count()
-        };
-        // Rain: a ripple, and a second one only for a strong drop.
-        assert_eq!(rings(VisualShape::Point, 0.5), 1);
-        assert_eq!(rings(VisualShape::Point, 0.95), 2);
-        // Rock: a shock ring and three or four shards.
-        assert_eq!(rings(VisualShape::Impact, 0.5), 1);
-        assert_eq!(dots(VisualShape::Impact, 0.5), 3);
-        assert_eq!(dots(VisualShape::Impact, 0.95), 4);
-        // Deep: a three-bead trail and no rings.
-        assert_eq!(dots(VisualShape::SlowGlow, 0.5), 3);
-        assert_eq!(rings(VisualShape::SlowGlow, 0.5), 0);
-        for shape in SHAPES {
-            assert!(count(shape, 1.0) <= MAX_MARKS);
-        }
-    }
-
-    #[test]
     fn a_ripple_spreads_and_a_shock_ring_leaves_the_core_over_the_particles_life() {
         let ring_radius = |shape, age| {
             look(&input(shape, age, 0.5, 3), Motion::Full)
@@ -592,22 +512,44 @@ mod tests {
     }
 
     #[test]
-    fn standard_adds_a_glass_bead_and_vivid_adds_glints_bloom_and_more() {
+    fn each_intensity_has_more_marks_and_only_vivid_has_glints() {
         for shape in SHAPES {
-            let count = |intensity| marks_of(&at(shape, intensity, true), Motion::Full).len();
-            let calm = count(VisualIntensity::Calm);
-            // A rim ring and a highlight dot.
-            assert_eq!(count(VisualIntensity::Standard), calm + 2, "{shape:?}");
-            assert!(count(VisualIntensity::Vivid) > calm + 2, "{shape:?}");
-            let standard = marks_of(&at(shape, VisualIntensity::Standard, true), Motion::Full);
-            assert!(
-                !standard
-                    .iter()
-                    .any(|mark| matches!(mark, Mark::Cross { .. })),
-                "standard has no glints"
+            let marks = |intensity| marks_of(&at(shape, intensity, true), Motion::Full);
+            let (calm, standard, vivid) = (
+                marks(VisualIntensity::Calm),
+                marks(VisualIntensity::Standard),
+                marks(VisualIntensity::Vivid),
             );
-            let vivid = marks_of(&at(shape, VisualIntensity::Vivid, true), Motion::Full);
-            assert!(vivid.iter().any(|mark| matches!(mark, Mark::Cross { .. })));
+            // Standard adds the glass bead (a rim ring and a highlight) and a bigger scatter.
+            assert!(standard.len() >= calm.len() + 2, "{shape:?}");
+            assert!(vivid.len() > standard.len(), "{shape:?}");
+            let glints = |marks: &[Mark]| {
+                marks
+                    .iter()
+                    .filter(|mark| matches!(mark, Mark::Cross { .. }))
+                    .count()
+            };
+            assert_eq!((glints(&calm), glints(&standard)), (0, 0), "{shape:?}");
+            assert!(glints(&vivid) >= 1, "{shape:?}");
+        }
+    }
+
+    #[test]
+    fn the_mark_cap_shrinks_with_the_crowd_but_keeps_the_core_and_the_budget() {
+        assert_eq!(mark_cap(0), MAX_MARKS);
+        assert_eq!(mark_cap(1), MAX_MARKS);
+        let mut previous = MAX_MARKS;
+        for live in 1..=512 {
+            let cap = mark_cap(live);
+            assert!(cap <= previous, "never grows with more particles");
+            assert!(cap >= MIN_MARKS, "the core light always stays");
+            if cap > MIN_MARKS {
+                assert!(
+                    cap * live <= MARK_BUDGET,
+                    "{live} particles stay within the budget"
+                );
+            }
+            previous = cap;
         }
     }
 
@@ -704,12 +646,16 @@ mod tests {
                                                 opacity,
                                             ),
                                             Mark::Ring {
+                                                offset,
                                                 radius,
                                                 width,
                                                 rgb,
                                                 opacity,
                                             } => (
-                                                vec![radius, width, rgb[0], rgb[1], rgb[2]],
+                                                vec![
+                                                    offset[0], offset[1], radius, width, rgb[0],
+                                                    rgb[1], rgb[2],
+                                                ],
                                                 opacity,
                                             ),
                                             Mark::Cross {

@@ -20,7 +20,7 @@ use crate::{
     ui::{
         appearance::{AccessibilityState, Motion},
         backdrop,
-        look::{Mark, ParticleInput, look},
+        look::{Mark, ParticleInput, look, mark_cap},
     },
 };
 
@@ -361,6 +361,16 @@ impl SceneView {
                     );
                 }
             }
+            // When many particles are alive each gets fewer decoration marks; the core light is
+            // always the first mark, so it is never the one given up.
+            let live = self
+                .particles
+                .events
+                .iter()
+                .flatten()
+                .filter(|event| self.particles.particle_frame(event, self.motion).is_some())
+                .count();
+            let cap = mark_cap(live);
             for event in self.particles.events.iter().flatten() {
                 let Some((age, opacity)) = self.particles.particle_frame(event, self.motion) else {
                     continue;
@@ -384,7 +394,7 @@ impl SceneView {
                     },
                     self.motion,
                 );
-                for mark in look.marks() {
+                for mark in look.marks().take(cap) {
                     paint_mark(window, bounds, position, mark);
                 }
             }
@@ -505,12 +515,13 @@ fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2],
             opacity,
         } => paint_glow_at(window, viewport, position, offset, radius, rgb, opacity),
         Mark::Ring {
+            offset,
             radius,
             width,
             rgb,
             opacity,
         } => {
-            let bounds = disc_bounds(viewport, position, [0.0, 0.0], radius);
+            let bounds = disc_bounds(viewport, position, offset, radius);
             window.paint_quad(
                 outline(bounds, rgba(rgb, opacity), BorderStyle::default())
                     .border_widths(px(width))

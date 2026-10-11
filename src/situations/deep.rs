@@ -50,6 +50,9 @@ const MAX_BUBBLES: usize = 24;
 /// Bubble strength (before depth dimming) from which a bubble is a large one, drawn at every
 /// intensity.
 const LARGE_FROM: f32 = 0.68;
+/// Bubbles are drawn rising for at least this long (more for a strong one); the audio grain is
+/// unchanged.
+const BUBBLE_SECONDS: f64 = 3.2;
 const PITCH_SECONDS: f64 = 1.0 / 200.0;
 // Bubbles per second at full air (it was 3.6), and the shares of birth events that start a
 // cluster of quick bubbles or one big air bubble.
@@ -350,8 +353,9 @@ impl DeepVoice {
         grain.start(self.tone, strength, x, y, scale, self.sample_rate);
         // Every admitted bubble is published; the large ones are chosen BEFORE depth dimming and
         // marked, so depth never changes which bubbles show at the calm level. The same physical
-        // pan, dimmed strength, radius and slowed lifetime drive sound and SlowGlow; visual
-        // capacity never feeds back into audio.
+        // pan, dimmed strength and radius drive sound and SlowGlow. The picture lasts as long as
+        // the slowed audio lifetime or the bubble floor (BUBBLE_SECONDS plus the undimmed
+        // strength), whichever is longer; visual capacity never feeds back into audio.
         events.emit(ParticleVisual {
             x: Normalized::new(x).expect("bounded bubble x"),
             y: Normalized::new(grain.y).expect("bounded bubble y"),
@@ -359,7 +363,11 @@ impl DeepVoice {
             radius: LogicalPixels::new(grain.radius).expect("finite bubble radius"),
             shape: VISUAL.shape,
             large: strength >= LARGE_FROM,
-            lifetime: Duration::from_secs_f64(grain.lifetime),
+            lifetime: Duration::from_secs_f64(
+                grain
+                    .lifetime
+                    .max(BUBBLE_SECONDS + 1.0 * f64::from(strength)),
+            ),
         });
         true
     }
@@ -901,7 +909,9 @@ mod behavioral_tests {
                     assert_eq!(grain.pan, [angle.cos(), angle.sin()]);
                     assert_eq!(grain.y, event.y.get());
                     assert_eq!(grain.radius, event.radius.get());
-                    assert_eq!(Duration::from_secs_f64(grain.lifetime), event.lifetime);
+                    // The picture lasts at least as long as the sound and the bubble floor.
+                    assert!(event.lifetime >= Duration::from_secs_f64(grain.lifetime));
+                    assert!(event.lifetime >= Duration::from_secs_f64(BUBBLE_SECONDS));
                     assert_eq!(event.shape, VisualShape::SlowGlow);
                     observed = true;
                 }

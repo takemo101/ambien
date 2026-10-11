@@ -57,6 +57,8 @@ const OUTPUT_TRIM: f32 = 6.0;
 const MAX_COLLISIONS: usize = 24;
 /// Collision strength from which an impact is a large one, drawn at every intensity.
 const LARGE_FROM: f32 = 0.68;
+/// A burst is drawn for at least this long (more for a hard hit); the audio grain is unchanged.
+const BURST_SECONDS: f64 = 0.9;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.65, 0.65, 0.65],
     shape: VisualShape::Impact,
@@ -512,8 +514,9 @@ impl Voice for RockVoice {
             };
             grain.start(self.tone, strength, x, y, scale, frame.sample_rate);
             // Admission and every physical choice precede visual publication. Every collision is
-            // published; stronger ones are marked large and share the actual audio pan, scale and
-            // lifetime. Ring overwrite cannot change sound or the world random sequence.
+            // published; stronger ones are marked large and share the actual audio pan and scale.
+            // The picture lasts at least as long as the audio grain (see BURST_SECONDS). Ring
+            // overwrite cannot change sound or the world random sequence.
             events.emit(ParticleVisual {
                 x: Normalized::new(x).expect("bounded collision x"),
                 y: Normalized::new(grain.y).expect("bounded collision y"),
@@ -521,7 +524,11 @@ impl Voice for RockVoice {
                 radius: LogicalPixels::new(grain.radius).expect("finite collision radius"),
                 shape: VISUAL.shape,
                 large: strength >= LARGE_FROM,
-                lifetime: Duration::from_secs_f64(grain.lifetime),
+                lifetime: Duration::from_secs_f64(
+                    grain
+                        .lifetime
+                        .max(BURST_SECONDS + 0.3 * f64::from(grain.strength)),
+                ),
             });
         }
     }
@@ -1051,7 +1058,9 @@ mod tests {
                     assert_eq!(grain.pan, [angle.cos(), angle.sin()]);
                     assert_eq!(grain.y, event.y.get());
                     assert_eq!(grain.radius, event.radius.get());
-                    assert_eq!(Duration::from_secs_f64(grain.lifetime), event.lifetime);
+                    // The picture lasts at least as long as the sound and the burst floor.
+                    assert!(event.lifetime >= Duration::from_secs_f64(grain.lifetime));
+                    assert!(event.lifetime >= Duration::from_secs_f64(BURST_SECONDS));
                     assert_eq!(event.shape, VisualShape::Impact);
                     observed = true;
                 }
