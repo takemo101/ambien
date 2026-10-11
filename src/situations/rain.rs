@@ -21,15 +21,15 @@ use super::{
     },
 };
 
-// Calm starting candidates for initial real output, NOT listening-certified P13
-// defaults. Frequency, room and level coefficients below have the same status.
+// Coefficients and initial values below were settled by user listening (P13); see
+// docs/verification.md for what was and was not observed.
 static KNOBS: [KnobDefinition; 2] = [
     KnobDefinition {
         id: "amount",
         label: "雨の量",
         initial: match Normalized::new(0.34) {
             Some(value) => value,
-            None => panic!("candidate out of range"),
+            None => panic!("initial out of range"),
         },
     },
     KnobDefinition {
@@ -37,11 +37,14 @@ static KNOBS: [KnobDefinition; 2] = [
         label: "風の量",
         initial: match Normalized::new(0.12) {
             Some(value) => value,
-            None => panic!("candidate out of range"),
+            None => panic!("initial out of range"),
         },
     },
 ];
 
+// Loudness trim, settled in P13 listening: the raw rain measured -40.8 dBFS RMS at 100% app
+// volume; this balances it with the other voices, keeping peak headroom.
+const OUTPUT_TRIM: f32 = 2.0;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.50, 0.72, 0.92],
     shape: VisualShape::Point,
@@ -150,6 +153,41 @@ impl Grain {
     }
 }
 
+// Drop impacts per second at full rain amount. Above a few thousand per second the impacts
+// fuse into noise; at light rain they stay individually audible.
+const SHOT_RATE_MAX: f32 = 8_000.0;
+// Impact amplitudes are uniform in 0.3..1 with random sign: E[a^2] = 0.463.
+const SHOT_POWER: f32 = 0.463;
+
+/// Per-impact amplitude giving the same RMS at full amount as the unit-variance-1/3 noise
+/// (uniform -1..1) this bed replaced, at any sample rate.
+fn shot_amplitude(sample_rate: u32) -> f32 {
+    (sample_rate as f32 / (SHOT_RATE_MAX * SHOT_POWER)).sqrt() * (1.0_f32 / 3.0).sqrt()
+}
+
+fn splitmix(seed: u64) -> u64 {
+    let mut value = seed.wrapping_add(0x9e3779b97f4a7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    (value ^ (value >> 31)) | 1
+}
+
+/// One audio-side sample of the impact train: xorshift64* per channel, separate from the
+/// world PRNG. Zero most of the time; at a hit a random-sign amplitude in 0.3..1.
+fn next_shot(state: &mut u64, probability: f32) -> f32 {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    let bits = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+    let chance = (bits >> 40) as f32 * (1.0 / 16_777_216.0);
+    if chance >= probability {
+        return 0.0;
+    }
+    let size = ((bits >> 16) & 0x00ff_ffff) as f32 * (1.0 / 16_777_216.0);
+    let sign = if bits & 1 == 0 { 1.0 } else { -1.0 };
+    sign * (0.3 + 0.7 * size)
+}
+
 struct RainVoice {
     sample_rate: u32,
     dry_delay: Option<VoiceLatencyFrames>,
@@ -166,7 +204,12 @@ struct RainVoice {
     wind_cutoff: f32,
     wet_level: f32,
     wind_pan: [f32; 2],
+    shot_state: [u64; 2],
+    shot_probability: f32,
+    shot_amplitude: f32,
     rain_noise: [Noise; 2],
+    shot_gain: f32,
+    noise_gain: f32,
     rain_pink: [Pinkpass<f32>; 2],
     rain_filters: [[Lowpole<f32, U2>; 2]; 2],
     wind_noise: Noise,
@@ -185,15 +228,6 @@ impl RainVoice {
         let reverb = RestartableReverb::new(config.sample_rate)?;
         let mut random = WorldRandom::new(config.seed);
         let poisson = Poisson::new(&mut random);
-        let mut rain_noise = [Noise::new(), Noise::new()];
-        for (index, noise) in rain_noise.iter_mut().enumerate() {
-            noise.set_hash(
-                config
-                    .seed
-                    .wrapping_add(0x3c6ef372fe94f82a)
-                    .wrapping_add(index as u64),
-            );
-        }
         let mut wind_noise = Noise::new();
         wind_noise.set_hash(config.seed.wrapping_add(0xa54ff53a5f1d36f1));
         let mut voice = Self {
@@ -212,7 +246,23 @@ impl RainVoice {
             wind_cutoff: 220.0,
             wet_level: 0.12,
             wind_pan: [std::f32::consts::FRAC_1_SQRT_2; 2],
-            rain_noise,
+            shot_state: std::array::from_fn(|index| {
+                splitmix(config.seed.wrapping_add(0x3c6ef372fe94f82a + index as u64))
+            }),
+            shot_probability: 0.0,
+            shot_amplitude: shot_amplitude(config.sample_rate),
+            rain_noise: std::array::from_fn(|index| {
+                let mut noise = Noise::new();
+                noise.set_hash(
+                    config
+                        .seed
+                        .wrapping_add(0x3c6ef372fe94f82a)
+                        .wrapping_add(index as u64),
+                );
+                noise
+            }),
+            shot_gain: 1.0,
+            noise_gain: 0.0,
             rain_pink: std::array::from_fn(|_| Pinkpass::new()),
             rain_filters: std::array::from_fn(|_| {
                 std::array::from_fn(|_| {
@@ -293,7 +343,24 @@ impl Voice for RainVoice {
         // endpoint gates. Independent wind never depends on rain amount.
         let rain_amount = amount + amount * (1.0 - amount) * weather * 0.10;
         let wind_amount = wind + wind * (1.0 - wind) * weather * 0.08;
-        self.rain_level = 0.065 * rain_amount.sqrt() * (1.0 + breath * 0.14);
+        // P13: the bed is a Poisson train of tiny drop impacts, not a Gaussian noise generator.
+        // Few impacts per second are heard as separate fine drops; many overlap into the
+        // familiar rain noise. Amplitude per impact is fixed, so level follows sqrt(rate).
+        // The bed gate is exact at amount 0; the amount sets how many drops fall per second.
+        self.rain_level = if rain_amount > 0.0 {
+            0.065 * (1.0 + breath * 0.14)
+        } else {
+            0.0
+        };
+        self.shot_probability = (SHOT_RATE_MAX * rain_amount * rain_amount * rain_amount.sqrt()
+            / frame.sample_rate as f32)
+            .min(1.0);
+        // Equal-power cross from the drop impacts (light rain) into white noise (heavy rain).
+        // The noise weight is the cube of the amount, so it is inaudible until the rain is
+        // heavy; both beds are calibrated to the same level at full amount.
+        let noise_weight = rain_amount * rain_amount * rain_amount;
+        self.shot_gain = (1.0 - noise_weight).sqrt();
+        self.noise_gain = noise_weight.sqrt() * rain_amount.powf(1.25);
         self.wind_level = 0.085 * wind_amount * (1.0 + breath * 0.18);
         self.breath_intensity =
             Normalized::new(rain_amount.sqrt().max(wind_amount) * (0.5 + breath * 0.10))
@@ -351,10 +418,14 @@ impl Voice for RainVoice {
         let mut dry = [0.0; 2];
         if self.rain_level != 0.0 {
             for (index, output) in dry.iter_mut().enumerate() {
-                let white = self.rain_noise[index].tick(&Default::default())[0];
-                let pink = self.rain_pink[index].tick(&[white].into())[0];
+                let white = self.rain_noise[index].tick(&Default::default())[0] * self.noise_gain;
+                let impulse = next_shot(&mut self.shot_state[index], self.shot_probability)
+                    * self.shot_amplitude
+                    * self.shot_gain;
+                let source = impulse + white;
+                let pink = self.rain_pink[index].tick(&[source].into())[0];
                 let first = self.rain_filters[index][0]
-                    .tick(&[0.72 * white + 0.28 * pink, self.rain_cutoff].into())[0];
+                    .tick(&[0.72 * source + 0.28 * pink, self.rain_cutoff].into())[0];
                 *output = self.rain_filters[index][1].tick(&[first, self.rain_cutoff].into())[0]
                     * self.rain_level;
             }
@@ -379,8 +450,8 @@ impl Voice for RainVoice {
         }
         let wet = self.reverb.tick(dry);
         [
-            dry[0] + wet[0] * self.wet_level,
-            dry[1] + wet[1] * self.wet_level,
+            (dry[0] + wet[0] * self.wet_level) * OUTPUT_TRIM,
+            (dry[1] + wet[1] * self.wet_level) * OUTPUT_TRIM,
         ]
     }
 
@@ -463,6 +534,7 @@ impl Voice for RainVoice {
         self.rain_cutoff = self.rain_cutoff.min(sample_rate as f32 * 0.40);
         self.wind_cutoff = self.wind_cutoff.min(sample_rate as f32 * 0.40);
         self.sample_rate = sample_rate;
+        self.shot_amplitude = shot_amplitude(sample_rate);
         if let Some(reverb) = reverb {
             self.reverb = reverb;
         } else {

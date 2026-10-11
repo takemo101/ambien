@@ -18,18 +18,19 @@ use super::{
     VoiceLatencyFrames, VoicePreparation, VoicePreparationError,
     synthesis::{
         KnobRamp, Modulation, Poisson, RestartableReverb, WorldRandom, dry_latency, prepare_node,
+        soft_ceiling,
     },
 };
 
-// Conservative listening candidates, not P13-certified defaults. The synthesis
-// levels, frequency ranges and room coefficients have the same candidate status.
+// Coefficients and initial values below were settled by user listening (P13); see
+// docs/verification.md for what was and was not observed.
 static KNOBS: [KnobDefinition; 3] = [
     KnobDefinition {
         id: "amount",
         label: "岩の量",
         initial: match Normalized::new(0.27) {
             Some(value) => value,
-            None => panic!("candidate out of range"),
+            None => panic!("initial out of range"),
         },
     },
     KnobDefinition {
@@ -37,7 +38,7 @@ static KNOBS: [KnobDefinition; 3] = [
         label: "大きさ",
         initial: match Normalized::new(0.61) {
             Some(value) => value,
-            None => panic!("candidate out of range"),
+            None => panic!("initial out of range"),
         },
     },
     KnobDefinition {
@@ -45,18 +46,22 @@ static KNOBS: [KnobDefinition; 3] = [
         label: "硬さ",
         initial: match Normalized::new(0.18) {
             Some(value) => value,
-            None => panic!("candidate out of range"),
+            None => panic!("initial out of range"),
         },
     },
 ];
 
+// Loudness trim, settled in P13 listening. The raw output is quiet; the soft ceiling keeps up
+// to 24 simultaneous maximal collisions under 0.9, so the trim is not bounded by peaks.
+const OUTPUT_TRIM: f32 = 6.0;
 const MAX_COLLISIONS: usize = 24;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.65, 0.65, 0.65],
     shape: VisualShape::Impact,
 };
-const MODE_RATIOS: [f32; 3] = [1.0, 1.63, 2.51];
-const MODE_WEIGHTS: [f32; 3] = [0.60, 0.27, 0.13];
+// Bar-like inharmonic partials: the ring of struck stone/ore, not a tuned tone.
+const MODE_RATIOS: [f32; 3] = [1.0, 2.76, 5.40];
+const MODE_WEIGHTS: [f32; 3] = [0.16, 0.30, 0.54];
 
 pub(super) fn definition() -> SituationDefinition {
     SituationDefinition {
@@ -82,12 +87,12 @@ struct CollisionTone {
 impl CollisionTone {
     fn new(size: f32, hardness: f32) -> Self {
         Self {
-            center: 360.0 * (85.0_f32 / 360.0).powf(size),
+            center: 360.0 * (115.0_f32 / 360.0).powf(size),
             lifetime: 0.30
                 * (0.95_f64 / 0.30).powf(size as f64)
                 * 1.25
                 * (0.58_f64 / 1.25).powf(hardness as f64),
-            attack: 0.022 * (0.006_f64 / 0.022).powf(hardness as f64),
+            attack: 0.004 * (0.0008_f64 / 0.004).powf(hardness as f64),
             high_mix: 0.08 + hardness * 0.30,
             radius: 2.0 + size * 4.0,
             // Faster attack/high-band excitation is compensated rather than
@@ -116,6 +121,51 @@ struct Collision {
     y: f32,
     radius: f32,
     audio_eligible: bool,
+    grit_pole: f32,
+    grit_gain: f32,
+    rough_pole: f32,
+    rough_gain: f32,
+    grit_state: f32,
+    drive: f32,
+    rough_state: f32,
+    rng: u64,
+}
+
+// Grit layer of a collision: share of the lifetime it lasts, its level relative to the
+// resonator body, and the depth and rate of its roughness jitter.
+const GRIT_SPAN: f64 = 0.3;
+const GRIT_LEVEL: f32 = 0.025;
+// Share of collisions that are a big, low, dull stone.
+const BOULDER_CHANCE: f64 = 0.06;
+const ROUGH_DEPTH: f32 = 1.0;
+// Strike drive: contact pulse amplitude into the resonators, and the noise share.
+const PULSE_GAIN: f32 = 0.5;
+const REF_CENTER: f32 = 160.0;
+const REF_LIFETIME: f32 = 0.5;
+const CRACKLE_LEVEL: f32 = 0.04;
+const ROUGH_HZ: f32 = 110.0;
+
+// Strike-only room: wet share, 60 dB decay time and delay-size stretch. A big, hard room so
+// every strike hangs in the air for seconds.
+const STRIKE_REVERB: f32 = 1.1;
+const ROOM_DECAY_SECONDS: f64 = 3.6;
+const ROOM_SIZE: f64 = 1.8;
+// Collisions per second at full amount (it was 3.2 when strikes were too sparse).
+const COLLISIONS_PER_SECOND: f64 = 8.0;
+
+fn strike_room(rate: u32) -> Result<RestartableReverb, VoicePreparationError> {
+    RestartableReverb::with_room(rate, ROOM_DECAY_SECONDS, ROOM_SIZE)
+}
+
+/// One-pole smoothing coefficient for a cutoff, clamped below Nyquist.
+fn pole(cutoff: f32, rate: u32) -> f32 {
+    1.0 - (-std::f32::consts::TAU * cutoff.min(rate as f32 * 0.4) / rate as f32).exp()
+}
+
+/// Standard deviation of uniform white noise (-1..1) after this one-pole, as the reciprocal
+/// normaliser.
+fn unit_spread(pole: f32) -> f32 {
+    (1.0_f32 / 3.0).sqrt() * (pole / (2.0 - pole)).sqrt()
 }
 
 impl Collision {
@@ -137,6 +187,14 @@ impl Collision {
             centers: MODE_RATIOS.map(|ratio| ratio * 360.0),
             bandwidths: [30.0; 3],
             q: MODE_RATIOS.map(|ratio| ratio * 12.0),
+            grit_pole: 0.0,
+            grit_gain: 0.0,
+            rough_pole: 0.0,
+            rough_gain: 0.0,
+            grit_state: 0.0,
+            drive: 0.0,
+            rough_state: 0.0,
+            rng: seed | 1,
             pan: [0.0; 2],
             y: 0.0,
             radius: 2.0,
@@ -163,7 +221,7 @@ impl Collision {
         for (index, ratio) in MODE_RATIOS.iter().copied().enumerate() {
             self.centers[index] = (tone.center / scale * ratio).min(rate as f32 * 0.40);
             self.bandwidths[index] =
-                (8.0 + 12.0 / self.lifetime as f32) * (1.0 + index as f32 * 0.35);
+                (3.0 + 2.0 / self.lifetime as f32) * (1.0 + index as f32 * 0.5);
             // FunDSP's second Resonator input is Q, NOT bandwidth Hz.
             self.q[index] = self.centers[index] / self.bandwidths[index];
             self.resonators[index].reset();
@@ -171,6 +229,23 @@ impl Collision {
         // Only fixed scalar histories are cleared at admission. Noise phase
         // and the independent world PRNG are never reset in the callback.
         self.excitation_filter.reset();
+        // Hand-written scalar one-poles (no node preparation): the grit body sits just
+        // above the strike pitch, its roughness jitters at about 110 Hz. Gains normalise the
+        // filtered noise to a fixed spread at any sample rate.
+        let grit_pole = pole(self.centers[0] * 1.2, rate);
+        self.grit_pole = grit_pole;
+        self.grit_gain = GRIT_LEVEL / unit_spread(grit_pole);
+        self.rough_pole = pole(ROUGH_HZ, rate);
+        self.rough_gain = ROUGH_DEPTH / unit_spread(self.rough_pole);
+        self.grit_state = 0.0;
+        self.rough_state = 0.0;
+        // Equal contact momentum at every size: a lower body rings with a proportionally
+        // smaller amplitude for the same momentum, so the pulse amplitude falls with pitch
+        // and the first mode keeps its level. Hardness only changes the colour.
+        // Long-ringing collisions overlap and add up, so the drive also falls with ring length.
+        self.drive = PULSE_GAIN
+            * (REF_CENTER / self.centers[0]).sqrt()
+            * (REF_LIFETIME / self.lifetime as f32).powf(0.75);
     }
 
     fn advance(&mut self, delta: f64) {
@@ -183,14 +258,23 @@ impl Collision {
         if !self.alive() || !self.audio_eligible {
             return [0.0; 2];
         }
-        let excitation_seconds = self.attack + 0.035;
+        let excitation_seconds = self.attack + 0.012;
+        let grit_seconds = self.lifetime * GRIT_SPAN;
+        let white = if self.age < excitation_seconds || self.age < grit_seconds {
+            self.noise.tick(&Default::default())[0]
+        } else {
+            0.0
+        };
         let excitation = if self.age < excitation_seconds {
-            let white = self.noise.tick(&Default::default())[0];
             let soft = self.excitation_filter.tick(&[white, 650.0].into())[0];
-            let t = (self.age / self.attack).min(1.0) as f32;
-            let onset = t * t * (3.0 - 2.0 * t);
+            // A struck body is driven by a short, smooth contact pulse (half sine over the
+            // contact time), not by a noise burst: that gives the thump of a hit instead of a
+            // puff. A little filtered noise on top only roughens the contact.
+            let contact = (self.age / self.attack).min(1.0) as f32;
+            let pulse = (std::f32::consts::PI * contact).sin();
             let release = (1.0 - self.age / excitation_seconds) as f32;
-            (soft + (white - soft) * self.high_mix) * onset * release * release
+            let crackle = (soft + (white - soft) * self.high_mix) * release * release;
+            (pulse + crackle * CRACKLE_LEVEL * (1.0 - (contact - 0.5).abs() * 2.0)) * self.drive
         } else {
             0.0
         };
@@ -203,13 +287,32 @@ impl Collision {
         // without discontinuously truncating an audible resonator.
         let release = (1.0 - self.age / self.lifetime) as f32;
         let envelope = release * release * (3.0 - 2.0 * release);
-        sample *= envelope * self.strength * self.level;
+        sample *= envelope;
+        // Grinding: low-passed noise whose loudness itself jitters at a few tens of hertz, so
+        // the body of the impact scrapes and grates instead of only ringing. It ends well
+        // before the resonators so the tail is the clean ring.
+        if self.age < grit_seconds {
+            self.grit_state += (white - self.grit_state) * self.grit_pole;
+            self.rng ^= self.rng >> 12;
+            self.rng ^= self.rng << 25;
+            self.rng ^= self.rng >> 27;
+            let bits = self.rng.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            let random = (bits >> 40) as f32 * (2.0 / 16_777_216.0) - 1.0;
+            self.rough_state += (random - self.rough_state) * self.rough_pole;
+            let rough = (self.rough_state * self.rough_gain).abs().min(1.0);
+            let onset = (self.age / self.attack).min(1.0) as f32;
+            let fade = 1.0 - (self.age / grit_seconds) as f32;
+            sample += self.grit_state * self.grit_gain * rough * onset * fade * fade;
+        }
+        sample *= self.strength * self.level;
         [sample * self.pan[0], sample * self.pan[1]]
     }
 
     fn invalidate_history(&mut self) {
         self.audio_eligible = false;
         self.excitation_filter.reset();
+        self.grit_state = 0.0;
+        self.rough_state = 0.0;
         for resonator in &mut self.resonators {
             resonator.reset();
         }
@@ -295,7 +398,7 @@ impl RockVoice {
         if !(1..=MAX_COLLISIONS).contains(&config.grain_capacity) {
             return Err(VoicePreparationError::InvalidParameters);
         }
-        let reverb = RestartableReverb::new(config.sample_rate)?;
+        let reverb = strike_room(config.sample_rate)?;
         let mut random = WorldRandom::new(config.seed);
         let poisson = Poisson::new(&mut random);
         let tone = CollisionTone::new(KNOBS[1].initial.get(), KNOBS[2].initial.get());
@@ -384,9 +487,11 @@ impl Voice for RockVoice {
         if !self.contributing {
             return;
         }
-        let births =
-            self.poisson
-                .births(3.2 * density as f64, frame.delta_seconds, &mut self.random);
+        let births = self.poisson.births(
+            COLLISIONS_PER_SECOND * density as f64,
+            frame.delta_seconds,
+            &mut self.random,
+        );
         for _ in 0..births {
             let Some(grain) = self.grains.iter_mut().find(|grain| !grain.alive()) else {
                 break;
@@ -395,6 +500,14 @@ impl Voice for RockVoice {
             let y = self.random.unit() as f32;
             let strength = 0.30 + self.random.unit() as f32 * 0.60;
             let scale = 0.85 + self.random.unit() as f32 * 0.30;
+            // Now and then a big stone: about 0.4x the pitch, 2.5x as long, struck hard. The
+            // roll is always drawn so the world random sequence does not depend on it.
+            let boulder = self.random.unit() < BOULDER_CHANCE;
+            let (strength, scale) = if boulder {
+                (0.92 + strength * 0.08, 2.0 + scale * 0.5)
+            } else {
+                (strength, scale)
+            };
             grain.start(self.tone, strength, x, y, scale, frame.sample_rate);
             // Admission and every physical choice precede visual publication.
             // Sparse stronger impacts share the actual audio pan/scale/lifetime;
@@ -424,16 +537,23 @@ impl Voice for RockVoice {
                 self.rolling_level,
             )
         });
+        // Only the strikes go into the room; the rolling bed stays dry.
+        let mut strikes = [0.0_f32; 2];
         for grain in &mut self.grains {
             let sample = grain.render();
-            dry[0] += sample[0];
-            dry[1] += sample[1];
+            strikes[0] += sample[0];
+            strikes[1] += sample[1];
         }
+        dry[0] += strikes[0];
+        dry[1] += strikes[1];
         for (sample, dc) in dry.iter_mut().zip(&mut self.dc) {
             *sample = dc.tick(&[*sample].into())[0];
         }
-        let wet = self.reverb.tick(dry);
-        [dry[0] + wet[0] * 0.12, dry[1] + wet[1] * 0.12]
+        let wet = self.reverb.tick(strikes);
+        [
+            soft_ceiling((dry[0] + wet[0] * STRIKE_REVERB) * OUTPUT_TRIM),
+            soft_ceiling((dry[1] + wet[1] * STRIKE_REVERB) * OUTPUT_TRIM),
+        ]
     }
 
     fn set_contributing(&mut self, active: bool) {
@@ -462,7 +582,7 @@ impl Voice for RockVoice {
             return Err(VoicePreparationError::InvalidRate);
         }
         let reverb = if sample_rate != self.sample_rate {
-            Some(RestartableReverb::new(sample_rate)?)
+            Some(strike_room(sample_rate)?)
         } else {
             None
         };
@@ -622,7 +742,7 @@ mod tests {
         assert!(voice.grains.iter().any(Collision::alive));
         let mut early_energy = 0.0;
         let mut late_energy = 0.0;
-        for offset in 0..192_000 {
+        for offset in 0..384_000 {
             let ages: [f64; MAX_COLLISIONS] = std::array::from_fn(|index| voice.grains[index].age);
             let frame = step(&mut voice, &off, &ring, start + 9_601 + offset);
             assert_eq!(voice.rolling_density, 0.0);
@@ -637,13 +757,28 @@ mod tests {
             if offset < 4_800 {
                 early_energy += energy;
             }
-            if offset >= 187_200 {
+            if offset >= 379_200 {
                 late_energy += energy;
             }
         }
         assert!(early_energy > 0.0, "amount is not a tail-cutting mute");
         assert!(late_energy < early_energy * 1e-4);
         assert!(voice.grains.iter().all(|grain| !grain.alive()));
+    }
+
+    #[test]
+    fn ordinary_loud_play_stays_below_the_soft_ceiling_knee() {
+        // The soft ceiling is a guard for pile-ups, not a compressor in normal play: if the voice
+        // gets louder than this, the sound is being squashed instead of kept clean.
+        let ring = VisualRing::new(8, 1);
+        let knobs = [Normalized::ONE, Normalized::ONE, Normalized::ZERO];
+        let mut voice = voice(48_000, knobs);
+        let mut peak = 0.0_f32;
+        for sample in 0..96_000 {
+            let frame = step(&mut voice, &knobs, &ring, sample);
+            peak = peak.max(frame[0].abs()).max(frame[1].abs());
+        }
+        assert!(peak > 0.0 && peak < 0.5, "peak {peak}");
     }
 
     #[test]
@@ -750,7 +885,7 @@ mod tests {
 
         // Measure the real room's impulse predelay separately: it is not the
         // declared dry causal delay and must not postpone the fresh collision.
-        let mut room = RestartableReverb::new(48_000).unwrap();
+        let mut room = strike_room(48_000).unwrap();
         let wet_predelay = (0..48_000)
             .find(|&offset| room.tick(if offset == 0 { [1.0; 2] } else { [0.0; 2] }) != [0.0; 2])
             .expect("the actual room eventually returns the scheduled impulse");

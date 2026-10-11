@@ -281,19 +281,19 @@ pan は event と共通の normalized x から equal-power stereo を作る。y�
 
 | 声／ノブ | 曲線と合成の意味 | 0 と独立性 |
 |---|---|---|
-| rain amount | 粒頻度は `λmax*x`、帯域制限 white／pink の連続雨成分は `rain_level*sqrt(x)`、厚みは cutoff／dry-wet の線形補間。短い noise 励起の共鳴粒を近い雨粒にする | x=0 へ到達後、雨 birth と連続雨を正確に0。既存粒／wet 余韻は終了まで続く |
+| rain amount | 粒頻度は `λmax*x`。連続雨成分は、少ない量では Poisson の微小な衝突インパルス列（頻度 `8000*x^2.5`／秒、振幅固定で level は `x^1.25`。個々の粒が聞こえる）、多い量では white noise へ等パワーで交差する（noise の重み `x³`、noise gain `√重み*x^1.25`、impulse gain `√(1-重み)`。満量で同じ level）。`rain_level` は x>0 で定数、x=0 で0。厚みは cutoff／dry-wet の線形補間。短い noise 励起の共鳴粒を近い雨粒にする | x=0 へ到達後、雨 birth と連続雨を正確に0。既存粒／wet 余韻は終了まで続く |
 | rain wind | 独立した低帯域 noise の level と流れを線形増加、ゆっくりした cutoff 揺れを wind に比例 | wind0 は風だけ0、rain amount を変更しない |
-| rock amount | rolling noise の励起密度と衝突 Poisson 頻度を線形増加。疎な noise impulse＋複数の固定 resonator＋包絡 | amount0 で新規 rolling／衝突なし。既存衝突の減衰は残す |
+| rock amount | rolling noise の励起密度と衝突 Poisson 頻度（満量8回/秒）を線形増加。接触 pulse＋非整数倍の固定 resonator＋包絡＋短いざらつき層 | amount0 で新規 rolling／衝突なし。既存衝突の減衰は残す |
 | rock size | 中心周波数は `log_lerp(high,low,x)`、減衰時間は `log_lerp(short,long,x)`、logical radius は線形。励起エネルギーは level 校正して重さを音量増だけで作らない | x=0 は最小の岩であり mute ではない |
-| rock hardness | attack は `log_lerp(soft_attack,hard_attack,x)`、余韻は `log_lerp(long,short,x)`、励起の高帯域比率は線形。短い attack に対して peak normalization を同時に適用 | x=0 は柔らかい衝突、発生密度を0にしない |
+| rock hardness | 接触 pulse の長さは `log_lerp(4ms,0.8ms,x)`、余韻は `log_lerp(long,short,x)`、励起の高帯域比率は線形。短い pulse に対して peak normalization を同時に適用 | x=0 は柔らかい衝突、発生密度を0にしない |
 | deep depth | lowpass cutoff を対数下降、低い響きの比率・暗さは線形、motion speed は正の範囲で対数下降。pink／brown の低帯域＋固定低共鳴 | x=0 は浅い深海、基底音は残す |
-| deep air | bubble Poisson 頻度と高い成分を線形増加。短い共鳴／pitch 下り包絡を bubble に用いる | air0 は bubble と高い air 成分だけ0、低い響きは独立して残す |
+| deep air | bubble Poisson 頻度（満量6回/秒）と高い成分を線形増加。上昇 pitch の短い共鳴を bubble に用い、一部は後続気泡の列、まれに大きな気泡 | air0 は bubble と高い air 成分だけ0、低い響きは独立して残す |
 
 全声は dry 経路と開始前に準備した stereo `RestartableReverb` の wet 経路を持つ。量0では、声自体が寄与中なら既存 tail を自然に終え、不連続に捨てない。声の寄与が正確に0へ到達したときだけ、無音の状態で音の履歴を無効化する。Knob smoothing は有限時間の滑らかな補間（端点の傾き0）で、SPEC の目安に沿う実装 ramp を使う。asymptotic smoother の微小な非ゼロ値で永遠に birth を続けない。量0では追従が終わった sample から gate が0、天候／息も0 gateを解除できない。共通 volume と mute も有限到達する。
 
-現存P04の岩は固定24衝突slot、各slotの低い三つの `Resonator<f64,U3>` と有限包絡、左右独立の色付きgated rolling noiseを持つ。低周波／高rateでpole係数を失わないようmodal計算をf64にし、FunDSPの第三入力へ `Q=center/bandwidth` を渡す。短い部屋は既存 `RestartableReverb`、DC除去とdry遅延の確認は実声の準備経路で行う。factoryは対応rateを検査し、変更時はworkerがrate依存storageを再準備する。量・大きさ・硬さの曲線はrock私有、UI／menuは登録metadataとtyped indexだけを使う。係数・ノブinitialはP13未確定のcandidateである。
+現存P04の岩は固定24衝突slot、各slotの非整数倍（1／2.76／5.4）の三つの `Resonator<f64,U3>` と有限包絡、左右独立の色付きgated rolling noiseを持つ。衝突は noise burst ではなく 0.8〜4ms の半正弦の接触 pulse で励起し（noise は少量のざらつきだけ）、前半30%に低域のざらつき層を足す。pulse の振幅は音程と余韻の長さで校正して size／hardness が音量だけを変えないようにする。約6%の衝突は音程約0.4倍・寿命約2.5倍・強めの大きな岩になる。低周波／高rateでpole係数を失わないようmodal計算をf64にし、FunDSPの第三入力へ `Q=center/bandwidth` を渡す。衝突だけを大きく硬い部屋（`RestartableReverb::with_room`、減衰3.6秒・間隔1.8倍・wet1.1）へ送り、rolling は dry のまま。出力は `synthesis::soft_ceiling` で 0.85 を超えない（非有限値はそのまま通し、engine の guard が検出する）。DC除去とdry遅延の確認は実声の準備経路で行う。factoryは対応rateを検査し、変更時はworkerがrate依存storageを再準備する。量・大きさ・硬さの曲線はrock私有、UI／menuは登録metadataとtyped indexだけを使う。係数・ノブinitialはP13のユーザー試聴で確定した（[検証記録](verification.md)）。
 
-現存P05の深海は固定24気泡slot、左右独立のpink／brown相当低帯域noiseと86／143Hzの固定低共鳴、depthのlowpass／暗さ／寿命、airの高い成分とPoisson密度を持つ。air0へ追従後は新規気泡と高いair成分を正確に0にし、低い連続音と既存粒／wet尾は残す。気泡の `Resonator<f64,U1>` は `Q=center/bandwidth`、中心周波数は有限包絡中に下降し、tone係数50Hz／pitch係数200Hzのcadenceで更新する。eventのx・strength・radius・寿命は実入場気泡から渡し、depthは音とSlowGlow双方の強さと寿命へ作用する。対応rateのworker準備時に実dry routingの遅延を検査する。既存synthesis primitiveとI02／I07を再利用し、production consumerへdeep名の分岐や新UI経路を追加しない。係数・initialはP13未確定のcandidateであり、offline eventを物理的な光の暗さ・速度・同期の証拠とは呼ばない。
+現存P05の深海は固定24気泡slot、左右独立のpink／brown相当低帯域noiseと86／143Hzの固定低共鳴、depthのlowpass／暗さ／寿命、airの高い成分とPoisson密度を持つ。air0へ追従後は新規気泡と高いair成分を正確に0にし、低い連続音と既存粒／wet尾は残す。気泡の `Resonator<f64,U1>` は `Q=center/bandwidth`（ring帯域14Hz／大きさ）で、3ms の半正弦 pop（少量の noise）で励起し、中心周波数は有限包絡中に **上昇**（`start*(1+0.9*sqrt(progress))`）する。tone係数50Hz／pitch係数200Hzのcadenceで更新する。birth の約30%は 1〜3 個の後続気泡（0.05〜0.14s 間隔）を連ね、約7%は音程約1/3・寿命約3倍・強めの大きな気泡とその後の3〜6個の後続になる。eventのx・strength・radius・寿命は実入場気泡から渡し、depthは音とSlowGlow双方の強さと寿命へ作用する。出力は `synthesis::soft_ceiling` で 0.85 を超えない。対応rateのworker準備時に実dry routingの遅延を検査する。既存synthesis primitiveとI02／I07を再利用し、production consumerへdeep名の分岐や新UI経路を追加しない。係数・initialはP13のユーザー試聴で確定した（[検証記録](verification.md)）。offline eventを物理的な光の暗さ・速度・同期の証拠とは呼ばない。
 
 非寄与の雨／岩／深海は新規Poisson入場を止め、既存粒の論理age・ノブ追従・息／天候の時間更新とPRNG状態を保持する。寄与境界で古い粒のaudio eligibilityとDSP履歴を無効化し、再入場で古い音を復活させない。global mute／volume0はこの非寄与状態へ変換しない。settingsは現存Ely Radioの実role／label／選択状態を持つ個別choiceを登録metadataから生成し、mouseとSpace／Enterのreleaseはそのchoiceのtyped targetへ届く。受理表示は「手動の表示対象」であり、g²最大・実聴感dominantとは呼ばない。
 
@@ -301,7 +301,7 @@ pan は event と共通の normalized x から equal-power stereo を作る。y�
 
 音色係数・voice level・ノブ `initial` は、まず実音を作るための candidate として各 voice Module 内で明示的に扱う。保存 JSON 例を既定値の根拠にしない。candidate の値と変更理由を試聴記録へ残し、各声、端点、最大粒、最大重なり、連続 retarget の finite／peak／RMS／クリックを実経路で観測する。統計上 finite でも心地よいとは呼ばない。
 
-ユーザーが [成功条件](../SPEC.md#成功条件) と [音と操作の検証](../SPEC.md#音と操作) の試聴を行い、差異・穏やかさ・ループ感・強い peak・切替の聴感を評価する。試聴結果を AI の係数調整に戻し、採用値だけを各 `KnobDefinition.initial` と SPEC へ同時反映する。未採用候補を alias／旧 preset として残さない。これは実装情報の穴ではなく、仕様で選ばれた音質決定 gate である。現在は値の確定も音質成功も未観測。
+ユーザーが [成功条件](../SPEC.md#成功条件) と [音と操作の検証](../SPEC.md#音と操作) の試聴を行い、差異・穏やかさ・ループ感・強い peak・切替の聴感を評価する。試聴結果を AI の係数調整に戻し、採用値だけを各 `KnobDefinition.initial` と SPEC へ同時反映する。未採用候補を alias／旧 preset として残さない。これは実装情報の穴ではなく、仕様で選ばれた音質決定 gate である。雨・岩・深海と遷移はユーザー試聴で確定した（経過と未確認範囲は [検証記録](verification.md)）。確定した音質の正本は実装の係数で、上の設計文書の数値は確定時点の要約である。
 
 ## DSP準備とリアルタイム経路
 
@@ -321,7 +321,7 @@ worker が全 graph を構築→actual sample rate 設定→allocate→reset→�
 
 ### 非寄与声の再入場と残響
 
-`RestartableReverb` は `situations/synthesis.rs` 内の私有な合成部品。各 stereo channel に4並列 feedback comb と2直列 allpass を持つ Schroeder 型を使う。delay 長・damping・wet level は声ごとの試聴 candidate、feedback は worker で `10^(-3*delay_seconds/T60)` を計算して絶対値1未満、allpass 係数も絶対値1未満に検査する。tick で log／pow や長さ変更をしない。comb は遅延値を低域減衰して input＋feedback を書き、allpass は `y=delayed-a*x`、`write=x+a*y` とする。これらは設計した式であり、FunDSP の constructor を仮装しない。
+`RestartableReverb` は `situations/synthesis.rs` 内の私有な合成部品。各 stereo channel に4並列 feedback comb と2直列 allpass を持つ Schroeder 型を使う。部屋は `with_room(rate, T60秒, 大きさ倍率)` で声ごとに選び（既定の `new` は1.2秒／1.0、岩の衝突は3.6秒／1.8）、wet level も声ごとに試聴で選ぶ。feedback は worker で `10^(-3*delay_seconds/T60)` を計算して絶対値1未満、allpass 係数も絶対値1未満に検査する。tick で log／pow や長さ変更をしない。comb は遅延値を低域減衰して input＋feedback を書き、allpass は `y=delayed-a*x`、`write=x+a*y` とする。これらは設計した式であり、FunDSP の constructor を仮装しない。
 
 各固定 delay は worker が準備した `Box<[f32]>` と `cursor`、`filled` を持つ。read は `filled == len` の時だけ現在 cursor の値、それ以前は0。write 後 cursor を一つ進め、filled は len まで飽和加算する。inactive 化は cursor=0／filled=0 と固定個数の damping state=0 **だけ**。先頭から一巡するまでに旧値はすべて現在の値で上書きされるので、全 buffer clear、cell ごとの世代 tag、新しい buffer、非寄与中の tick は不要である。len は正値、変更は worker のみ。
 
@@ -808,7 +808,7 @@ native 通知の補助依存は `async-channel=2.5.0`（native→main だけ）�
 | 高DPI資源と透明性 | 対応画面・倍率で未実測。固定粒／30fpsだけでGPU一定・確保成功を主張しない |
 | RTとEngineLease | 競合・旧 epoch・閉鎖 gate・worker 回収と Rust callback／満杯 pool の scoped heap を試験した。native backend 全失敗経路・最悪 timing・最大三声・依存 monitor の残留は独立に確認する |
 | Mach／CPAL／物理同期 | Mach 変換・予定時刻 fixture と実標準 stream を確認した。latency 推定精度・Bluetooth・WindowServer・SPEC の物理同期目標は未測定 |
-| 音質・initial値 | 雨の試聴候補の smoke にユーザー確認を得た。三環境の心地よさ・初期値は未確定で、P13 でユーザー試聴と SPEC／Module を同時更新する |
+| 音質・initial値 | 雨・岩・深海と遷移はP13でユーザー試聴により確定した（[検証記録](verification.md)）。確定は個人の聴感判断で、実機・出力機器・長時間の背景利用・第三環境選択の聴感などの未確認範囲は検証記録に残す |
 | 保存・終了 | 実I/O、latest ack、directory sync failure、fadeの予定deadline、OS termination追加selectorは未検証 |
 | Sparklecancel／agent同定 | 条件付きソース推論。実agent事前一意同定・host一意性・terminated KVO・取消後通常QuitがP16で成立しなければ技術未解決、公開不可 |
 | 署名・鍵・配信権限 | SPECの前提が未準備。仮値で代用せずP14、人の承認と実credentialsが必要 |

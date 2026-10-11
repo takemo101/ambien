@@ -18,18 +18,19 @@ use super::{
     VoiceLatencyFrames, VoicePreparation, VoicePreparationError,
     synthesis::{
         KnobRamp, Modulation, Poisson, RestartableReverb, WorldRandom, dry_latency, prepare_node,
+        soft_ceiling,
     },
 };
 
-// Quiet implementation candidates, not listening-approved P13 defaults.
-// All frequency, level, color and lifetime coefficients share this status.
+// Coefficients and initial values below were settled by user listening (P13); see
+// docs/verification.md for what was and was not observed.
 static KNOBS: [KnobDefinition; 2] = [
     KnobDefinition {
         id: "depth",
         label: "深さ",
         initial: match Normalized::new(0.68) {
             Some(value) => value,
-            None => panic!("candidate out of range"),
+            None => panic!("initial out of range"),
         },
     },
     KnobDefinition {
@@ -37,13 +38,28 @@ static KNOBS: [KnobDefinition; 2] = [
         label: "空気の量",
         initial: match Normalized::new(0.16) {
             Some(value) => value,
-            None => panic!("candidate out of range"),
+            None => panic!("initial out of range"),
         },
     },
 ];
 
+// Loudness trim, settled in P13 listening: raw deep measured -46.6 dBFS RMS at 100% app
+// volume; this brings it level with the other voices.
+const OUTPUT_TRIM: f32 = 4.0;
 const MAX_BUBBLES: usize = 24;
 const PITCH_SECONDS: f64 = 1.0 / 200.0;
+// Bubbles per second at full air (it was 3.6), and the shares of birth events that start a
+// cluster of quick bubbles or one big air bubble.
+const BUBBLES_PER_SECOND: f64 = 6.0;
+const CLUSTER_CHANCE: f64 = 0.30;
+const BIG_BUBBLE_CHANCE: f64 = 0.07;
+// Bubble voicing: ring bandwidth (Hz, at unit size), upward pitch gain over its life, the
+// formation pop, its noise share, and the per-bubble level.
+const RING_BANDWIDTH: f32 = 14.0;
+const CHIRP: f32 = 0.9;
+const POP_SECONDS: f64 = 0.003;
+const POP_NOISE: f32 = 0.15;
+const BUBBLE_LEVEL: f32 = 0.05;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.12, 0.28, 0.48],
     shape: VisualShape::SlowGlow,
@@ -130,7 +146,7 @@ impl Bubble {
         self.pitch_elapsed = 0.0;
         self.start_center = (720.0 / scale).min(rate as f32 * 0.40);
         self.center = self.start_center;
-        self.bandwidth = 60.0;
+        self.bandwidth = RING_BANDWIDTH / scale;
         // Pinned FunDSP 0.23 uses Q=center/bandwidth, not bandwidth Hz.
         // r=exp(-pi*bandwidth/fs) is strictly below 1 for these bounds.
         self.q = self.center / self.bandwidth;
@@ -153,9 +169,10 @@ impl Bubble {
         self.pitch_elapsed += delta;
         if self.pitch_elapsed >= PITCH_SECONDS {
             self.pitch_elapsed -= PITCH_SECONDS;
-            // Bounded downward pitch, without per-sample exp/cos coefficient
-            // recalculation. Logical pitch advances even with DSP paused.
-            self.center = self.start_center * (1.0 - 0.45 * (self.age / self.lifetime) as f32);
+            // Logical pitch advances even with DSP paused. A real bubble's pitch rises as it
+            // forms and climbs; bounded, with no per-sample exp/cos coefficient recalculation.
+            self.center =
+                self.start_center * (1.0 + CHIRP * (self.age / self.lifetime).sqrt() as f32);
             self.q = self.center / self.bandwidth;
             if self.audio_eligible {
                 self.resonator
@@ -168,18 +185,21 @@ impl Bubble {
         if !self.alive() || !self.audio_eligible {
             return [0.0; 2];
         }
-        let attack = (self.age / 0.009).min(1.0) as f32;
+        let attack = (self.age / 0.004).min(1.0) as f32;
         let onset = attack * attack * (3.0 - 2.0 * attack);
-        let excitation = if self.age < 0.022 {
-            let release = (1.0 - self.age / 0.022) as f32;
-            self.noise.tick(&Default::default())[0] * onset * release * release
+        // A bubble forms with a short smooth pop (half sine over its first milliseconds) and
+        // then rings on its own: a clean "bloop", with only a little noise for texture.
+        let excitation = if self.age < POP_SECONDS {
+            let pop = (std::f64::consts::PI * self.age / POP_SECONDS).sin() as f32;
+            let white = self.noise.tick(&Default::default())[0];
+            pop + white * pop * POP_NOISE
         } else {
             0.0
         };
         let release = (1.0 - self.age / self.lifetime) as f32;
         let envelope = onset * release * release * (3.0 - 2.0 * release);
         let sample =
-            self.resonator.tick(&[excitation].into())[0] * envelope * self.strength * 0.028;
+            self.resonator.tick(&[excitation].into())[0] * envelope * self.strength * BUBBLE_LEVEL;
         [sample * self.pan[0], sample * self.pan[1]]
     }
 
@@ -255,6 +275,9 @@ struct DeepVoice {
     grains: Box<[Bubble]>,
     dc: [DCBlock<f64>; 2],
     reverb: RestartableReverb,
+    // Bubbles still to come in the cluster in progress, and the time to the next one.
+    burst_left: u32,
+    burst_timer: f64,
 }
 
 impl DeepVoice {
@@ -301,9 +324,41 @@ impl DeepVoice {
                 .into_boxed_slice(),
             dc: std::array::from_fn(|_| DCBlock::new(8.0)),
             reverb,
+            burst_left: 0,
+            burst_timer: 0.0,
         };
         voice.prepare_rate(config.sample_rate)?;
         Ok(voice)
+    }
+
+    /// Starts one bubble in the first free pool slot, publishing the strong ones to the scene.
+    /// Returns false when the pool is full.
+    fn admit(
+        &mut self,
+        x: f32,
+        y: f32,
+        strength: f32,
+        scale: f32,
+        events: &mut VisualWriter<'_>,
+    ) -> bool {
+        let Some(grain) = self.grains.iter_mut().find(|grain| !grain.alive()) else {
+            return false;
+        };
+        grain.start(self.tone, strength, x, y, scale, self.sample_rate);
+        // Select stronger admitted bubbles BEFORE depth dimming. The same
+        // physical pan, dimmed strength, radius and slowed lifetime drive
+        // sound and SlowGlow; visual capacity never feeds back into audio.
+        if strength >= 0.68 {
+            events.emit(ParticleVisual {
+                x: Normalized::new(x).expect("bounded bubble x"),
+                y: Normalized::new(grain.y).expect("bounded bubble y"),
+                strength: Normalized::new(grain.strength).expect("bounded bubble strength"),
+                radius: LogicalPixels::new(grain.radius).expect("finite bubble radius"),
+                shape: VISUAL.shape,
+                lifetime: Duration::from_secs_f64(grain.lifetime),
+            });
+        }
+        true
     }
 
     fn invalidate_history(&mut self) {
@@ -359,32 +414,49 @@ impl Voice for DeepVoice {
             // Poisson admissions pause, audio noise/DSP do not run.
             return;
         }
+        // A cluster in progress: a few quick bubbles one after another, like air being let go.
+        // At air zero no new bubble may start, so a pending cluster is dropped, not finished.
+        if self.bubble_density <= 0.0 {
+            self.burst_left = 0;
+        } else if self.burst_left > 0 {
+            self.burst_timer -= frame.delta_seconds;
+            if self.burst_timer <= 0.0 {
+                let x = self.random.unit() as f32;
+                let y = self.random.unit() as f32;
+                let strength = 0.45 + self.random.unit() as f32 * 0.40;
+                let scale = 0.70 + self.random.unit() as f32 * 0.50;
+                self.admit(x, y, strength, scale, events);
+                self.burst_left -= 1;
+                self.burst_timer = 0.05 + self.random.unit() * 0.09;
+            }
+        }
         let births = self.poisson.births(
-            3.6 * self.bubble_density as f64,
+            BUBBLES_PER_SECOND * self.bubble_density as f64,
             frame.delta_seconds,
             &mut self.random,
         );
         for _ in 0..births {
-            let Some(grain) = self.grains.iter_mut().find(|grain| !grain.alive()) else {
-                break;
-            };
             let x = self.random.unit() as f32;
             let y = self.random.unit() as f32;
             let strength = 0.35 + self.random.unit() as f32 * 0.55;
             let scale = 0.85 + self.random.unit() as f32 * 0.30;
-            grain.start(self.tone, strength, x, y, scale, self.sample_rate);
-            // Select stronger admitted bubbles BEFORE depth dimming. The same
-            // physical pan, dimmed strength, radius and slowed lifetime drive
-            // sound and SlowGlow; visual capacity never feeds back into audio.
-            if strength >= 0.68 {
-                events.emit(ParticleVisual {
-                    x: Normalized::new(x).expect("bounded bubble x"),
-                    y: Normalized::new(grain.y).expect("bounded bubble y"),
-                    strength: Normalized::new(grain.strength).expect("bounded bubble strength"),
-                    radius: LogicalPixels::new(grain.radius).expect("finite bubble radius"),
-                    shape: VISUAL.shape,
-                    lifetime: Duration::from_secs_f64(grain.lifetime),
-                });
+            let roll = self.random.unit();
+            let more = self.random.unit();
+            // Now and then a big air bubble: about a third of the pitch, thrice as long and
+            // struck hard, followed by a string of smaller ones rising after it.
+            let (strength, scale, followers) = if roll < BIG_BUBBLE_CHANCE {
+                (0.92 + strength * 0.08, scale * 3.0, 3 + (more * 4.0) as u32)
+            } else if roll < BIG_BUBBLE_CHANCE + CLUSTER_CHANCE {
+                (strength, scale, 1 + (more * 3.0) as u32)
+            } else {
+                (strength, scale, 0)
+            };
+            if !self.admit(x, y, strength, scale, events) {
+                break;
+            }
+            if followers > 0 && self.burst_left == 0 {
+                self.burst_left = followers;
+                self.burst_timer = 0.06 + self.random.unit() * 0.08;
             }
         }
     }
@@ -406,7 +478,10 @@ impl Voice for DeepVoice {
             *sample = dc.tick(&[*sample].into())[0];
         }
         let wet = self.reverb.tick(dry);
-        [dry[0] + wet[0] * 0.12, dry[1] + wet[1] * 0.12]
+        [
+            soft_ceiling((dry[0] + wet[0] * 0.12) * OUTPUT_TRIM),
+            soft_ceiling((dry[1] + wet[1] * 0.12) * OUTPUT_TRIM),
+        ]
     }
 
     fn set_contributing(&mut self, active: bool) {
@@ -677,6 +752,44 @@ mod behavioral_tests {
     }
 
     #[test]
+    fn a_pending_bubble_cluster_is_dropped_when_air_is_zero() {
+        let ring = VisualRing::new(32, 1);
+        let off = [Normalized::ZERO; 2];
+        let mut voice = voice(8_000, off);
+        for sample in 0..4_000 {
+            step(&mut voice, &off, &ring, sample);
+        }
+        assert_eq!(voice.bubble_density, 0.0);
+        voice.burst_left = 4;
+        voice.burst_timer = 0.0;
+        for sample in 4_000..4_800 {
+            step(&mut voice, &off, &ring, sample);
+            assert!(
+                voice
+                    .grains
+                    .iter()
+                    .all(|grain| !(grain.alive() && grain.age == 0.0)),
+                "no bubble may start at air zero"
+            );
+        }
+        assert_eq!(voice.burst_left, 0);
+    }
+
+    #[test]
+    fn ordinary_loud_play_stays_below_the_soft_ceiling_knee() {
+        // The soft ceiling is a guard for pile-ups, not a compressor in normal play.
+        let ring = VisualRing::new(32, 1);
+        let knobs = [Normalized::ZERO, Normalized::ONE];
+        let mut voice = voice(48_000, knobs);
+        let mut peak = 0.0_f32;
+        for sample in 0..96_000 {
+            let frame = step(&mut voice, &knobs, &ring, sample);
+            peak = peak.max(frame[0].abs()).max(frame[1].abs());
+        }
+        assert!(peak > 0.0 && peak < 0.5, "peak {peak}");
+    }
+
+    #[test]
     fn depth_curves_change_tone_and_actual_light_without_changing_air_frequency() {
         let shallow = DepthTone::new(0.0);
         let halfway = DepthTone::new(0.5);
@@ -848,7 +961,7 @@ mod behavioral_tests {
     }
 
     #[test]
-    fn bubble_pitch_descends_at_bounded_cadence_and_finite_envelope_reaches_zero() {
+    fn bubble_pitch_rises_at_bounded_cadence_and_finite_envelope_reaches_zero() {
         let mut voice = voice(48_000, [Normalized::ZERO; 2]);
         let grain = &mut voice.grains[0];
         grain.start(DepthTone::new(0.0), 0.9, 0.3, 0.4, 1.0, 48_000);
@@ -857,11 +970,11 @@ mod behavioral_tests {
         let mut energy = 0.0;
         for _ in 0..48_000 {
             grain.advance(1.0 / 48_000.0);
-            assert!(grain.center <= previous);
+            assert!(grain.center >= previous);
             previous = grain.center;
             energy += grain.render().into_iter().map(f32::abs).sum::<f32>();
         }
-        assert!(previous < initial && energy > 0.0);
+        assert!(previous > initial && energy > 0.0);
         assert!(!grain.alive());
         assert_eq!(grain.render(), [0.0; 2]);
     }
@@ -993,7 +1106,7 @@ mod behavioral_tests {
 
             // Slot 1 has not consumed excitation noise. A separately prepared
             // real Bubble provides its dry source waveform, including the
-            // intentional 9 ms attack and descending resonator, without any
+            // intentional 4 ms attack, 3 ms pop and rising resonator, without any
             // voice history or low sound that could satisfy the onset check.
             let mut source = voice(rate, off);
             for index in [0, 2] {
@@ -1056,8 +1169,10 @@ mod behavioral_tests {
                     "old history polluted low bed at {sample}"
                 );
                 assert_eq!(voices[0].random.state, voices[2].random.state);
+                // The onset search is about timing; compare at the voice's untrimmed scale.
                 let bubble: [f64; 2] = std::array::from_fn(|channel| {
-                    f64::from(output[0][channel]) - f64::from(output[1][channel])
+                    (f64::from(output[0][channel]) - f64::from(output[1][channel]))
+                        / f64::from(OUTPUT_TRIM)
                 });
                 if wet_onset.is_none() {
                     if expected_dry
@@ -1091,7 +1206,7 @@ mod behavioral_tests {
                 wet_onset.expect("real reverb must receive the new bubble") > expected_dry_onset,
                 "wet predelay must not be mistaken for dry causal delay"
             );
-            assert!(source.grains[1].center < source.grains[1].start_center);
+            assert!(source.grains[1].center > source.grains[1].start_center);
             assert!(voices[0].grains.iter().skip(2).all(|grain| !grain.alive()));
         }
     }

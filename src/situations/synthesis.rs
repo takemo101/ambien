@@ -272,18 +272,29 @@ pub(super) struct RestartableReverb {
 
 impl RestartableReverb {
     pub(super) fn new(rate: u32) -> Result<Self, VoicePreparationError> {
+        Self::with_room(rate, 1.2, 1.0)
+    }
+
+    /// `decay_seconds` is the time for the tail to fall 60 dB; `size` stretches the delay
+    /// lengths (a bigger room has later, sparser reflections).
+    pub(super) fn with_room(
+        rate: u32,
+        decay_seconds: f64,
+        size: f64,
+    ) -> Result<Self, VoicePreparationError> {
         if !(8_000..=384_000).contains(&rate) {
             return Err(VoicePreparationError::InvalidRate);
         }
-        // Listening candidates only: short, quiet rain room; not P13 certified.
-        let comb_seconds = [0.0297, 0.0371, 0.0411, 0.0437];
+        // Room coefficients are chosen per voice by listening (P13).
+        let comb_seconds = [0.0297, 0.0371, 0.0411, 0.0437].map(|seconds| seconds * size);
         let allpass_seconds = [0.005, 0.0017];
         let channels: [ReverbChannel; 2] = std::array::from_fn(|channel| {
             let offset = channel as f64 * 0.00073;
             ReverbChannel {
                 combs: std::array::from_fn(|index| {
                     let length = ((comb_seconds[index] + offset) * rate as f64).round() as usize;
-                    let feedback = 10.0_f64.powf(-3.0 * length as f64 / rate as f64 / 1.2) as f32;
+                    let feedback =
+                        10.0_f64.powf(-3.0 * length as f64 / rate as f64 / decay_seconds) as f32;
                     Comb {
                         delay: LazyDelay::new(length.max(1)),
                         feedback,
@@ -341,6 +352,23 @@ impl RestartableReverb {
                 allpass.delay.invalidate();
             }
         }
+    }
+}
+
+/// Linear up to a knee, then a smooth bend towards a fixed ceiling: strikes may pile up (up to
+/// 24 at once) without ever leaving the output headroom or clipping. A non-finite input is
+/// returned unchanged so the engine's output guard still sees a runaway voice.
+pub(super) fn soft_ceiling(x: f32) -> f32 {
+    const KNEE: f32 = 0.5;
+    const CEILING: f32 = 0.85;
+    if !x.is_finite() {
+        return x;
+    }
+    let a = x.abs();
+    if a <= KNEE {
+        x
+    } else {
+        x.signum() * (KNEE + (CEILING - KNEE) * ((a - KNEE) / (CEILING - KNEE)).tanh())
     }
 }
 
@@ -415,5 +443,23 @@ mod tests {
         let mut poisson = Poisson::new(&mut random);
         assert_eq!(poisson.births(1e9, 1.0, &mut random), MAX_BIRTHS_PER_SAMPLE);
         assert_eq!(poisson.births(0.0, 1.0, &mut random), 0);
+    }
+
+    #[test]
+    fn soft_ceiling_leaves_quiet_signals_alone_and_never_reaches_the_headroom_limit() {
+        for x in [-0.5_f32, -0.2, 0.0, 0.3, 0.5] {
+            assert_eq!(soft_ceiling(x), x);
+        }
+        assert!(!soft_ceiling(f32::INFINITY).is_finite());
+        assert!(soft_ceiling(f32::NAN).is_nan());
+        let mut previous = 0.5;
+        for step in 1..=3000 {
+            let x = 0.5 + step as f32 * 0.01;
+            let y = soft_ceiling(x);
+            assert!(y >= previous, "monotonic through the knee at {x}");
+            assert!(y <= 0.85, "bounded at {x}");
+            assert_eq!(soft_ceiling(-x), -y, "odd symmetric at {x}");
+            previous = y;
+        }
     }
 }
