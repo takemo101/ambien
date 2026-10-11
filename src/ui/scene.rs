@@ -201,6 +201,7 @@ impl SceneView {
         cx: &mut Context<Self>,
     ) {
         window.set_background_appearance(accessibility.scene_background(blur));
+        crate::platform::macos::apply_blur_material(window);
         self.motion = accessibility.motion();
         self.opaque = accessibility.reduce_transparency;
         self.veil = veil.get();
