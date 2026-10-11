@@ -37,6 +37,8 @@ struct SelectionActivation {
 pub(crate) struct SettingsNotices {
     pub(crate) control: Option<SharedString>,
     pub(crate) persistence: Option<SharedString>,
+    /// The system's "reduce transparency" is on and overrides the blur and glass density.
+    pub(crate) reduce_transparency: bool,
 }
 
 pub(crate) struct SettingsView {
@@ -328,6 +330,44 @@ impl Render for SettingsView {
                                                     ControlEdit::Volume(value),
                                                     cx,
                                                 );
+                                            }
+                                        })),
+                                ),
+                        ),
+                )
+                .child(
+                    Switch::new("blur", controls.blur)
+                        .label("ぼかし")
+                        .on_change(cx.processor(|_, blur, _, cx| {
+                            dispatch_control_edit(ControlEdit::Blur(blur), cx);
+                        })),
+                )
+                .child(
+                    FormField::new("veil-field", "ガラスの濃さ")
+                        .description(format!(
+                            "{:.0}%{}",
+                            controls.veil.get() * 100.0,
+                            if self.notices.reduce_transparency {
+                                "（システムの「透明度を下げる」が優先され、背景は不透明です）"
+                            } else {
+                                ""
+                            }
+                        ))
+                        .child(
+                            div()
+                                .id("veil-a11y")
+                                .role(Role::Group)
+                                .w_full()
+                                .aria_label("ガラスの濃さ")
+                                .child(
+                                    Slider::new("veil", f64::from(controls.veil.get()) * 100.0)
+                                        .range(0.0, 100.0)
+                                        .step(1.0)
+                                        .on_change(cx.processor(|_, value: f64, _, cx| {
+                                            if let Some(value) =
+                                                Normalized::new((value / 100.0) as f32)
+                                            {
+                                                dispatch_control_edit(ControlEdit::Veil(value), cx);
                                             }
                                         })),
                                 ),

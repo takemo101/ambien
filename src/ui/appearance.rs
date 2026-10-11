@@ -26,13 +26,17 @@ impl AccessibilityState {
         }
     }
 
-    /// Reduce transparency replaces the blurred scene with an opaque system palette;
-    /// turning it off returns to the blurred, transparent surface.
-    pub(crate) fn scene_background(self) -> WindowBackgroundAppearance {
+    /// The scene surface. Reduce transparency replaces the glass with an opaque system
+    /// palette whatever the settings say; otherwise the blur setting chooses between the
+    /// blurred glass and a plain transparent surface. Turning reduce transparency off
+    /// returns to the user's choice.
+    pub(crate) fn scene_background(self, blur: bool) -> WindowBackgroundAppearance {
         if self.reduce_transparency {
             WindowBackgroundAppearance::Opaque
-        } else {
+        } else if blur {
             WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
         }
     }
 
@@ -171,21 +175,37 @@ mod tests {
     }
 
     #[test]
-    fn reduce_transparency_is_opaque_and_releasing_it_restores_the_blur() {
+    fn reduce_transparency_is_opaque_and_releasing_it_restores_the_users_choice() {
         let mut state = AccessibilityState::default();
         assert_eq!(
-            state.scene_background(),
+            state.scene_background(true),
             WindowBackgroundAppearance::Blurred
         );
+        assert_eq!(
+            state.scene_background(false),
+            WindowBackgroundAppearance::Transparent
+        );
         state.reduce_transparency = true;
-        assert_eq!(state.scene_background(), WindowBackgroundAppearance::Opaque);
+        // The system setting wins over the blur choice, whichever it is.
+        assert_eq!(
+            state.scene_background(true),
+            WindowBackgroundAppearance::Opaque
+        );
+        assert_eq!(
+            state.scene_background(false),
+            WindowBackgroundAppearance::Opaque
+        );
         // Motion is independent of transparency.
         assert_eq!(state.motion(), Motion::Full);
         state.reduce_transparency = false;
         state.reduce_motion = true;
         assert_eq!(
-            state.scene_background(),
+            state.scene_background(true),
             WindowBackgroundAppearance::Blurred
+        );
+        assert_eq!(
+            state.scene_background(false),
+            WindowBackgroundAppearance::Transparent
         );
         assert_eq!(state.motion(), Motion::Reduced);
     }
