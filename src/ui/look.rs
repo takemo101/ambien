@@ -247,6 +247,44 @@ fn twinkle(age: f32) -> f32 {
     (std::f32::consts::PI * age.clamp(0.0, 1.0)).sin().powi(2)
 }
 
+/// The place and shape of one polygon, so a glow can be laid round exactly the same shape.
+#[derive(Clone, Copy)]
+pub(crate) struct Facet {
+    pub(crate) offset: [f32; 2],
+    pub(crate) radius: f32,
+    pub(crate) sides: u8,
+    pub(crate) rotation: f32,
+    pub(crate) seed: u32,
+}
+
+/// An angular glow: filled copies of `facet` scaled up by each layer's first number and drawn at
+/// that layer's share of `opacity`, so the light fades outward in the shape's own corners. It
+/// stands in for the round blurred shadow where the shape must have no round edge.
+pub(crate) fn facet_glow(
+    look: &mut Look,
+    facet: &Facet,
+    rgb: [f32; 3],
+    opacity: f32,
+    layers: &[(f32, f32)],
+) {
+    for &(scale, share) in layers {
+        let opacity = opacity * share;
+        if opacity <= 0.0 {
+            continue;
+        }
+        look.push(Mark::Poly {
+            offset: facet.offset,
+            radius: facet.radius * scale,
+            sides: facet.sides,
+            rotation: facet.rotation,
+            seed: facet.seed,
+            stroke: 0.0,
+            rgb,
+            opacity,
+        });
+    }
+}
+
 /// A value for shaping the `index`-th polygon of this particle, from its serial.
 pub(crate) fn seed(serial: u64, index: u64) -> u32 {
     (mix(serial ^ index.wrapping_mul(0x2545_f491_4f6c_dd1d)) >> 32) as u32
@@ -302,7 +340,28 @@ fn texture(
         // This GPUI has no additive blend, so the dark bloom is a larger, lighter glow laid over
         // the core; light mode gets a deeper colour film instead of a brightening. It is pushed
         // before the bead so the rim and highlight stay on top of it.
-        if dark {
+        let rock = input.shape == VisualShape::Impact;
+        if rock {
+            // Angular layers of the core's own shape instead of a round glow.
+            let facets = Facet {
+                offset: [0.0, 0.0],
+                radius: core,
+                sides: 6,
+                rotation: 0.2,
+                seed: seed(input.serial, 5),
+            };
+            if dark {
+                facet_glow(
+                    look,
+                    &facets,
+                    lighten(rgb, 0.35),
+                    opacity,
+                    &[(2.0, 0.22), (3.0, 0.1)],
+                );
+            } else {
+                facet_glow(look, &facets, deepen(rgb, 0.75), opacity, &[(1.6, 0.2)]);
+            }
+        } else if dark {
             look.push(Mark::Glow {
                 offset: [0.0, 0.0],
                 radius: core * 2.0,
@@ -368,12 +427,26 @@ fn texture(
     // An out-of-focus disc beside the particle, its place and size from the serial.
     let bearing = TAU * phase;
     let distance = core * (1.8 + 1.2 * second);
-    look.push(Mark::Haze {
-        offset: [bearing.cos() * distance, bearing.sin() * distance],
-        radius: core * (0.9 + 0.5 * phase) * 1.6,
-        rgb,
-        opacity: opacity * 0.2,
-    });
+    if input.shape == VisualShape::Impact {
+        // A rock's out-of-focus shape is angular too.
+        look.push(Mark::Poly {
+            offset: [bearing.cos() * distance, bearing.sin() * distance],
+            radius: core * (0.9 + 0.5 * phase) * 1.3,
+            sides: 5,
+            rotation: TAU * second,
+            seed: seed(input.serial, 720),
+            stroke: 0.0,
+            rgb,
+            opacity: opacity * 0.14,
+        });
+    } else {
+        look.push(Mark::Haze {
+            offset: [bearing.cos() * distance, bearing.sin() * distance],
+            radius: core * (0.9 + 0.5 * phase) * 1.6,
+            rgb,
+            opacity: opacity * 0.2,
+        });
+    }
     look.push(Mark::Cross {
         arm: core * 1.8,
         width: 1.0,
@@ -482,12 +555,28 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
     } else {
         1.0
     };
-    look.push(Mark::Glow {
-        offset: [0.0, 0.0],
-        radius: core * wobble,
-        rgb,
-        opacity,
-    });
+    let rock = input.shape == VisualShape::Impact;
+    // The core light. A rock's is a faceted shape, not a round glow; everything else keeps the
+    // soft round light.
+    if rock {
+        look.push(Mark::Poly {
+            offset: [0.0, 0.0],
+            radius: core,
+            sides: 6,
+            rotation: 0.2,
+            seed: seed(input.serial, 5),
+            stroke: 0.0,
+            rgb,
+            opacity,
+        });
+    } else {
+        look.push(Mark::Glow {
+            offset: [0.0, 0.0],
+            radius: core * wobble,
+            rgb,
+            opacity,
+        });
+    }
     if !still {
         // A soft glow around the core at every intensity; light windows get a deeper colour.
         let (halo, tone) = if input.dark {
@@ -495,12 +584,30 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
         } else {
             (deepen(rgb, 0.8), 0.22)
         };
-        look.push(Mark::Haze {
-            offset: [0.0, 0.0],
-            radius: core * wobble * 2.4,
-            rgb: halo,
-            opacity: opacity * tone,
-        });
+        if rock {
+            // Concentric larger copies of the core's own shape, fainter outwards: an angular glow.
+            let facets = Facet {
+                offset: [0.0, 0.0],
+                radius: core,
+                sides: 6,
+                rotation: 0.2,
+                seed: seed(input.serial, 5),
+            };
+            facet_glow(
+                &mut look,
+                &facets,
+                halo,
+                opacity * tone,
+                &[(1.7, 0.65), (2.6, 0.35)],
+            );
+        } else {
+            look.push(Mark::Haze {
+                offset: [0.0, 0.0],
+                radius: core * wobble * 2.4,
+                rgb: halo,
+                opacity: opacity * tone,
+            });
+        }
     }
     if !still {
         scatter(
@@ -597,9 +704,18 @@ mod tests {
                     .copied()
                     .collect();
                 assert_eq!(marks.len(), 1);
-                let Mark::Glow { offset, radius, .. } = marks[0] else {
-                    panic!("only the core glow remains");
+                // A rock's still core is a polygon, the others' a round glow.
+                let (offset, radius) = match marks[0] {
+                    Mark::Glow { offset, radius, .. } | Mark::Poly { offset, radius, .. } => {
+                        (offset, radius)
+                    }
+                    other => panic!("only the core remains: {other:?}"),
                 };
+                assert_eq!(
+                    matches!(marks[0], Mark::Poly { stroke: 0.0, .. }),
+                    shape == VisualShape::Impact,
+                    "{shape:?}: only a rock's still core is a polygon"
+                );
                 assert_eq!(offset, [0.0, 0.0]);
                 assert_eq!(radius, 6.0, "it never swells or wobbles");
             }
@@ -749,11 +865,46 @@ mod tests {
             let without_halo = |marks: &[Mark]| -> Vec<Mark> {
                 marks
                     .iter()
-                    .filter(|mark| !matches!(mark, Mark::Haze { .. }))
-                    .copied()
+                    .enumerate()
+                    // A rock's halo is the two polygons right after its core.
+                    .filter(|(index, mark)| {
+                        let halo_layer = shape == VisualShape::Impact && (1..=2).contains(index);
+                        !(matches!(mark, Mark::Haze { .. }) || halo_layer)
+                    })
+                    .map(|(_, mark)| *mark)
                     .collect()
             };
             assert_eq!(without_halo(&dark), without_halo(&light), "{shape:?}");
+        }
+    }
+
+    /// The core light and its first halo: (radius, colour) of each. A rock's are polygons, the
+    /// others' a round glow and a blur.
+    fn core_and_halo(marks: &[Mark]) -> ((f32, [f32; 3]), (f32, [f32; 3])) {
+        match (marks[0], marks[1]) {
+            (
+                Mark::Glow { radius, rgb, .. },
+                Mark::Haze {
+                    radius: halo_radius,
+                    rgb: halo_rgb,
+                    ..
+                },
+            ) => ((radius, rgb), (halo_radius, halo_rgb)),
+            (
+                Mark::Poly {
+                    radius,
+                    rgb,
+                    stroke: 0.0,
+                    ..
+                },
+                Mark::Poly {
+                    radius: halo_radius,
+                    rgb: halo_rgb,
+                    stroke: 0.0,
+                    ..
+                },
+            ) => ((radius, rgb), (halo_radius, halo_rgb)),
+            other => panic!("the core is not followed by its halo: {other:?}"),
         }
     }
 
@@ -767,29 +918,14 @@ mod tests {
             ] {
                 let marks = |dark| marks_of(&at(shape, level, dark), Motion::Full);
                 let (dark, light) = (marks(true), marks(false));
-                assert!(
-                    matches!(dark[0], Mark::Glow { .. }),
-                    "the core light stays first"
+                let rock = shape == VisualShape::Impact;
+                assert_eq!(
+                    matches!(dark[0], Mark::Poly { .. }),
+                    rock,
+                    "a rock's core is a polygon, the others' a round glow"
                 );
-                let (
-                    Mark::Haze {
-                        radius: dark_radius,
-                        rgb: dark_rgb,
-                        ..
-                    },
-                    Mark::Haze { rgb: light_rgb, .. },
-                ) = (dark[1], light[1])
-                else {
-                    panic!("{shape:?} {level:?}: the core is followed by its soft halo");
-                };
-                let Mark::Glow {
-                    radius: core,
-                    rgb: core_rgb,
-                    ..
-                } = dark[0]
-                else {
-                    unreachable!()
-                };
+                let ((core, core_rgb), (dark_radius, dark_rgb)) = core_and_halo(&dark);
+                let (_, (_, light_rgb)) = core_and_halo(&light);
                 assert!(dark_radius > core, "the halo spreads wider than the core");
                 for ((&d, &l), &c) in dark_rgb.iter().zip(&light_rgb).zip(&core_rgb) {
                     assert!(d >= c && l <= c, "dark lightens, light deepens");
@@ -921,9 +1057,13 @@ mod tests {
                             Motion::Full,
                         );
                         assert!(
-                            !marks
-                                .iter()
-                                .any(|mark| matches!(mark, Mark::Ring { .. } | Mark::Dot { .. })),
+                            !marks.iter().any(|mark| matches!(
+                                mark,
+                                Mark::Ring { .. }
+                                    | Mark::Dot { .. }
+                                    | Mark::Glow { .. }
+                                    | Mark::Haze { .. }
+                            )),
                             "{level:?} dark={dark} step {step} large={large}"
                         );
                     }
