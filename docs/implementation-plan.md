@@ -111,6 +111,10 @@ flowchart LR
  P12 --> P15
  P13 --> P19
  P08 --> P20
+ P20 --> P21
+ P19 --> P21
+ P21 --> P22
+ P21 --> P23
  P14 --> P15 --> P16 --> P17 --> P18
  P13 --> P17
  P14 --> P17
@@ -476,6 +480,46 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 - [ ] 実アプリをユーザーが見て、形・色・強さを調整する。
 
 **Behavior tests:** 同じイベントの再描画が同じ primitive 列になること、容量・fps 上限、減衰後の寿命終了、Reduced では広がりが無いこと、極端値（強さ・大きさ・位置の端）で有限。**Smoke/gate:** 三環境をユーザーが実アプリで見て判断する。AI の primitive 数や統計は見た目の代用品ではなく、AI だけで completed にできない。
+
+## P21 演出の強さの設定と小さい粒の発光
+
+**DependsOn:** P19、P20。**SPEC:** [演出の強さ](../SPEC.md#演出の強さ)、[視覚イベント](../SPEC.md#視覚イベント)、[設定窓](../SPEC.md#設定窓)、[保存](../SPEC.md#保存)。
+
+**Files（予定）:** Modify `src/persistence.rs`・`src/controls.rs`・`src/app.rs`（`visuals` の保存と適用）、`src/ui/settings.rs`（共通設定へ「演出の強さ」SegmentedControl）、`src/ui/scene.rs`・`src/ui/look.rs`（段階の受け渡しと小さい粒の点）、`src/situations/rain.rs`・`rock.rs`・`deep.rs`（小さい粒の視覚イベントを常に出す）、`docs/verification.md`。Tests は各 Module 内。
+
+**Consumes:** P19 の表示専用の設定経路、P20 の `look`。**Produces:** 保存・復元できる `visuals`（既定 `calm`）、段階を受ける `look`、標準・派手で描かれる小さい粒。控えめの見た目は従来と同一。
+
+- [ ] `visuals` を保存・復元し、不明な値は既定へ戻す。設定窓の共通設定へ「演出の強さ」を置き、即時にシーンへ反映する。
+- [ ] 小さい粒の視覚イベントを常に出す。控えめでは描かない。容量超過時は弱い小さい粒から省き、大きい粒と音を省かない。
+- [ ] 標準・派手で小さい粒を小さな点として描く。
+
+**Behavior tests:** 値の往復・既定・不明値。控えめの primitive 列が従来と同一。小さい粒が控えめで描かれず標準・派手で描かれること。容量超過で大きい粒が残ること。音の出力が変わらないこと。**Smoke/gate:** 実アプリで三段階を見てユーザーが判断する。AI だけで completed にできない。
+
+## P22 背景の色の場とオーロラ
+
+**DependsOn:** P21。**SPEC:** [演出の強さ](../SPEC.md#演出の強さ)、[アクセシビリティ](../SPEC.md#アクセシビリティ)。
+
+**Files（予定）:** Create `src/ui/backdrop.rs`（世界時刻・各声の寄与・息から色の場・オーロラの塗り要素を決める純粋関数）、Modify `src/ui/scene.rs`、`docs/verification.md`。
+
+**Consumes:** `VisibleParticles` の寄与・息・世界時刻。**Produces:** 標準の色の場、派手のオーロラ。描画側で乱数を使わず、視差効果を減らすでは静止、ライトでは別の描き方。
+
+- [ ] 同じ世界時刻・寄与・息から常に同じ塗り要素になる純粋関数にする。
+- [ ] 移り変わりで寄与に応じて色が混ざる。Reduced では漂わない。
+
+**Behavior tests:** 決定性、寄与0で何も出さない、極端値で有限、Reduced で時刻が変わっても同じ、要素数の上限。**Smoke/gate:** ダーク・ライトで実アプリを見てユーザーが判断する。
+
+## P23 粒の質感（ガラス玉・加算発光・きらめき・彗星・虹色の輪）
+
+**DependsOn:** P21。**SPEC:** [演出の強さ](../SPEC.md#演出の強さ)、[視覚イベント](../SPEC.md#視覚イベント)。
+
+**Files（予定）:** Modify `src/ui/look.rs`・`src/ui/scene.rs`・`src/ui/appearance.rs`、`docs/verification.md`。
+
+**Produces:** 標準のガラス玉（陰影・縁・ハイライト）、派手の加算発光・十字のきらめき・彗星の尾・虹色の輪・ボケ。ライトでは加算発光の代わりに色の膜。
+
+- [ ] 段階ごとの mark を `look` に加え、primitive 数の上限と最大30fpsを守る。
+- [ ] Reduced では核の光だけ。ライトでは加算を使わない。
+
+**Behavior tests:** 段階ごとの mark 列の決定性と数の上限、Reduced、ライトでの描き分け、極端値の有限性。**Smoke/gate:** 三段階をダーク・ライトで実アプリを見てユーザーが判断する。描画負荷は実機で確認する。
 
 ## 全 SPEC 節の coverage matrix
 
