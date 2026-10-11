@@ -8,7 +8,7 @@
 
 use std::f32::consts::TAU;
 
-use super::{Look, Mark, lighten, mix};
+use super::{Look, Mark, deepen, lighten, mix};
 use crate::{controls::VisualIntensity, situations::VisualShape};
 
 /// What the scatter depends on. `opacity` is the particle's envelope for this frame.
@@ -22,6 +22,8 @@ pub(super) struct Scatter {
     pub(super) age: f32,
     pub(super) opacity: f32,
     pub(super) serial: u64,
+    /// The window is on a dark appearance.
+    pub(super) dark: bool,
 }
 
 /// A value in 0..1 for the `index`-th piece of this particle.
@@ -37,6 +39,47 @@ fn ease_out(t: f32) -> f32 {
 /// `base` pieces, plus up to `extra` more for a strong particle (inclusive of `base + extra`).
 fn count(base: u64, extra: u64, strength: f32) -> u64 {
     base + (strength * (extra as f32 + 0.999)) as u64
+}
+
+/// A soft glow around a piece, from standard up: a blurred shadow with no hard disc. Dark
+/// windows get a lighter light, light windows a deeper colour (never a brightening).
+fn halo(look: &mut Look, s: &Scatter, offset: [f32; 2], radius: f32, opacity: f32) {
+    let level = match s.intensity {
+        VisualIntensity::Calm => return,
+        VisualIntensity::Standard => 0.6,
+        VisualIntensity::Vivid => 1.0,
+    };
+    let (rgb, tone) = if s.dark {
+        (lighten(s.rgb, 0.25), 0.4)
+    } else {
+        (deepen(s.rgb, 0.8), 0.32)
+    };
+    let opacity = opacity * level * tone;
+    if opacity <= 0.0 {
+        // A burnt-out piece has nothing to glow; a transparent shadow would only cost a
+        // primitive and a slot of the frame's budget.
+        return;
+    }
+    look.push(Mark::Haze {
+        offset,
+        radius,
+        rgb,
+        opacity,
+    });
+}
+
+/// A wide, faint ring laid on the lead ripple or shock ring, centred on its edge, so the edge
+/// reads as softened on both sides. Every intensity has it.
+fn ring_halo(look: &mut Look, s: &Scatter, radius: f32, width: f32, opacity: f32) {
+    let band = width * 4.0 + 2.0;
+    look.push(Mark::Ring {
+        offset: [0.0, 0.0],
+        // A quad border is drawn inside its bounds, so grow the bounds by half the band.
+        radius: radius + band * 0.5,
+        width: band,
+        rgb: s.rgb,
+        opacity: opacity * 0.18,
+    });
 }
 
 /// The on-screen scale of a scatter, from the event's radius: 1.0 is a modest splash.
@@ -91,6 +134,15 @@ fn rain(look: &mut Look, s: &Scatter, soft: f32) {
             rgb: s.rgb,
             opacity: soft * 0.8 * (1.0 - t).powf(0.7) * (1.0 - 0.22 * k as f32),
         });
+        if k == 0 {
+            ring_halo(
+                look,
+                s,
+                u * (2.0 + 15.0 * ease_out(t)),
+                1.6 * (1.0 - t) + 0.5,
+                soft * 0.8 * (1.0 - t).powf(0.7),
+            );
+        }
     }
     let drops = match s.intensity {
         VisualIntensity::Calm => count(4, 2, s.strength),
@@ -98,15 +150,25 @@ fn rain(look: &mut Look, s: &Scatter, soft: f32) {
         VisualIntensity::Vivid => count(10, 6, s.strength),
     };
     let flight = s.age * 1.1;
+    let halos = match s.intensity {
+        VisualIntensity::Calm => 0,
+        VisualIntensity::Standard => 5,
+        VisualIntensity::Vivid => 8,
+    };
     for i in 0..drops {
         let angle = -TAU / 4.0 + (unit(s.serial, i) - 0.5) * 2.3;
         let speed = u * (22.0 + 30.0 * unit(s.serial, 100 + i));
+        let offset = [
+            angle.cos() * speed * flight,
+            angle.sin() * speed * flight + 0.5 * u * 62.0 * flight * flight,
+        ];
+        let radius = u * (0.9 + 0.9 * unit(s.serial, 200 + i)) * (1.0 - 0.5 * s.age);
+        if i < halos {
+            halo(look, s, offset, radius * 4.0, soft * 0.6);
+        }
         look.push(Mark::Dot {
-            offset: [
-                angle.cos() * speed * flight,
-                angle.sin() * speed * flight + 0.5 * u * 62.0 * flight * flight,
-            ],
-            radius: u * (0.9 + 0.9 * unit(s.serial, 200 + i)) * (1.0 - 0.5 * s.age),
+            offset,
+            radius,
             rgb: lighten(s.rgb, 0.35),
             opacity: soft * 0.9,
         });
@@ -125,21 +187,38 @@ fn rock(look: &mut Look, s: &Scatter, soft: f32) {
         rgb: s.rgb,
         opacity: soft * 0.9 * fade,
     });
+    ring_halo(
+        look,
+        s,
+        u * (2.0 + 13.0 * ease_out(s.age)),
+        3.0 * fade + 0.5,
+        soft * 0.9 * fade,
+    );
     let shards = match s.intensity {
         VisualIntensity::Calm => count(6, 3, s.strength),
         VisualIntensity::Standard => count(10, 4, s.strength),
         VisualIntensity::Vivid => count(13, 7, s.strength),
     };
+    let halos = match s.intensity {
+        VisualIntensity::Calm => 0,
+        VisualIntensity::Standard => 6,
+        VisualIntensity::Vivid => 10,
+    };
     for i in 0..shards {
         let angle = TAU * (i as f32 / shards as f32 + 0.08 * unit(s.serial, i));
         let speed = u * (32.0 + 48.0 * unit(s.serial, 100 + i));
         let distance = speed * (1.0 - fade * fade);
+        let offset = [
+            angle.cos() * distance,
+            angle.sin() * distance + 0.5 * u * 70.0 * s.age * s.age,
+        ];
+        let radius = u * (0.8 + 1.9 * unit(s.serial, 200 + i)) * (1.0 - 0.55 * s.age);
+        if i < halos {
+            halo(look, s, offset, radius * 3.5, soft * 0.5);
+        }
         look.push(Mark::Dot {
-            offset: [
-                angle.cos() * distance,
-                angle.sin() * distance + 0.5 * u * 70.0 * s.age * s.age,
-            ],
-            radius: u * (0.8 + 1.9 * unit(s.serial, 200 + i)) * (1.0 - 0.55 * s.age),
+            offset,
+            radius,
             rgb: s.rgb,
             opacity: soft * 0.95,
         });
@@ -157,8 +236,10 @@ fn rock(look: &mut Look, s: &Scatter, soft: f32) {
         let angle = TAU * unit(s.serial, 400 + i);
         let speed = u * (55.0 + 40.0 * unit(s.serial, 410 + i));
         let distance = speed * (1.0 - (1.0 - burn) * (1.0 - burn));
+        let offset = [angle.cos() * distance, angle.sin() * distance];
+        halo(look, s, offset, u * 5.0, soft * 0.6 * (1.0 - burn));
         look.push(Mark::Dot {
-            offset: [angle.cos() * distance, angle.sin() * distance],
+            offset,
             radius: u * 0.8,
             rgb: lighten(s.rgb, 0.8),
             opacity: soft * 0.95 * (1.0 - burn),
@@ -202,6 +283,7 @@ fn deep(look: &mut Look, s: &Scatter, soft: f32) {
         ];
         let burst = ((t - 0.9) / 0.1).clamp(0.0, 1.0);
         let alpha = soft * (t * 8.0).min(1.0) * (1.0 - 0.7 * t) * (1.0 - burst);
+        halo(look, s, offset, size * 2.4, alpha * 0.5);
         look.push(Mark::Ring {
             offset,
             radius: size * (1.0 + 0.5 * burst),
@@ -245,6 +327,16 @@ mod tests {
         strength: f32,
         age: f32,
     ) -> Vec<Mark> {
+        scatter_in(shape, intensity, strength, age, true)
+    }
+
+    fn scatter_in(
+        shape: VisualShape,
+        intensity: VisualIntensity,
+        strength: f32,
+        age: f32,
+        dark: bool,
+    ) -> Vec<Mark> {
         let mut look = Look::new();
         scatter(
             &mut look,
@@ -257,9 +349,90 @@ mod tests {
                 age,
                 opacity: 0.8,
                 serial: 12345,
+                dark,
             },
         );
         look.marks().copied().collect()
+    }
+
+    fn hazes(marks: &[Mark]) -> Vec<([f32; 2], f32, [f32; 3], f32)> {
+        marks
+            .iter()
+            .filter_map(|mark| match *mark {
+                Mark::Haze {
+                    offset,
+                    radius,
+                    rgb,
+                    opacity,
+                } => Some((offset, radius, rgb, opacity)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pieces_get_a_soft_halo_from_standard_up_and_vivid_glows_more_than_standard() {
+        for shape in SHAPES {
+            let halos = |level| hazes(&scatter_of(shape, level, 1.0, 0.6));
+            assert!(
+                halos(VisualIntensity::Calm).is_empty(),
+                "{shape:?} calm has none"
+            );
+            let (standard, vivid) = (
+                halos(VisualIntensity::Standard),
+                halos(VisualIntensity::Vivid),
+            );
+            assert!(!standard.is_empty(), "{shape:?}");
+            assert!(vivid.len() >= standard.len(), "{shape:?}");
+            let strongest = |halos: &[([f32; 2], f32, [f32; 3], f32)]| {
+                halos.iter().map(|halo| halo.3).fold(0.0, f32::max)
+            };
+            assert!(
+                strongest(&vivid) > strongest(&standard),
+                "{shape:?} vivid is brighter"
+            );
+        }
+    }
+
+    #[test]
+    fn a_halo_is_a_lighter_light_on_dark_and_a_deeper_colour_on_light_never_a_brightening() {
+        for shape in SHAPES {
+            let rgb = [0.5, 0.6, 0.7];
+            let dark = hazes(&scatter_in(shape, VisualIntensity::Vivid, 1.0, 0.6, true));
+            let light = hazes(&scatter_in(shape, VisualIntensity::Vivid, 1.0, 0.6, false));
+            assert_eq!(dark.len(), light.len());
+            for (dark, light) in dark.iter().zip(&light) {
+                for ((&dark_channel, &light_channel), &base) in
+                    dark.2.iter().zip(&light.2).zip(&rgb)
+                {
+                    assert!(dark_channel >= base, "dark brightens");
+                    assert!(light_channel <= base, "light deepens");
+                }
+                assert!(light.3 <= dark.3, "light is the fainter film");
+            }
+        }
+    }
+
+    #[test]
+    fn the_lead_ring_has_a_faint_wide_halo_at_every_intensity() {
+        for shape in [VisualShape::Point, VisualShape::Impact] {
+            for level in LEVELS {
+                let rings: Vec<(f32, f32)> = scatter_of(shape, level, 0.5, 0.4)
+                    .iter()
+                    .filter_map(|mark| match *mark {
+                        Mark::Ring { width, opacity, .. } => Some((width, opacity)),
+                        _ => None,
+                    })
+                    .collect();
+                let (sharp, wide) = (
+                    rings[0],
+                    rings.iter().find(|ring| ring.0 > rings[0].0 * 2.0),
+                );
+                let wide =
+                    wide.unwrap_or_else(|| panic!("{shape:?} {level:?} has a wide halo ring"));
+                assert!(wide.1 < sharp.1, "the halo is fainter than the ring");
+            }
+        }
     }
 
     fn dots(marks: &[Mark]) -> Vec<([f32; 2], f32)> {
@@ -294,8 +467,13 @@ mod tests {
                 rock[index],
                 "{level:?} rock"
             );
-            let deep_count =
-                |strength| scatter_of(VisualShape::SlowGlow, level, strength, 0.9).len() / 3;
+            // One outline ring per bubble.
+            let deep_count = |strength| {
+                scatter_of(VisualShape::SlowGlow, level, strength, 0.9)
+                    .iter()
+                    .filter(|mark| matches!(mark, Mark::Ring { .. }))
+                    .count()
+            };
             assert_eq!(
                 (deep_count(0.0), deep_count(1.0)),
                 deep[index],
@@ -397,6 +575,12 @@ mod tests {
                         for mark in scatter_of(shape, level, strength, step as f32 / 20.0) {
                             let (offset, radius, opacity) = match mark {
                                 Mark::Dot {
+                                    offset,
+                                    radius,
+                                    opacity,
+                                    ..
+                                }
+                                | Mark::Haze {
                                     offset,
                                     radius,
                                     opacity,

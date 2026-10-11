@@ -113,9 +113,6 @@ fn angle(time: f64, rate: f32) -> f32 {
 
 pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Motion) -> Backdrop {
     let mut out = Backdrop::new();
-    if intensity == VisualIntensity::Calm {
-        return out;
-    }
     let short = finite(input.size[0]).min(finite(input.size[1])).max(0.0);
     if short <= 0.0 {
         return out;
@@ -127,6 +124,12 @@ pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Mo
         input.world_seconds.max(0.0)
     };
     let tone = if input.dark { (1.0, 1.0) } else { (0.78, 1.15) };
+    // Calm keeps the glass quiet: one faint field per heard voice. Standard and vivid have two.
+    let (fields, level) = if intensity == VisualIntensity::Calm {
+        (1, 0.35)
+    } else {
+        (FIELDS_PER_SITUATION, 1.0)
+    };
     let count = input
         .contributions
         .len()
@@ -146,7 +149,7 @@ pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Mo
         for channel in 0..3 {
             mixed[channel] += rgb[channel] * weight;
         }
-        for field in 0..FIELDS_PER_SITUATION {
+        for field in 0..fields {
             let phase = TAU * spread(index, field);
             let drift = 0.12 + 0.10 * spread(field, index + 7);
             let speed = TAU * (0.045 + 0.03 * spread(index + 3, field));
@@ -157,7 +160,7 @@ pub(crate) fn backdrop(input: &Input<'_>, intensity: VisualIntensity, motion: Mo
                 radius: short * 0.22,
                 blur: short * 0.14,
                 rgb,
-                opacity: (0.20 * weight * (0.8 + 0.2 * breath) * tone.1).clamp(0.0, 1.0),
+                opacity: (0.20 * level * weight * (0.8 + 0.2 * breath) * tone.1).clamp(0.0, 1.0),
             });
         }
     }
@@ -229,13 +232,36 @@ mod tests {
     }
 
     #[test]
-    fn calm_has_no_backdrop_and_a_silent_world_has_none_at_any_intensity() {
-        let heard = input(10.0, &[1.0, 0.0, 0.0], &[0.5, 0.0, 0.0]);
-        assert!(items(&heard, VisualIntensity::Calm, Motion::Full).is_empty());
+    fn a_silent_world_has_no_backdrop_at_any_intensity() {
         let silent = input(10.0, &[0.0; 3], &[0.9; 3]);
-        for intensity in [VisualIntensity::Standard, VisualIntensity::Vivid] {
+        for intensity in [
+            VisualIntensity::Calm,
+            VisualIntensity::Standard,
+            VisualIntensity::Vivid,
+        ] {
             assert!(items(&silent, intensity, Motion::Full).is_empty());
         }
+    }
+
+    #[test]
+    fn calm_has_one_faint_field_per_heard_voice_fainter_than_standard_and_without_the_aurora() {
+        let heard = input(10.0, &[1.0, 0.5, 0.0], &[0.5; 3]);
+        let calm = items(&heard, VisualIntensity::Calm, Motion::Full);
+        let standard = items(&heard, VisualIntensity::Standard, Motion::Full);
+        assert_eq!(calm.len(), 2, "one field for each of the two heard voices");
+        assert_eq!(standard.len(), 4);
+        let strongest = |items: &[Item]| items.iter().map(|item| item.opacity).fold(0.0, f32::max);
+        assert!(strongest(&calm) > 0.0, "it is not empty");
+        assert!(
+            strongest(&calm) < strongest(&standard) * 0.5,
+            "it is much fainter"
+        );
+        // Reduced motion freezes the faint field too.
+        let at = |world| input(world, &[1.0, 0.5, 0.0], &[0.5; 3]);
+        assert_eq!(
+            items(&at(1.0), VisualIntensity::Calm, Motion::Reduced),
+            items(&at(30.0), VisualIntensity::Calm, Motion::Reduced)
+        );
     }
 
     #[test]

@@ -13,9 +13,9 @@ use std::f32::consts::TAU;
 use crate::{controls::VisualIntensity, situations::VisualShape, ui::appearance::Motion};
 use scatter::{Scatter, lead_ring_radius, scatter};
 
-/// The most marks one particle can have (a vivid rock impact: core, shock ring, up to twenty
-/// shards, sparks, dust and the texture marks).
-pub(crate) const MAX_MARKS: usize = 48;
+/// The most marks one particle can have (a vivid rock impact: core and its halo, shock ring and
+/// its halo, up to twenty shards and seven sparks with halos, dust and the texture marks).
+pub(crate) const MAX_MARKS: usize = 64;
 
 /// The most decoration marks the scene draws in one frame, over every live particle.
 pub(crate) const MARK_BUDGET: usize = 1800;
@@ -28,10 +28,73 @@ pub(crate) fn mark_cap(live: usize) -> usize {
     (MARK_BUDGET / live.max(1)).clamp(MIN_MARKS, MAX_MARKS)
 }
 
+/// The frame's blurred-shadow marks (Glow and Haze, the costly ones) are shared out evenly among
+/// the live particles, about this many in all.
+pub(crate) const SHADOW_BUDGET: usize = 400;
+/// Each particle keeps at least its core light and that light's halo.
+const MIN_SHADOWS: usize = 2;
+
+/// Glow and Haze are drawn with a blurred shadow, the costliest primitive here.
+fn is_shadow(mark: &Mark) -> bool {
+    matches!(mark, Mark::Glow { .. } | Mark::Haze { .. })
+}
+
+/// What the scene may draw this frame. Each particle is asked mark by mark, core light first: the
+/// core is always allowed; a decoration is allowed while the particle has drawn fewer than its
+/// mark cap and, if it is a blurred shadow, fewer than its own share of the frame's shadows. Every
+/// particle gets the same share, so a crowd thins every particle alike instead of starving the
+/// ones painted last (the newest, brightest ones).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Budget {
+    marks_per_particle: usize,
+    shadows_per_particle: usize,
+    marks: usize,
+    shadows: usize,
+}
+
+impl Budget {
+    pub(crate) fn new(live: usize) -> Self {
+        Self {
+            marks_per_particle: mark_cap(live),
+            // At least the core and its halo, even in a very large crowd.
+            shadows_per_particle: (SHADOW_BUDGET / live.max(1)).max(MIN_SHADOWS),
+            marks: 0,
+            shadows: 0,
+        }
+    }
+
+    pub(crate) fn allows(&mut self, index: usize, mark: &Mark) -> bool {
+        if index == 0 {
+            // A new particle starts: its core light is always drawn.
+            self.marks = 1;
+            self.shadows = usize::from(is_shadow(mark));
+            return true;
+        }
+        if self.marks >= self.marks_per_particle {
+            return false;
+        }
+        if is_shadow(mark) {
+            if self.shadows >= self.shadows_per_particle {
+                return false;
+            }
+            self.shadows += 1;
+        }
+        self.marks += 1;
+        true
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mark {
     /// Soft light: a blurred shadow plus a filled disc, the particle's original look.
     Glow {
+        offset: [f32; 2],
+        radius: f32,
+        rgb: [f32; 3],
+        opacity: f32,
+    },
+    /// A soft blur of light: a blurred shadow with no disc on top, so it has no hard edge.
+    Haze {
         offset: [f32; 2],
         radius: f32,
         rgb: [f32; 3],
@@ -234,11 +297,11 @@ fn texture(
     // An out-of-focus disc beside the particle, its place and size from the serial.
     let bearing = TAU * phase;
     let distance = core * (1.8 + 1.2 * second);
-    look.push(Mark::Dot {
+    look.push(Mark::Haze {
         offset: [bearing.cos() * distance, bearing.sin() * distance],
-        radius: core * (0.9 + 0.5 * phase),
+        radius: core * (0.9 + 0.5 * phase) * 1.6,
         rgb,
-        opacity: opacity * 0.12,
+        opacity: opacity * 0.2,
     });
     look.push(Mark::Cross {
         arm: core * 1.8,
@@ -323,6 +386,20 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
         opacity,
     });
     if !still {
+        // A soft glow around the core at every intensity; light windows get a deeper colour.
+        let (halo, tone) = if input.dark {
+            (lighten(rgb, 0.2), 0.28)
+        } else {
+            (deepen(rgb, 0.8), 0.22)
+        };
+        look.push(Mark::Haze {
+            offset: [0.0, 0.0],
+            radius: core * wobble * 2.4,
+            rgb: halo,
+            opacity: opacity * tone,
+        });
+    }
+    if !still {
         scatter(
             &mut look,
             &Scatter {
@@ -334,6 +411,7 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
                 age,
                 opacity,
                 serial: input.serial,
+                dark: input.dark,
             },
         );
     }
@@ -502,13 +580,123 @@ mod tests {
     }
 
     #[test]
-    fn calm_is_the_same_in_dark_and_light_and_has_no_texture() {
+    fn calm_has_no_texture_and_only_its_core_halo_changes_colour_between_dark_and_light() {
         for shape in SHAPES {
             let dark = marks_of(&at(shape, VisualIntensity::Calm, true), Motion::Full);
             let light = marks_of(&at(shape, VisualIntensity::Calm, false), Motion::Full);
-            assert_eq!(dark, light);
             assert!(!dark.iter().any(|mark| matches!(mark, Mark::Cross { .. })));
+            let without_halo = |marks: &[Mark]| -> Vec<Mark> {
+                marks
+                    .iter()
+                    .filter(|mark| !matches!(mark, Mark::Haze { .. }))
+                    .copied()
+                    .collect()
+            };
+            assert_eq!(without_halo(&dark), without_halo(&light), "{shape:?}");
         }
+    }
+
+    #[test]
+    fn every_intensity_glows_softly_around_the_core_lighter_on_dark_and_deeper_on_light() {
+        for shape in SHAPES {
+            for level in [
+                VisualIntensity::Calm,
+                VisualIntensity::Standard,
+                VisualIntensity::Vivid,
+            ] {
+                let marks = |dark| marks_of(&at(shape, level, dark), Motion::Full);
+                let (dark, light) = (marks(true), marks(false));
+                assert!(
+                    matches!(dark[0], Mark::Glow { .. }),
+                    "the core light stays first"
+                );
+                let (
+                    Mark::Haze {
+                        radius: dark_radius,
+                        rgb: dark_rgb,
+                        ..
+                    },
+                    Mark::Haze { rgb: light_rgb, .. },
+                ) = (dark[1], light[1])
+                else {
+                    panic!("{shape:?} {level:?}: the core is followed by its soft halo");
+                };
+                let Mark::Glow {
+                    radius: core,
+                    rgb: core_rgb,
+                    ..
+                } = dark[0]
+                else {
+                    unreachable!()
+                };
+                assert!(dark_radius > core, "the halo spreads wider than the core");
+                for ((&d, &l), &c) in dark_rgb.iter().zip(&light_rgb).zip(&core_rgb) {
+                    assert!(d >= c && l <= c, "dark lightens, light deepens");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_budget_gives_every_particle_the_same_core_and_shadow_share_in_a_crowd() {
+        let shadow = |core: bool| {
+            let (offset, radius, rgb, opacity) = ([0.0; 2], 4.0, [0.5; 3], 0.5);
+            if core {
+                Mark::Glow {
+                    offset,
+                    radius,
+                    rgb,
+                    opacity,
+                }
+            } else {
+                Mark::Haze {
+                    offset,
+                    radius,
+                    rgb,
+                    opacity,
+                }
+            }
+        };
+        let dot = Mark::Dot {
+            offset: [0.0; 2],
+            radius: 1.0,
+            rgb: [0.5; 3],
+            opacity: 0.5,
+        };
+        for live in [1, 10, 40, 200, 500] {
+            let mut budget = Budget::new(live);
+            let mut per_particle = Vec::new();
+            for _ in 0..live {
+                assert!(
+                    budget.allows(0, &shadow(true)),
+                    "the core light is never given up"
+                );
+                let (mut shadows, mut marks) = (1, 1);
+                for index in 1..MAX_MARKS {
+                    // Every other decoration is a blurred shadow, the rest are cheap dots.
+                    let mark = if index % 2 == 1 { shadow(false) } else { dot };
+                    if budget.allows(index, &mark) {
+                        marks += 1;
+                        shadows += usize::from(index % 2 == 1);
+                    }
+                }
+                assert!(marks <= mark_cap(live), "{live} live: the mark cap holds");
+                per_particle.push(shadows);
+            }
+            assert!(
+                per_particle.windows(2).all(|pair| pair[0] == pair[1]),
+                "{live} live: the last particle drawn is not starved: {per_particle:?}"
+            );
+            assert!(per_particle[0] >= 2, "{live} live: the core keeps its halo");
+            let total: usize = per_particle.iter().sum();
+            assert!(
+                total <= SHADOW_BUDGET.max(2 * live),
+                "{live} live: {total} shadows are within the budget"
+            );
+        }
+        // A lone particle gets all its marks.
+        let mut lone = Budget::new(1);
+        assert!((0..MAX_MARKS).all(|index| lone.allows(index, &dot)));
     }
 
     #[test]
@@ -628,6 +816,12 @@ mod tests {
                                     for mark in look.marks() {
                                         let (numbers, opacity) = match *mark {
                                             Mark::Glow {
+                                                offset,
+                                                radius,
+                                                rgb,
+                                                opacity,
+                                            }
+                                            | Mark::Haze {
                                                 offset,
                                                 radius,
                                                 rgb,
