@@ -11,7 +11,7 @@ mod scatter;
 use std::f32::consts::TAU;
 
 use crate::{controls::VisualIntensity, situations::VisualShape, ui::appearance::Motion};
-use scatter::{Scatter, lead_ring_radius, scatter};
+use scatter::{Scatter, lead_ring_radius, scatter, shock_outline};
 
 /// The most marks one particle can have (a vivid rock impact: core and its halo, shock ring and
 /// its halo, up to twenty shards and seven sparks with halos, dust and the texture marks).
@@ -112,6 +112,18 @@ pub(crate) enum Mark {
     Dot {
         offset: [f32; 2],
         radius: f32,
+        rgb: [f32; 3],
+        opacity: f32,
+    },
+    /// A jagged polygon (a rock fragment, flash or shock wave): a filled shape when `stroke` is 0,
+    /// otherwise an outline of that width. Its corners come from [`vertices`].
+    Poly {
+        offset: [f32; 2],
+        radius: f32,
+        sides: u8,
+        rotation: f32,
+        seed: u32,
+        stroke: f32,
         rgb: [f32; 3],
         opacity: f32,
     },
@@ -235,6 +247,40 @@ fn twinkle(age: f32) -> f32 {
     (std::f32::consts::PI * age.clamp(0.0, 1.0)).sin().powi(2)
 }
 
+/// A value for shaping the `index`-th polygon of this particle, from its serial.
+pub(crate) fn seed(serial: u64, index: u64) -> u32 {
+    (mix(serial ^ index.wrapping_mul(0x2545_f491_4f6c_dd1d)) >> 32) as u32
+}
+
+/// The most corners a polygon mark has.
+pub(crate) const MAX_SIDES: usize = 6;
+
+/// The corners of a jagged polygon around its centre, relative to it: `sides` corners (3 to
+/// [`MAX_SIDES`]) spread round by `rotation`, each nudged along and in or out by amounts taken
+/// from `seed`, so a rock fragment is uneven but the same seed always gives the same shape. The
+/// nudge stays inside each corner's own sector, so the outline never crosses itself.
+pub(crate) fn vertices(
+    sides: u8,
+    radius: f32,
+    rotation: f32,
+    seed: u32,
+) -> ([[f32; 2]; MAX_SIDES], usize) {
+    let count = usize::from(sides).clamp(3, MAX_SIDES);
+    let radius = finite_or_zero(radius).max(0.0);
+    let rotation = finite_or_zero(rotation);
+    let sector = TAU / count as f32;
+    let mut corners = [[0.0; 2]; MAX_SIDES];
+    for (index, corner) in corners.iter_mut().enumerate().take(count) {
+        let bits = mix(u64::from(seed) << 8 | index as u64);
+        let along = (bits & 0xffff) as f32 / 65_535.0 - 0.5;
+        let reach = ((bits >> 16) & 0xffff) as f32 / 65_535.0;
+        let angle = rotation + sector * (index as f32 + 0.5 * along);
+        let length = radius * (0.55 + 0.9 * reach);
+        *corner = [angle.cos() * length, angle.sin() * length];
+    }
+    (corners, count)
+}
+
 /// What standard and vivid add on top of a large particle's calm marks. `size` is the event
 /// radius and the animated core radius, `state` the strength, age and opacity, `unit` two values
 /// from the serial. The caller has already left out reduced motion (core light only).
@@ -273,23 +319,48 @@ fn texture(
         }
     }
     if core >= 1.0 {
-        look.push(Mark::Ring {
-            offset: [0.0, 0.0],
-            radius: core,
-            width: 1.0,
-            rgb: if dark {
-                lighten(rgb, 0.5)
-            } else {
-                deepen(rgb, 0.6)
-            },
-            opacity: opacity * 0.55,
-        });
-        look.push(Mark::Dot {
-            offset: [-core * 0.32, -core * 0.34],
-            radius: (core * 0.24).max(0.8),
-            rgb: [1.0, 1.0, 1.0],
-            opacity: opacity * 0.6,
-        });
+        let rim = if dark {
+            lighten(rgb, 0.5)
+        } else {
+            deepen(rgb, 0.6)
+        };
+        if input.shape == VisualShape::Impact {
+            // A faceted rock: a jagged outline and a small bright facet.
+            look.push(Mark::Poly {
+                offset: [0.0, 0.0],
+                radius: core,
+                sides: 6,
+                rotation: TAU * phase,
+                seed: seed(input.serial, 710),
+                stroke: 1.0,
+                rgb: rim,
+                opacity: opacity * 0.55,
+            });
+            look.push(Mark::Poly {
+                offset: [-core * 0.32, -core * 0.34],
+                radius: (core * 0.3).max(1.0),
+                sides: 3,
+                rotation: TAU * second,
+                seed: seed(input.serial, 711),
+                stroke: 0.0,
+                rgb: [1.0, 1.0, 1.0],
+                opacity: opacity * 0.6,
+            });
+        } else {
+            look.push(Mark::Ring {
+                offset: [0.0, 0.0],
+                radius: core,
+                width: 1.0,
+                rgb: rim,
+                opacity: opacity * 0.55,
+            });
+            look.push(Mark::Dot {
+                offset: [-core * 0.32, -core * 0.34],
+                radius: (core * 0.24).max(0.8),
+                rgb: [1.0, 1.0, 1.0],
+                opacity: opacity * 0.6,
+            });
+        }
     }
     if !vivid {
         return;
@@ -314,13 +385,31 @@ fn texture(
             // Rainbow fringes just outside the ripple or shock ring.
             let ring = lead_ring_radius(input.shape, radius, age);
             for (index, forward) in [true, false].into_iter().enumerate() {
-                look.push(Mark::Ring {
-                    offset: [0.0, 0.0],
-                    radius: ring * (1.08 + 0.1 * index as f32),
-                    width: 1.0,
-                    rgb: rotate(rgb, forward, 0.75),
-                    opacity: opacity * 0.35,
-                });
+                let radius = ring * (1.08 + 0.1 * index as f32);
+                let tint = rotate(rgb, forward, 0.75);
+                if input.shape == VisualShape::Impact {
+                    // Rock has no round edge: the fringes are jagged polygons too.
+                    // Scaled copies of the shock outline, so they stay just outside it.
+                    let (turn, outline) = shock_outline(input.serial);
+                    look.push(Mark::Poly {
+                        offset: [0.0, 0.0],
+                        radius,
+                        sides: 6,
+                        rotation: turn,
+                        seed: outline,
+                        stroke: 1.0,
+                        rgb: tint,
+                        opacity: opacity * 0.35,
+                    });
+                } else {
+                    look.push(Mark::Ring {
+                        offset: [0.0, 0.0],
+                        radius,
+                        width: 1.0,
+                        rgb: tint,
+                        opacity: opacity * 0.35,
+                    });
+                }
             }
             if input.shape == VisualShape::Point {
                 // A falling drop drags a comet tail of fading beads above it.
@@ -354,12 +443,26 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
         // faint, tiny, still dot, the cheapest possible mark; vivid adds a brief twinkle.
         if input.intensity != VisualIntensity::Calm {
             let dot = (radius * 0.5).clamp(0.8, 2.0);
-            look.push(Mark::Dot {
-                offset: [0.0, 0.0],
-                radius: dot,
-                rgb,
-                opacity: opacity * 0.7,
-            });
+            if input.shape == VisualShape::Impact {
+                // A small rock chip is a tiny angular fragment, not a round dot.
+                look.push(Mark::Poly {
+                    offset: [0.0, 0.0],
+                    radius: dot * 1.4,
+                    sides: 4,
+                    rotation: TAU * phase,
+                    seed: seed(input.serial, 900),
+                    stroke: 0.0,
+                    rgb,
+                    opacity: opacity * 0.7,
+                });
+            } else {
+                look.push(Mark::Dot {
+                    offset: [0.0, 0.0],
+                    radius: dot,
+                    rgb,
+                    opacity: opacity * 0.7,
+                });
+            }
             if input.intensity == VisualIntensity::Vivid && motion != Motion::Reduced {
                 look.push(Mark::Cross {
                     arm: dot * 3.0,
@@ -509,7 +612,12 @@ mod tests {
             look(&input(shape, age, 0.5, 3), Motion::Full)
                 .marks()
                 .find_map(|mark| match mark {
-                    Mark::Ring { radius, .. } => Some(*radius),
+                    Mark::Ring { radius, .. }
+                    | Mark::Poly {
+                        radius,
+                        stroke: 0.1..,
+                        ..
+                    } => Some(*radius),
                     _ => None,
                 })
                 .unwrap()
@@ -520,6 +628,59 @@ mod tests {
                 let radius = ring_radius(shape, step as f32 / 20.0);
                 assert!(radius > previous, "spreads at step {step}");
                 previous = radius;
+            }
+        }
+    }
+
+    #[test]
+    fn a_polygons_corners_are_the_same_for_the_same_seed_and_never_cross_themselves() {
+        for sides in 3..=6_u8 {
+            for seed in [0_u32, 1, 77, u32::MAX] {
+                let (a, count) = vertices(sides, 10.0, 0.4, seed);
+                assert_eq!((a, count), vertices(sides, 10.0, 0.4, seed));
+                assert_eq!(count, usize::from(sides));
+                // Walking the corners goes round the centre one way, so the outline is a simple
+                // star-shaped polygon: every corner's bearing is ahead of the previous one.
+                let bearing = |p: [f32; 2]| p[1].atan2(p[0]);
+                let mut total = 0.0;
+                for index in 0..count {
+                    let (from, to) = (a[index], a[(index + 1) % count]);
+                    let step = (bearing(to) - bearing(from)).rem_euclid(TAU);
+                    assert!(
+                        step > 0.0 && step < std::f32::consts::PI,
+                        "{sides} sides, seed {seed}"
+                    );
+                    total += step;
+                }
+                assert!(
+                    (total - TAU).abs() < 1e-3,
+                    "one turn round the centre, got {total}"
+                );
+                for corner in &a[..count] {
+                    let length = corner[0].hypot(corner[1]);
+                    assert!(
+                        (5.4..=14.6).contains(&length),
+                        "uneven but bounded, got {length}"
+                    );
+                }
+            }
+        }
+        assert_ne!(
+            vertices(5, 10.0, 0.4, 1).0,
+            vertices(5, 10.0, 0.4, 2).0,
+            "seeds differ"
+        );
+    }
+
+    #[test]
+    fn polygon_corners_stay_finite_for_extreme_inputs() {
+        for radius in [0.0, -3.0, 1e30, f32::NAN, f32::INFINITY] {
+            for rotation in [0.0, 1e30, f32::NAN, f32::NEG_INFINITY] {
+                for sides in [0_u8, 1, 3, 6, 200] {
+                    let (corners, count) = vertices(sides, radius, rotation, 5);
+                    assert!((3..=MAX_SIDES).contains(&count));
+                    assert!(corners[..count].iter().flatten().all(|v| v.is_finite()));
+                }
             }
         }
     }
@@ -742,6 +903,68 @@ mod tests {
     }
 
     #[test]
+    fn a_rock_look_has_no_ring_or_round_dot_at_any_intensity_in_dark_or_light_large_or_small() {
+        for level in [
+            VisualIntensity::Calm,
+            VisualIntensity::Standard,
+            VisualIntensity::Vivid,
+        ] {
+            for dark in [true, false] {
+                for step in 0..=20 {
+                    for large in [true, false] {
+                        let marks = marks_of(
+                            &ParticleInput {
+                                age: step as f32 / 20.0,
+                                large,
+                                ..at(VisualShape::Impact, level, dark)
+                            },
+                            Motion::Full,
+                        );
+                        assert!(
+                            !marks
+                                .iter()
+                                .any(|mark| matches!(mark, Mark::Ring { .. } | Mark::Dot { .. })),
+                            "{level:?} dark={dark} step {step} large={large}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_rainbow_fringes_of_a_rock_are_scaled_copies_of_its_shock_outline() {
+        let marks = marks_of(
+            &ParticleInput {
+                age: 0.5,
+                ..at(VisualShape::Impact, VisualIntensity::Vivid, true)
+            },
+            Motion::Full,
+        );
+        let (turn, outline) = shock_outline(41);
+        let outlines: Vec<(f32, u32, f32)> = marks
+            .iter()
+            .filter_map(|mark| match *mark {
+                Mark::Poly {
+                    radius,
+                    rotation,
+                    seed,
+                    stroke,
+                    ..
+                } if stroke > 0.0 && seed == outline && rotation == turn => {
+                    Some((radius, seed, stroke))
+                }
+                _ => None,
+            })
+            .collect();
+        // The sharp outline, its wide faint copy, the rim and the two fringes share the shape;
+        // the fringes are the larger ones, outside the shock outline.
+        let shock = lead_ring_radius(VisualShape::Impact, 6.0, 0.5);
+        let outside = outlines.iter().filter(|o| o.0 > shock * 1.07).count();
+        assert_eq!(outside, 2, "{outlines:?}");
+    }
+
+    #[test]
     fn reduced_motion_keeps_only_the_core_light_at_every_intensity() {
         for shape in SHAPES {
             let calm = marks_of(&at(shape, VisualIntensity::Calm, true), Motion::Reduced);
@@ -852,6 +1075,28 @@ mod tests {
                                                 ],
                                                 opacity,
                                             ),
+                                            Mark::Poly {
+                                                offset,
+                                                radius,
+                                                sides,
+                                                rotation,
+                                                seed,
+                                                stroke,
+                                                rgb,
+                                                opacity,
+                                            } => {
+                                                let (corners, count) =
+                                                    vertices(sides, radius, rotation, seed);
+                                                assert!((3..=MAX_SIDES).contains(&count));
+                                                let mut numbers = vec![
+                                                    offset[0], offset[1], radius, rotation, stroke,
+                                                    rgb[0], rgb[1], rgb[2],
+                                                ];
+                                                numbers.extend(
+                                                    corners[..count].iter().flatten().copied(),
+                                                );
+                                                (numbers, opacity)
+                                            }
                                             Mark::Cross {
                                                 arm,
                                                 width,
