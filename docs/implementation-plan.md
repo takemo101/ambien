@@ -119,6 +119,7 @@ flowchart LR
  P13 --> P27
  P21 --> P28
  P14 --> P29
+ P21 --> P33
  P26 --> P30
  P28 --> P31
  P13 --> P32
@@ -653,6 +654,21 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 - [ ] 公開後、実際の URL から DMG を取得でき、SHA-256 が一致する。
 
 **Behavior tests:** 純粋に試験できる規則はない（packaging）。**Smoke/gate:** 作成した DMG の実機起動と、公開後の取得・hash 照合。使い心地と他の OS での動作はユーザーの確認が必要で、AI は未確認を成功にしない。
+
+## P33 8bitモード（ファミコン風のドット映像）
+
+**DependsOn:** P21（演出の強さの設定がある）。**SPEC:** [演出の強さ](../SPEC.md#演出の強さ)、[設定窓](../SPEC.md#設定窓)、[保存](../SPEC.md#保存)。
+
+**Files（予定）:** Modify `src/controls.rs`（`eightbit`・`ControlEdit::EightBit`）、`src/persistence.rs`（保存・既定 false・型の検査）、`src/platform/macos.rs`（シーン窓の描画面へ Core Image のピクセル化とファミコンのパレット変換を掛ける Adapter、パレット変換の純粋関数）、`src/ui/scene.rs`・`src/app.rs`（反映）、`src/ui/settings.rs`（Switch）、`docs/verification.md`・`docs/detailed-design.md`。
+
+**Produces:** 設定「8bitモード」。入で、シーン窓が論理3pxのドットと54色のファミコンのパレットで描かれる。背景のすりガラスは変えない。
+
+- [ ] 入でシーンの粒・光・波紋がドット化・減色され、切で元へ戻る。保存・復元できる。
+- [ ] 倍率が違っても、見た目のドットは論理3pxで、窓の移動・別画面でも保たれる。
+- [ ] 音・世界・設定窓・信号ボタンは変わらず、フィルターを作れないときは通常の見た目で続けて失敗を出す。
+- [ ] 入切の描画負荷の差を実機で測る。
+
+**Behavior tests:** パレット変換の純粋関数（色立体の全ノードがパレットの色になる、黒と白の端、54色が重複しない）、ドットの大きさの換算（倍率による）、保存の往復・型の誤り・既定値、編集が音声へ渡らないこと。**Smoke/gate:** 実窓で入切を撮って確認し、負荷を測る。見た目の好み（ドットの大きさ・パレット・すりガラスとの重なり）はユーザーが判断する。
 
 ## 全 SPEC 節の coverage matrix
 

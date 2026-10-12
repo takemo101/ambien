@@ -428,6 +428,12 @@ fn normalize(root: &Map<String, Value>, registry: &Registry) -> (LoadedState, Op
     ) as f32)
     .expect("clamped volume is normalized");
     controls.blur = boolean(root.get("blur"), controls.blur, "blur", &mut repairs);
+    controls.eightbit = boolean(
+        root.get("eightbit"),
+        controls.eightbit,
+        "eightbit",
+        &mut repairs,
+    );
     controls.visuals = match root.get("visuals") {
         None => controls.visuals,
         Some(value) => value
@@ -569,6 +575,7 @@ impl StateDocument {
         root.insert("version".into(), Value::from(1));
         root.insert("volume".into(), Value::from(controls.volume.get()));
         root.insert("blur".into(), Value::from(controls.blur));
+        root.insert("eightbit".into(), Value::from(controls.eightbit));
         root.insert("veil".into(), Value::from(controls.veil.get()));
         root.insert("visuals".into(), Value::from(controls.visuals.name()));
         root.insert("mute".into(), Value::from(controls.mute));
@@ -1320,6 +1327,37 @@ mod tests {
         let (state, _, _, _) = loaded(load_state(&fixture.path(), &registry));
         assert!(!state.controls.blur);
         assert_eq!(state.controls.veil, Normalized::new(0.35).unwrap());
+    }
+
+    #[test]
+    fn eight_bit_defaults_off_repairs_a_wrong_type_and_round_trips() {
+        let fixture = Fixture::new();
+        let registry = registry();
+        fixture.write(&json!({"version":1, "volume":0.4}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(!state.controls.eightbit);
+        assert!(notice.is_none());
+        // A wrong type falls back to off and is reported, like the other display settings.
+        fixture.write(&json!({"version":1, "eightbit":"yes"}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(!state.controls.eightbit);
+        assert!(notice.unwrap().contains("eightbit"));
+        fixture.write(&json!({"version":1, "eightbit":true}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(state.controls.eightbit);
+        assert!(notice.is_none());
+        // A saved choice survives a restart.
+        fixture.write(&json!({"version":1}));
+        let (worker, startup, _notices) =
+            SaveWorker::start(fixture.path(), registry.clone()).unwrap();
+        startup.recv_blocking().unwrap();
+        let revision = Revision::from_raw(1);
+        let mut request = snapshot(&registry, 0.5);
+        request.controls.eightbit = true;
+        worker.submit(revision, request).unwrap();
+        worker.flush(revision).unwrap();
+        let (state, _, _, _) = loaded(load_state(&fixture.path(), &registry));
+        assert!(state.controls.eightbit);
     }
 
     #[test]

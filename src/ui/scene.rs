@@ -16,7 +16,7 @@ use crate::{
         timing::MachNanos,
         transport::{VISIBLE_CAPACITY, VisualEvent, WorldVisualHeader},
     },
-    controls::{Normalized, VisualIntensity},
+    controls::{ControlState, Normalized, VisualIntensity},
     situations::VisualShape,
     ui::{
         appearance::{AccessibilityState, Motion},
@@ -145,6 +145,9 @@ pub(crate) struct SceneView {
     opaque: bool,
     veil: f32,
     intensity: VisualIntensity,
+    /// The 8-bit look is wanted, and the backing scale it was last applied at (`None` = not applied).
+    eightbit: bool,
+    dots_applied: Option<f64>,
     _visibility: Subscription,
     _placement: Subscription,
 }
@@ -157,13 +160,16 @@ impl SceneView {
         accessibility: AccessibilityState,
         veil: Normalized,
         intensity: VisualIntensity,
+        eightbit: bool,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let visibility = cx.observe_window_visibility(window, |view, _, window, cx| {
             view.update_animation(window, cx);
         });
-        let placement = cx.observe_window_bounds(window, |_, window, cx| {
+        let placement = cx.observe_window_bounds(window, |view, window, cx| {
+            // A move to a display with another backing scale needs the dots re-sized.
+            view.apply_dots(window);
             crate::app::dispatch_scene_placement_changed(
                 window.window_handle().window_id(),
                 crate::platform::macos::capture_placement(window),
@@ -181,32 +187,50 @@ impl SceneView {
             opaque: accessibility.reduce_transparency,
             veil: veil.get(),
             intensity,
+            eightbit,
+            dots_applied: None,
             _visibility: visibility,
             _placement: placement,
         };
         view.update_audio(status, source, window, cx);
+        view.apply_dots(window);
         view
     }
 
     /// Applies the surface choices only to presentation: the window surface (blur choice
-    /// and reduce transparency), the colour film, and how particles are drawn. Audio state,
+    /// and reduce transparency), the colour film, how particles are drawn, and the 8-bit look. Audio state,
     /// controls and the cached particles are untouched.
     pub(crate) fn set_surface(
         &mut self,
         accessibility: AccessibilityState,
-        blur: bool,
-        veil: Normalized,
-        intensity: VisualIntensity,
+        controls: &ControlState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.set_background_appearance(accessibility.scene_background(blur));
+        window.set_background_appearance(accessibility.scene_background(controls.blur));
         crate::platform::macos::apply_blur_material(window);
         self.motion = accessibility.motion();
         self.opaque = accessibility.reduce_transparency;
-        self.veil = veil.get();
-        self.intensity = intensity;
+        self.veil = controls.veil.get();
+        self.intensity = controls.visuals;
+        self.eightbit = controls.eightbit;
+        self.apply_dots(window);
         cx.notify();
+    }
+
+    /// Puts the 8-bit look on or off the drawing layer, and keeps its dot size right when the
+    /// window moves to a display with another backing scale. Presentation only.
+    fn apply_dots(&mut self, window: &Window) {
+        let wanted = self.eightbit.then(|| f64::from(window.scale_factor()));
+        if wanted == self.dots_applied {
+            return;
+        }
+        // Record the attempt first, so a failure is reported once and not on every bounds change.
+        self.dots_applied = wanted;
+        let block = wanted.and_then(crate::ui::dots::block_pixels);
+        if let Err(error) = crate::platform::macos::set_dot_filter(window, block) {
+            eprintln!("Ambien: 8bitモードを反映できません: {error}");
+        }
     }
 
     pub(crate) fn update_audio(

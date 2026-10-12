@@ -1449,6 +1449,126 @@ pub(crate) fn apply_blur_material(window: &gpui::Window) {
     }
 }
 
+// Core Image's filters are reached by name at run time, so the framework has to be loaded.
+#[link(name = "CoreImage", kind = "framework")]
+unsafe extern "C" {}
+
+// The colour cube is written in sRGB, so Core Image has to be told its colour space (it would
+// otherwise read the cube in its linear working space and turn mid-tones black).
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    static kCGColorSpaceSRGB: *const std::ffi::c_void;
+    fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(object: *const std::ffi::c_void);
+}
+
+/// Why the 8-bit filter could not be put on (or taken off) the scene's drawing layer.
+#[derive(Debug, PartialEq)]
+pub(crate) enum DotFilterError {
+    MainThreadRequired,
+    NativeHandleUnavailable,
+    /// The named piece of Core Image or the layer is not available on this system.
+    Unavailable(&'static str),
+}
+
+impl std::fmt::Display for DotFilterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MainThreadRequired => write!(f, "must run on the main thread"),
+            Self::NativeHandleUnavailable => {
+                write!(f, "the GPUI window has no available AppKit view")
+            }
+            Self::Unavailable(what) => write!(f, "{what} is not available"),
+        }
+    }
+}
+
+impl std::error::Error for DotFilterError {}
+
+/// The Famicom colour cube as the bytes `CIColorCubeWithColorSpace` takes, built once.
+fn dot_cube_bytes() -> &'static [u8] {
+    static CUBE: std::sync::OnceLock<Box<[u8]>> = std::sync::OnceLock::new();
+    CUBE.get_or_init(|| {
+        crate::ui::dots::colour_cube(crate::ui::dots::CUBE_DIMENSION)
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect()
+    })
+}
+
+/// Puts the 8-bit look on the scene window, or takes it off. `block_pixels` is the width of one dot
+/// in device pixels (`None` removes the look). It adds two Core Image filters to the layer GPUI
+/// draws into: `CIPixellate` (dots of that size) then `CIColorCubeWithColorSpace` (every colour pulled to the
+/// Famicom palette). Both run on the GPU in the window compositor, so the OS's blurred backdrop
+/// behind the window, the title bar buttons and GPUI itself are untouched.
+pub(crate) fn set_dot_filter(
+    window: &gpui::Window,
+    block_pixels: Option<f64>,
+) -> Result<(), DotFilterError> {
+    use objc2::runtime::AnyClass;
+    use objc2_foundation::{NSArray, NSData, NSNumber};
+
+    let _mtm = MainThreadMarker::new().ok_or(DotFilterError::MainThreadRequired)?;
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|_| DotFilterError::NativeHandleUnavailable)?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err(DotFilterError::NativeHandleUnavailable);
+    };
+    // SAFETY: WindowHandle guarantees this NSView for the borrowed GPUI Window; the access is on the
+    // main thread, and no native object escapes this synchronous scope.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let layer: Option<Retained<AnyObject>> = unsafe { msg_send![view, layer] };
+    let layer = layer.ok_or(DotFilterError::Unavailable("the view's layer"))?;
+    let Some(block) = block_pixels else {
+        // SAFETY: `setFilters:` takes an optional NSArray; nil removes the filters.
+        let _: () = unsafe { msg_send![&*layer, setFilters: Option::<&NSArray<AnyObject>>::None] };
+        return Ok(());
+    };
+    let filter_class = AnyClass::get(c"CIFilter").ok_or(DotFilterError::Unavailable("CIFilter"))?;
+    // SAFETY: `+[CIFilter filterWithName:]` returns an optional, retained filter.
+    let make = |name: &'static objc2_foundation::NSString,
+                missing: &'static str|
+     -> Result<Retained<AnyObject>, DotFilterError> {
+        let made: Option<Retained<AnyObject>> =
+            unsafe { msg_send![filter_class, filterWithName: name] };
+        made.ok_or(DotFilterError::Unavailable(missing))
+    };
+    let pixellate = make(ns_string!("CIPixellate"), "CIPixellate")?;
+    let cube = make(
+        ns_string!("CIColorCubeWithColorSpace"),
+        "CIColorCubeWithColorSpace",
+    )?;
+    // SAFETY: creates a +1 colour space, released below once the filter holds its own reference.
+    let srgb = unsafe { CGColorSpaceCreateWithName(kCGColorSpaceSRGB) };
+    if srgb.is_null() {
+        return Err(DotFilterError::Unavailable("the sRGB colour space"));
+    }
+    let scale = NSNumber::new_f64(block);
+    let dimension = NSNumber::new_f64(crate::ui::dots::CUBE_DIMENSION as f64);
+    let bytes = NSData::with_bytes(dot_cube_bytes());
+    // SAFETY: key-value coding with the documented input keys of these two built-in filters.
+    unsafe {
+        let _: () = msg_send![&*pixellate, setValue: &*scale, forKey: ns_string!("inputScale")];
+        let _: () =
+            msg_send![&*cube, setValue: &*dimension, forKey: ns_string!("inputCubeDimension")];
+        let _: () = msg_send![&*cube, setValue: &*bytes, forKey: ns_string!("inputCubeData")];
+        // A CF object is an Objective-C object, so key-value coding takes it as it is.
+        let _: () = msg_send![
+            &*cube,
+            setValue: srgb.cast::<AnyObject>(),
+            forKey: ns_string!("inputColorSpace")
+        ];
+        CFRelease(srgb);
+    }
+    let filters = NSArray::from_retained_slice(&[pixellate, cube]);
+    // SAFETY: `setFilters:` takes an NSArray of CIFilter.
+    let _: () = unsafe { msg_send![&*layer, setFilters: &*filters] };
+    Ok(())
+}
+
 pub(crate) fn capture_placement(
     window: &gpui::Window,
 ) -> Result<(WindowPlacement, DisplayId), WindowGeometryError> {

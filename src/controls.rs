@@ -78,6 +78,7 @@ impl VisualIntensity {
 pub(crate) enum ControlEdit {
     Volume(Normalized),
     Blur(bool),
+    EightBit(bool),
     Veil(Normalized),
     Visuals(VisualIntensity),
     Mute(bool),
@@ -137,6 +138,7 @@ impl Error for ControlEditError {}
 struct CommonFields {
     volume: Normalized,
     blur: bool,
+    eightbit: bool,
     veil: Normalized,
     visuals: VisualIntensity,
     mute: bool,
@@ -151,6 +153,7 @@ impl From<&ControlState> for CommonFields {
         Self {
             volume: state.volume,
             blur: state.blur,
+            eightbit: state.eightbit,
             veil: state.veil,
             visuals: state.visuals,
             mute: state.mute,
@@ -167,6 +170,8 @@ pub(crate) struct ControlState {
     pub volume: Normalized,
     /// Scene background: blurred glass when true, plain transparency when false. Display only.
     pub blur: bool,
+    /// Draw the scene as Famicom-style dots (a pixelating, palette-reducing post-process). Display only.
+    pub eightbit: bool,
     /// Amount of colour film over the scene, 0..=1. Display only.
     pub veil: Normalized,
     /// How much the scene shows: calm (large particles only), standard or vivid. Display only.
@@ -206,6 +211,7 @@ impl ControlState {
         Self {
             volume: Normalized::new(0.3).expect("SPEC volume is normalized"),
             blur: true,
+            eightbit: false,
             veil: Normalized::ZERO,
             visuals: VisualIntensity::Calm,
             mute: false,
@@ -250,6 +256,11 @@ impl ControlState {
             ControlEdit::Blur(value) => {
                 let mut common = CommonFields::from(&*self);
                 common.blur = value;
+                self.set_common(common)
+            }
+            ControlEdit::EightBit(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.eightbit = value;
                 self.set_common(common)
             }
             ControlEdit::Veil(value) => {
@@ -358,6 +369,7 @@ impl ControlState {
         };
         self.volume = common.volume;
         self.blur = common.blur;
+        self.eightbit = common.eightbit;
         self.veil = common.veil;
         self.visuals = common.visuals;
         self.mute = common.mute;
@@ -378,6 +390,7 @@ impl ControlState {
         assert_eq!(self.knobs.len(), source.knobs.len());
         self.volume = source.volume;
         self.blur = source.blur;
+        self.eightbit = source.eightbit;
         self.veil = source.veil;
         self.visuals = source.visuals;
         self.mute = source.mute;
@@ -548,6 +561,30 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(state.settings_revision.get(), 2);
+    }
+
+    #[test]
+    fn the_eight_bit_mode_starts_off_and_is_a_display_only_edit_that_never_changes_the_world() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        assert!(!state.eightbit);
+        let target = state.manual_target;
+        assert!(state.apply(ControlEdit::EightBit(true)).unwrap());
+        assert!(state.eightbit);
+        // It is a settings change only: not a manual selection, and the movement settings are untouched.
+        assert_eq!(state.manual_target, target);
+        assert_eq!(state.manual_revision, Revision::INITIAL);
+        assert_eq!(state.wander_revision, Revision::INITIAL);
+        assert!(state.wander);
+        assert_eq!(state.settings_revision.get(), 1);
+        // Setting the same value again is not an edit, and a view copying the values sees the choice.
+        assert!(!state.apply(ControlEdit::EightBit(true)).unwrap());
+        assert_eq!(state.settings_revision.get(), 1);
+        let mut shown = ControlState::new(&registry);
+        shown.copy_values_from(&state);
+        assert!(shown.eightbit);
+        assert!(state.apply(ControlEdit::EightBit(false)).unwrap());
+        assert!(!state.eightbit);
     }
 
     #[test]
