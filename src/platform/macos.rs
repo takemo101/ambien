@@ -994,6 +994,9 @@ pub(crate) enum WindowRole {
     Settings,
 }
 
+/// The settings window's smallest content height, fixed: it can be dragged taller, never shorter.
+const SETTINGS_MIN_HEIGHT: f64 = 400.0;
+
 impl WindowRole {
     fn content_size(self) -> NSSize {
         match self {
@@ -1002,13 +1005,56 @@ impl WindowRole {
         }
     }
 
+    pub(crate) fn resizes_vertically(self) -> bool {
+        matches!(self, Self::Settings)
+    }
+
+    /// The size a refit starts from. The scene always returns to its fixed size. The settings
+    /// window starts from the height the user last gave it by dragging (`chosen`; the default
+    /// when they never did), never below the minimum, at its fixed width. It is the chosen height
+    /// and not the window's current one, so a window a short work area pushed down grows back
+    /// when the work area allows.
+    fn refit_baseline(self, chosen: Option<f64>) -> NSSize {
+        match self {
+            Self::Scene => self.content_size(),
+            Self::Settings => NSSize::new(
+                self.content_size().width,
+                chosen
+                    .filter(|height| height.is_finite())
+                    .map_or(self.content_size().height, |height| {
+                        height.max(SETTINGS_MIN_HEIGHT)
+                    }),
+            ),
+        }
+    }
+
+    /// The content size limits (smallest, largest) AppKit enforces for a window now `content`
+    /// big on a work area `available_height` tall. The scene is pinned to `content`. The settings
+    /// window's width is pinned and its height runs from the fixed minimum to the work area; when
+    /// the work area is shorter than the minimum the window is pinned to its fitted height.
+    fn size_limits(self, content: NSSize, available_height: f64) -> (NSSize, NSSize) {
+        if !self.resizes_vertically() {
+            return (content, content);
+        }
+        let minimum = SETTINGS_MIN_HEIGHT.min(content.height);
+        let maximum = if available_height.is_finite() {
+            available_height.max(minimum)
+        } else {
+            content.height.max(minimum)
+        };
+        (
+            NSSize::new(content.width, minimum),
+            NSSize::new(content.width, maximum),
+        )
+    }
+
     fn style(self) -> NSWindowStyleMask {
         let common = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable;
         match self {
             Self::Scene => common | NSWindowStyleMask::FullSizeContentView,
-            Self::Settings => common,
+            Self::Settings => common | NSWindowStyleMask::Resizable,
         }
     }
 }
@@ -1442,6 +1488,7 @@ pub(crate) fn capture_placement(
 
 pub(crate) fn constrain_window(
     window: &gpui::Window,
+    role: WindowRole,
     prepared: &PreparedWindow,
 ) -> Result<(), WindowGeometryError> {
     let _mtm = MainThreadMarker::new().ok_or(WindowGeometryError::MainThreadRequired)?;
@@ -1471,6 +1518,12 @@ pub(crate) fn constrain_window(
     if !valid_rect(frame) || !valid_rect(native.contentRectForFrameRect(frame)) {
         return Err(WindowGeometryError::InvalidGeometry);
     }
+    // The tallest the window may get is the content height of the screen's work area; without a
+    // screen it stays at its fitted height.
+    let available_height = native.screen().map_or(content_size.height, |screen| {
+        let metrics = FrameMetrics::measured(frame, native.contentRectForFrameRect(frame));
+        metrics.content_for_frame(screen.visibleFrame()).size.height
+    });
     // All fallible work precedes mutations: an error leaves existing finite placement
     // and constraints untouched. NSView::window's getter-owned Retained ends here.
     let mut behavior = native.collectionBehavior();
@@ -1487,8 +1540,9 @@ pub(crate) fn constrain_window(
     if let Some(zoom) = native.standardWindowButton(NSWindowButton::ZoomButton) {
         zoom.setEnabled(false);
     }
-    native.setContentMinSize(content_size);
-    native.setContentMaxSize(content_size);
+    let (minimum, maximum) = role.size_limits(content_size, available_height);
+    native.setContentMinSize(minimum);
+    native.setContentMaxSize(maximum);
     Ok(())
 }
 
@@ -1547,6 +1601,7 @@ fn refit_target(
 pub(crate) fn refit_window(
     window: &gpui::Window,
     role: WindowRole,
+    chosen_height: Option<f64>,
 ) -> Result<bool, WindowGeometryError> {
     let _mtm = MainThreadMarker::new().ok_or(WindowGeometryError::MainThreadRequired)?;
     let handle = HasWindowHandle::window_handle(window)
@@ -1566,20 +1621,49 @@ pub(crate) fn refit_window(
         .ok_or(WindowGeometryError::DisplayUnavailable)?;
     let frame = native.frame();
     let metrics = FrameMetrics::measured(frame, native.contentRectForFrameRect(frame));
-    let Some(target) = refit_target(
+    let visible = screen.visibleFrame();
+    let target = refit_target(
         screen.frame(),
-        screen.visibleFrame(),
-        role.content_size(),
+        visible,
+        role.refit_baseline(chosen_height),
         metrics,
         frame,
-    )?
-    else {
+    )?;
+    // The work area can change without the window moving, and it sets how tall the settings
+    // window may grow, so the limits follow it whether or not the frame changes.
+    let content = target.map_or(metrics.content_for_frame(frame).size, |target| {
+        target.content
+    });
+    let (minimum, maximum) =
+        role.size_limits(content, metrics.content_for_frame(visible).size.height);
+    native.setContentMinSize(minimum);
+    native.setContentMaxSize(maximum);
+    let Some(target) = target else {
         return Ok(false);
     };
-    native.setContentMinSize(target.content);
-    native.setContentMaxSize(target.content);
     native.setFrame_display(target.outer, true);
     Ok(true)
+}
+
+/// The window's content height while the user is dragging its edge, `None` at any other time
+/// (including a refit that resized it). This is how the app tells the height a person chose from
+/// one the system forced on the window.
+pub(crate) fn live_resize_content_height(window: &gpui::Window) -> Option<f64> {
+    let _mtm = MainThreadMarker::new()?;
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: WindowHandle guarantees a valid NSView for the borrowed GPUI Window; the main
+    // thread was checked above and the reference ends with this synchronous scope.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let native = view.window()?;
+    if !native.inLiveResize() {
+        return None;
+    }
+    let frame = native.frame();
+    let content = native.contentRectForFrameRect(frame);
+    (valid_rect(frame) && valid_rect(content)).then_some(content.size.height)
 }
 
 #[cfg(test)]
@@ -1707,6 +1791,84 @@ mod tests {
             height,
             display_uuid: None,
         }
+    }
+
+    #[test]
+    fn the_scene_is_pinned_and_the_settings_window_runs_from_a_fixed_minimum_to_the_work_area() {
+        let scene = WindowRole::Scene.content_size();
+        assert_eq!(WindowRole::Scene.size_limits(scene, 2000.0), (scene, scene));
+        assert!(!WindowRole::Scene.resizes_vertically());
+
+        let settings = WindowRole::Settings.content_size();
+        assert!(WindowRole::Settings.resizes_vertically());
+        for height in [400.0, 650.0, 760.0, 1400.0] {
+            let content = NSSize::new(settings.width, height);
+            let (minimum, maximum) = WindowRole::Settings.size_limits(content, 1400.0);
+            // The width never moves, and the minimum height is the same whatever the window is
+            // now; only the largest follows the work area.
+            assert_eq!(
+                (minimum.width, maximum.width),
+                (settings.width, settings.width)
+            );
+            assert_eq!(minimum.height, SETTINGS_MIN_HEIGHT);
+            assert_eq!(maximum.height, 1400.0);
+        }
+    }
+
+    #[test]
+    fn a_work_area_shorter_than_the_minimum_pins_the_settings_window_to_what_fits() {
+        let content = NSSize::new(520.0, 300.0);
+        let (minimum, maximum) = WindowRole::Settings.size_limits(content, 300.0);
+        assert_eq!((minimum, maximum), (content, content));
+        // Unusable numbers never produce a range that excludes the window itself.
+        let (minimum, maximum) = WindowRole::Settings.size_limits(content, f64::NAN);
+        assert!(minimum.height <= content.height && content.height <= maximum.height);
+    }
+
+    #[test]
+    fn a_refit_follows_the_height_the_user_chose_and_grows_back_when_there_is_room() {
+        let settings = WindowRole::Settings;
+        let tall = NSSize::new(520.0, 1000.0);
+        // Never chosen: the default height. Chosen: that height, at the fixed width.
+        assert_eq!(settings.refit_baseline(None), settings.content_size());
+        assert_eq!(settings.refit_baseline(Some(1000.0)), tall);
+        // Never below the minimum, and a broken height falls back to the default.
+        assert_eq!(
+            settings.refit_baseline(Some(100.0)).height,
+            SETTINGS_MIN_HEIGHT
+        );
+        assert_eq!(
+            settings.refit_baseline(Some(f64::NAN)),
+            settings.content_size()
+        );
+        // The scene always returns to its fixed size.
+        assert_eq!(
+            WindowRole::Scene.refit_baseline(Some(100.0)),
+            WindowRole::Scene.content_size()
+        );
+
+        let screen = rect(0.0, 0.0, 1920.0, 1200.0);
+        let visible = rect(0.0, 0.0, 1920.0, 1170.0);
+        let tall_outer = metrics().frame_for_content(rect(100.0, 100.0, tall.width, tall.height));
+        let baseline = settings.refit_baseline(Some(tall.height));
+        // On the same screen a window the user made tall is left exactly as it is.
+        assert_eq!(
+            refit_target(screen, visible, baseline, metrics(), tall_outer),
+            Ok(None)
+        );
+        // On a shorter work area it is brought down to what fits, not reset to the default.
+        let short = rect(0.0, 0.0, 1920.0, 700.0);
+        let shrunk = refit_target(screen, short, baseline, metrics(), tall_outer)
+            .unwrap()
+            .unwrap();
+        assert!(shrunk.content.height < tall.height && shrunk.content.height > SETTINGS_MIN_HEIGHT);
+        assert_eq!(shrunk.content.width, 520.0);
+        // Back on the roomy screen the chosen height is restored, because the baseline is what
+        // the user chose and not the shrunk window's height.
+        let restored = refit_target(screen, visible, baseline, metrics(), shrunk.outer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.content.height, tall.height);
     }
 
     #[test]

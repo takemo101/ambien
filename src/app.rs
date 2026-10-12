@@ -83,6 +83,8 @@ pub(crate) struct AppModel {
     scene_appearance: Option<Subscription>,
     settings_appearance: Option<Subscription>,
     settings_display: Option<DisplayId>,
+    /// The content height the user last dragged the settings window to, until it closes.
+    settings_height: Option<f64>,
     screen_layout: Option<ScreenLayout>,
     accessibility: AccessibilityState,
     environment: Option<EnvironmentMonitor>,
@@ -181,6 +183,7 @@ pub(crate) fn start(cx: &mut App) {
         scene_appearance: None,
         settings_appearance: None,
         settings_display: None,
+        settings_height: None,
         screen_layout: read_screen_layout().ok(),
         accessibility,
         environment,
@@ -394,6 +397,7 @@ pub(crate) fn dispatch_control_edit(edit: ControlEdit, cx: &mut App) {
 pub(crate) fn dispatch_settings_display(
     window_id: WindowId,
     display: Result<DisplayId, WindowGeometryError>,
+    live_height: Option<f64>,
     cx: &mut App,
 ) {
     cx.defer(move |cx| {
@@ -401,7 +405,7 @@ pub(crate) fn dispatch_settings_display(
             return;
         };
         owner.update(cx, |model, cx| {
-            model.settings_display_changed(window_id, display, cx);
+            model.settings_display_changed(window_id, display, live_height, cx);
         });
     });
 }
@@ -677,6 +681,7 @@ impl AppModel {
             self.settings = None;
             self.settings_appearance = None;
             self.settings_display = None;
+            self.settings_height = None;
         }
     }
 
@@ -709,8 +714,13 @@ impl AppModel {
             WindowRole::Scene => ("シーン", self.scene.map(AnyWindowHandle::from)),
             WindowRole::Settings => ("設定", self.settings.map(AnyWindowHandle::from)),
         };
-        let result = handle
-            .map(|handle| handle.update(cx, |_, window, cx| refit_and_sync(window, role, cx)));
+        let chosen = match role {
+            WindowRole::Scene => None,
+            WindowRole::Settings => self.settings_height,
+        };
+        let result = handle.map(|handle| {
+            handle.update(cx, |_, window, cx| refit_and_sync(window, role, chosen, cx))
+        });
         match result {
             None | Some(Ok(Ok(()))) => {}
             Some(Ok(Err(error))) => {
@@ -724,6 +734,7 @@ impl AppModel {
         &mut self,
         window_id: WindowId,
         display: Result<DisplayId, WindowGeometryError>,
+        live_height: Option<f64>,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -731,6 +742,11 @@ impl AppModel {
             .is_none_or(|window| window.window_id() != window_id)
         {
             return; // A retired settings window cannot refit its replacement.
+        }
+        // The height a person dragged the window to is remembered, so a refit forced by a short
+        // work area can give it back later. Other size changes never reach here as a height.
+        if let Some(height) = live_height {
+            self.settings_height = Some(height);
         }
         // An unreadable display keeps the last known fit; the first capture is only recorded.
         let Ok(display) = display else {
@@ -1125,9 +1141,10 @@ impl AppModel {
 fn refit_and_sync(
     window: &mut Window,
     role: WindowRole,
+    chosen_height: Option<f64>,
     cx: &mut App,
 ) -> Result<(), WindowGeometryError> {
-    if refit_window(window, role)? {
+    if refit_window(window, role, chosen_height)? {
         window.bounds_changed(cx);
     }
     Ok(())
@@ -1202,7 +1219,7 @@ fn open_window<V: Render + 'static>(
             display_id: Some(prepared.display_id),
             titlebar: Some(titlebar),
             window_background: background,
-            is_resizable: false,
+            is_resizable: role.resizes_vertically(),
             is_minimizable: true,
             is_movable: true,
             app_owns_titlebar_drag: matches!(role, WindowRole::Scene),
@@ -1215,7 +1232,7 @@ fn open_window<V: Render + 'static>(
     )?;
     handle.update(cx, |_, window, cx| {
         crate::platform::macos::apply_blur_material(window);
-        if let Err(error) = constrain_window(window, &prepared) {
+        if let Err(error) = constrain_window(window, role, &prepared) {
             window.remove_window();
             return Err(error);
         }

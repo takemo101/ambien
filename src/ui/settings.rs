@@ -71,11 +71,13 @@ impl SettingsView {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        // Only the display is reported; the app refits when it differs from the last one.
+        // The display and, while the user drags the window's edge, the height they chose are
+        // reported; the app refits when the display differs from the last one.
         let display = cx.observe_window_bounds(window, |_, window, cx| {
             crate::app::dispatch_settings_display(
                 window.window_handle().window_id(),
                 crate::platform::macos::capture_placement(window).map(|(_, display)| display),
+                crate::platform::macos::live_resize_content_height(window),
                 cx,
             );
         });
