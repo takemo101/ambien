@@ -1,13 +1,18 @@
-// Small read/drive probes for checks that scripts/native-e2e.swift does not cover (window edge
-// resize, wheel scroll, AX toggles, blur/transparency against a controlled backdrop). Each command
-// is one observation; nothing here decides pass or fail for a product requirement.
+// Small probes for macOS UI checks that a project's own runner usually does not cover: window
+// edge resizing, wheel scrolling, accessibility presses, and blur/transparency against a controlled
+// backdrop. Each command is one observation; nothing here decides pass or fail for a requirement.
+// It uses only system frameworks and is a reference implementation, not an automation framework.
 //
-//   /usr/bin/swift scripts/native-probe.swift windows [--owner NAME]
-//   /usr/bin/swift scripts/native-probe.swift drag  --window-id ID --edge bottom|top|left|right|title --by PX [--dx PX]
-//   /usr/bin/swift scripts/native-probe.swift wheel --window-id ID --dy PIXELS
-//   /usr/bin/swift scripts/native-probe.swift press --pid PID --title TEXT [--role AXCheckBox]
-//   /usr/bin/swift scripts/native-probe.swift backdrop [--seconds 60]
-//   /usr/bin/swift scripts/native-probe.swift sharpness PNG
+// Build once (from the skill directory):  swiftc -O scripts/native-probe.swift -o /tmp/native-probe
+// or run it directly:
+//   swift scripts/native-probe.swift windows [--owner NAME]
+//   swift scripts/native-probe.swift region-clear --rect X,Y,W,H --backdrop-pid PID [--allow-pid PID ...]
+//   swift scripts/native-probe.swift drag  --window-id ID --pid PID --edge bottom|top|left|right|title --by PX [--dx PX]
+//   swift scripts/native-probe.swift wheel --window-id ID --pid PID --dy PIXELS
+//   swift scripts/native-probe.swift press --pid PID --title TEXT [--role AXCheckBox]
+//   swift scripts/native-probe.swift backdrop [--seconds 60]   (prints its pid; covers the main display;
+//                                                                run the compiled binary so the pid is the probe's)
+//   swift scripts/native-probe.swift sharpness PNG
 //
 // `drag` and `wheel` only post an event after the front-most window under the pointer is the named
 // window (so a window stacked above it cannot receive the input). They need Accessibility and
@@ -19,10 +24,13 @@ import Foundation
 
 struct Win {
     var id: Int
+    var pid: Int32
     var owner: String
     var title: String
     var x: Double, y: Double, w: Double, h: Double
     var onscreen: Bool
+    var layer: Int
+    var alpha: Double
     var frame: CGRect { CGRect(x: x, y: y, width: w, height: h) }
 }
 
@@ -36,9 +44,12 @@ func windows(onscreenOnly: Bool) -> [Win] {
               let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double,
               let id = info[kCGWindowNumber as String] as? Int else { return nil }
         return Win(
-            id: id, owner: info[kCGWindowOwnerName as String] as? String ?? "",
+            id: id, pid: info[kCGWindowOwnerPID as String] as? Int32 ?? 0,
+            owner: info[kCGWindowOwnerName as String] as? String ?? "",
             title: info[kCGWindowName as String] as? String ?? "", x: x, y: y, w: w, h: h,
-            onscreen: info[kCGWindowIsOnscreen as String] as? Bool ?? false)
+            onscreen: info[kCGWindowIsOnscreen as String] as? Bool ?? false,
+            layer: info[kCGWindowLayer as String] as? Int ?? 0,
+            alpha: info[kCGWindowAlpha as String] as? Double ?? 1)
     }
 }
 
@@ -75,7 +86,10 @@ func requireTopWindow(_ id: Int, at point: CGPoint) {
 
 func target(_ args: [String]) -> Win {
     guard let raw = option("--window-id", in: args), let id = Int(raw) else { fail("--window-id is required") }
+    // The window must belong to the process you launched, not to another instance of the same app.
+    guard let rawPid = option("--pid", in: args), let pid = Int32(rawPid) else { fail("--pid is required") }
     guard let found = windows(onscreenOnly: true).first(where: { $0.id == id }) else { fail("window \(id) is not on screen") }
+    if found.pid != pid { fail("window \(id) belongs to pid \(found.pid), not \(pid); not sending input") }
     return found
 }
 
@@ -88,7 +102,46 @@ func report(_ label: String, _ win: Win) {
 func commandWindows(_ args: [String]) {
     let owner = option("--owner", in: args)
     for win in windows(onscreenOnly: false) where owner == nil || win.owner == owner {
-        print("id=\(win.id) owner=\(win.owner) onscreen=\(win.onscreen) x=\(win.x) y=\(win.y) w=\(win.w) h=\(win.h) title=\(win.title)")
+        print("id=\(win.id) pid=\(win.pid) owner=\(win.owner) onscreen=\(win.onscreen) x=\(win.x) y=\(win.y) w=\(win.w) h=\(win.h) title=\(win.title)")
+    }
+}
+
+/// Is the rectangle safe to capture as a screen region (`screencapture -R`)? A region capture is the
+/// composited screen, so it is only acceptable when (1) a window of the **backdrop** process covers
+/// the whole rectangle (so the desktop and other apps cannot show through behind it), and (2) no
+/// window of any process other than the backdrop and the allowed ones (your candidate) is stacked in front of the backdrop inside it.
+/// Processes are given by PID, never by name: the user's own copy of the same app has the same name.
+/// Exit 1 and say why otherwise - including when the backdrop has already exited.
+func commandRegionClear(_ args: [String]) {
+    guard let raw = option("--rect", in: args) else { fail("--rect x,y,w,h is required") }
+    let numbers = raw.split(separator: ",").compactMap { Double($0) }
+    guard numbers.count == 4 else { fail("--rect must be x,y,w,h") }
+    let rect = CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+    guard let rawBackdrop = option("--backdrop-pid", in: args), let backdrop = Int32(rawBackdrop)
+    else { fail("--backdrop-pid is required (the pid `backdrop` printed)") }
+    var allowed = Set<Int32>([backdrop])
+    var index = 0
+    while index < args.count {
+        if args[index] == "--allow-pid", index + 1 < args.count, let pid = Int32(args[index + 1]) { allowed.insert(pid) }
+        index += 1
+    }
+    let onscreen = windows(onscreenOnly: true) // front to back
+    // Everything behind the opaque backdrop window that covers the rectangle is hidden by it; only
+    // windows in front of that backdrop window can show up in the capture. Use the real stacking
+    // order, not window layers.
+    let backdropIndex = onscreen.firstIndex { win in win.pid == backdrop && win.frame.contains(rect) }
+    let covered = backdropIndex != nil
+    let offenders = onscreen.prefix(backdropIndex ?? onscreen.count).filter { win in
+        win.frame.intersects(rect) && !allowed.contains(win.pid) && win.w > 0 && win.h > 0 && win.alpha > 0
+    }
+    for win in offenders {
+        print("intersects: id=\(win.id) pid=\(win.pid) owner=\(win.owner) x=\(win.x) y=\(win.y) w=\(win.w) h=\(win.h)")
+    }
+    if !covered { print("not covered: no on-screen window of backdrop pid \(backdrop) contains \(raw) (has the backdrop exited, or is it on another display?)") }
+    if offenders.isEmpty && covered {
+        print("clear: the backdrop covers \(raw) and no other window is in it")
+    } else {
+        exit(1)
     }
 }
 
@@ -183,6 +236,8 @@ func commandPress(_ args: [String]) {
 /// windows under test: blur or transparency is then read from how the squares look through them.
 func commandBackdrop(_ args: [String]) {
     let seconds = Double(option("--seconds", in: args) ?? "60") ?? 60
+    print("backdrop pid=\(ProcessInfo.processInfo.processIdentifier)")
+    fflush(stdout)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     guard let frame = NSScreen.main?.frame else { fail("no main screen") }
@@ -226,11 +281,12 @@ func commandSharpness(_ args: [String]) {
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard let command = arguments.first else {
-    fail("commands: windows, drag, wheel, press, backdrop, sharpness (see the header of this file)")
+    fail("commands: windows, region-clear, drag, wheel, press, backdrop, sharpness (see the header of this file)")
 }
 let rest = Array(arguments.dropFirst())
 switch command {
 case "windows": commandWindows(rest)
+case "region-clear": commandRegionClear(rest)
 case "drag": commandDrag(rest)
 case "wheel": commandWheel(rest)
 case "press": commandPress(rest)

@@ -1,124 +1,49 @@
 ---
 name: verifying-macos-apps
-description: Use when macOS デスクトップアプリの実操作、画面取得、権限不足や許可後の反映、フォーカス喪失、終了、または検証の証拠を確認するとき。
+description: Use when verifying a macOS desktop app through its real UI - driving it, capturing its windows, reading its accessibility tree, handling missing Accessibility or Screen Recording permission, focus loss, quitting, or deciding what counts as pass, fail or blocked and what evidence to keep. A verification-discipline layer, not an automation tool: it tells you how to judge and record what you observed, and pairs with a project-specific recipe and whatever tool actually clicks.
 ---
 
-# macOS アプリを検証する
+# Verifying macOS apps
 
-**操作の成功ではなく、要件に対応した実観測を判定する。** このスキルは macOS の共通手順。アプリ名・言語・UI framework・固定ケース・CLI・仕様ファイル名を決めない。Windows／Linux は対象外。汎用 runner や権限を同梱・提供するものではない。
+**Judge observations against requirements. A successful operation is not evidence.** A click that returned 0, a screenshot that was taken, or a runner that exited 0 proves only that something ran. This skill is the layer that decides what you may claim, and what you must call unverified.
 
-## 1. アプリ固有レシピを確定する
+It is not an automation tool (use Peekaboo, cua-driver, AppleScript, XCUITest or your own helper to act) and not a test-writing guide. It does not name your app, framework, cases, CLI or spec file; a project-specific *recipe* supplies those.
 
-プロジェクトの規約と実際の要件文書を読み、既存の検証レシピ・実装・runner の help/source から次を対応付ける。`SPEC.md`、Cargo、通常の初期窓、特定 report schema の存在を前提にしない。
+## Verdicts
 
-| 必要な項目 | 確認する内容 |
+- **fail**: a real check did not match, or required evidence is corrupt or contradictory. Wins over blocked.
+- **blocked**: a needed permission, environment or observation method is missing, so the case did not finish. Never filled in with a pass.
+- **pass**: every *selected* required check was observed. Keep it separate from optional/unselected checks and from the product as a whole.
+
+## Procedure
+
+1. **Fix the recipe.** Map the requirement to a case: preconditions, action, expected value/state/time, how it is observed, evidence, stop condition. Read the project's own recipe and runner first; if none exists, write one ([recipe template](references/recipe-template.md)). If a required precondition cannot be established, the case is blocked.
+2. **Preflight.** Check session/display/lock state and the permissions the case needs, without prompting for anything ([preflight and permissions](references/preflight-and-permissions.md)). Missing permission: tell the user exactly what to enable and for which process, then resume only the unfinished cases.
+3. **Act on a verified target.** Launch your own candidate; record PID + start time + executable identity. Before keyboard input confirm the frontmost PID and the focused window are the target; before pointer input confirm the window under the pointer is the target ([input safety](references/input-safety.md)). Prefer accessibility actions over coordinates.
+4. **Observe.** Wait on acknowledgements with an upper bound, not fixed sleeps. Read the accessibility tree for state; capture only your own windows for visuals ([images](references/images.md)). For what a runner cannot reach (blur, scrollbars, window-edge resizing, layout) use [probes](references/probes.md). For a built artifact (DMG, app bundle) see [distribution](references/distribution.md).
+5. **Judge and record.** Requirement → case → command, OS/arch, app version/hash → expected vs observed → evidence paths → verdict → what was not done or needs a human ([reporting](references/reporting.md)).
+6. **Clean up.** End the candidate through the path under test when the case is about quitting; a terminate/kill is cleanup, not proof of a normal quit. End only the PID you recorded (check its start time and executable), never by process or app name, which could end the user's own instance.
+
+## Rules that are never relaxed
+
+- Use only processes you launched, with test-only settings and storage. Never use the user's running instance, documents or real settings without their explicit permission; never discard unsaved work or auto-answer quit prompts.
+- Never call a permission-request API, drive a permission dialog, or change OS permissions (TCC, privacy settings, helper signing). Asking the user to grant a specific permission to a specific process is the expected path; after they act, you re-read the non-prompting probe.
+- Missing capability is **blocked**, not "probably fine". Do not invent flags, attributes, selectors or success output. An unsupported accessibility attribute is not success.
+- Input is gated: no keystrokes unless the target is frontmost and focused; no pointer events unless the hit target is the target window. If you cannot confirm, do not send.
+- Capture only what is yours: the candidate's own windows (window-level capture by window ID). Never capture other apps or the desktop, and never send images outside the machine. The one exception is a system dialog **raised by your candidate** (a permission or quit prompt the case depends on): capture that single window by its window ID, never a screen region. A region capture (`screencapture -R`) is allowed only over a backdrop you own, and only after checking that no other window intersects the region ([images](references/images.md)).
+- Keep evidence kinds apart: source reading, unit tests, accessibility state, rendered pixels, listening/appearance judgement, physical timing, built artifacts. One does not stand in for another; subjective quality stays with the human.
+- Read the runner's real report and exit mapping. Exit 0 is not PASS; a pass from before the binary changed is not carried over.
+- Past fail/blocked records are never rewritten to pass; resume unfinished cases in a new private run with a fresh candidate.
+
+## References
+
+| File | Read when |
 |---|---|
-| 対象と権限 | project root、要件の参照、app bundle／executable、操作・取得・保存の許可範囲 |
-| 起動・準備 | 実在する build／launch／case コマンドと実行環境。既存コマンドを使い、他アプリの flags をコピーしない |
-| ケース | 事前状態 → 操作 → 期待する値／状態／時間 → 観測方法 → 証拠 → 停止条件 |
-| 隔離と後始末 | 新規候補 PID、test-only 設定・文書・保存先、正常終了と失敗 cleanup の区別 |
-| 観測契約 | AX selector、時刻基準・待ち上限、画像の比較領域／期待関係、実 report／exit の意味 |
-
-欠けた情報は repo・help・source から調べる。観測手段がなければ未実装、必須の前提を確立できなければ **blocked**。CLI・属性・成功出力を捏造しない。ユーザーの既存 app instance／文書を無断で使わず、未保存文書・終了確認を自動破棄しない。
-
-## 2. macOS の前提と対象を確認する
-
-既存の検証ツールが行う preflight を確認する。SDK 診断が必要なら既存 Command Line Tools の Swift から以下を読む。これらは permission request ではなく、単独で安全入力を保証するものでもない。
-
-- `CGSessionCopyCurrentDictionary()`：console、login 完了、実行 UID、一致 session、lock。lock=nil だけを解除の証拠にしない。
-- `CGDisplayIsActive`／`CGDisplayIsAsleep`：対象を表示する display。ロック・sleep・loginwindow・対象不明のまま入力しない。
-- `AXIsProcessTrusted()`：Accessibility。CGEvent を使うケースだけ `CGPreflightPostEventAccess()` も必要。
-- `CGPreflightScreenCaptureAccess()`：実画面 capture の権限。AX やユーザーの撮影許可とは別の前提。
-
-### 権限不足の手動準備と検証再開
-
-**blocked だけを返さず、必要な権限・準備対象・ユーザーの操作・再開条件を案内する。** 撮影／操作への同意とOS権限は別。成功済みの権限、使わないAPI、画像が任意のケースのために追加の許可を求めない。
-
-**ユーザーが該当許可を拒否した場合**は、追加の許可依頼・権限要求・取得を停止し、依存する必須ケースをblockedとして保持する。既に許可された独立ケースの成功を全体のPASSにしない。必須チェックを外すには明示的な範囲変更の承認が必要。ユーザーが自発的に準備再開を申し出るまで同じ許可を求めない。
-
-1. 保留ケースに必要な前提を特定する。lock／display sleep／別consoleは権限不足に読み替えず、実行先の画面復帰・解除をユーザーへ案内する。
-2. **今回の実行経路の許可対象**を、host・実行user・親appのPID／bundle／pathと、利用できる読取り専用のOS帰属情報から確定する。検証対象app、terminal／IDE等の実行元、SDK helperのrequesting processは別物。必要なら対象要求に絞ったTCCログのresponsible／subjectを照合し、TCCデータベース・鍵・認証情報は読まない。CLI名や別端末での成功から対象を推測しない。確定できなければ具体的な未確認境界を案内する。
-3. ユーザー本人に、システム設定の次の項目で**確認した対象app／実行ファイル**を許可するよう依頼する。OSが終了・再起動を求めた場合は、その実行元の未保存作業を保存してから本人が再起動する。会話や他の作業も止まり得るため、エージェントは実行元を終了しない。項目に対象がない／追加できない場合も許可済みとは扱わない。
-
-| 不足する前提 | システム設定 → プライバシーとセキュリティ |
-|---|---|
-| AX | アクセシビリティ |
-| 画面取得 | 画面収録／画面とシステムオーディオの収録に相当する項目。オーディオのみの許可は代用にならない |
-| CGEvent送信 | 使用APIの契約とOS帰属で必要な項目を確認。送信だけのために「入力監視」を一律要求しない |
-
-OSのバージョン・言語による表示名に従う。依頼例：**「画面収録の公開確認がfalseで、画像ケースは未実行です。確認した〈実行app名・path〉を画面収録の項目で許可してください。OSが求めたら同appを再起動し、完了後はこちらで反映を確認します。」** 対象欄は実観測で埋める。許可dialogの操作、permission request API、TCC／OS／認証設定変更、helperの再署名や登録を代行しない。
-
-4. ユーザーの変更報告や実環境の遷移を受け、**同じ実行経路の既存の非prompt型公開probe**で現在の利用可否を一度読む。申告を成功証拠にせず、準備操作とSDK観測をそれぞれの時刻で保持する。falseが続く場合は、準備先host／許可対象／実行元の再起動条件の食い違いを絞る。OSが求めた再起動が未実施ならその操作を案内する。同じ「準備したか」の質問や全ケースの再実行を繰り返さず、次に必要な具体的操作と停止理由を示す。
-5. trueになったら、session・display・必要な入力権限・候補所有を確認し、**未完ケースだけ**を新規private runで再開する。以前の成功はbinary identityと関連条件への影響を確認して保持する。変更後の実操作・画像と期待値を判定し、過去のblocked／failは書き換えない。
-6. 許可確認や実取得が成功した後のfocus喪失・比較不一致は、権限不足へ戻さない。部分証拠とケース判定を分け、成功済みの権限を再要求しない。
-
-自分で起動・追跡した候補の **PID＋開始時刻＋実行ファイル／bundle identity** を記録する。AX は `AXUIElementCreateApplication(pid)` から辿り、role と実 identifier／label で対象を選ぶ。status-bar／menu-only app は初期窓を要求せず、所有 item とその操作で現れる panel を観測する。
-
-keyboard を全体送信する直前に `NSWorkspace.shared.frontmostApplication` の PID と `AXFocusedWindow` の対象一致を再確認する。`AXMain` や窓が見えるだけでは keyboard focus の証拠にならない。modal sheet／別文書へ対象が変わったら止める。
-
-mouse は所有 AX element の `AXPress` 等を優先する。座標入力が必要なら、送信直前に座標系・倍率・現在の bounds と実 hit target の所有／identityを照合し、別窓の被覆で受け手が変わらないことを確認する。`AXUIElementCopyElementAtPosition` と取得したelementのPID／identity等を使い、前面PIDやfocusだけからpointerの受け手を推測しない。確認不能なら入力せずblocked。status item／非key panelへのpointer操作に存在しないfocused windowを要求しない。
-
-必要な AX 属性の unsupported を成功へ読み替えない。メッセージ timeout・木の深さ／件数・待ちを有限にする。
-
-前面／focusを契約に持つケースが途中で止まったら、保存済みreport／画像／測定と失敗位置を保持する。喪失時の前面PID、**所有候補だけ**のAX focused window identity、bounds／window ID、session／displayを必要な範囲で観測し、未取得の値から原因を断定しない。原因を識別する新しい観測や環境変化が得られてから、新規runで対象ケースを再開する。focus guardを外す、対象を取り戻しながら無条件に試行する、部分画像やfailure cleanupを全ケース／正常Quitの成功にする回避はしない。画像取得にfocusが必要かは各ケース契約による。
-
-旧候補と保存証拠から必要情報を得られない場合は、**通常再開とは別に、1回の診断専用private run**を行える。操作許可範囲・session／display・必要なpreflight・新規候補の所有を確認し、仮説、実在する追加の読取り専用観測手段、有限の待ち上限・停止条件を先に定める。focus／input guardは維持し、喪失時に停止して証拠を保存する。診断の終了自体をケース成功にせず、識別可能な観測や環境変化が得られなければ通常再開は保留する。追加観測のない同じ試行は診断にしない。
-
-## 3. 操作ごとの期待値をチェックする
-
-| 検証対象 | 実観測の例 |
-|---|---|
-| 設定・menu・選択 | 操作前後の AXValue／選択／チェック状態と必要な backend acknowledgment。単なる click 成功とは分ける |
-| focus・scroll・再描画 | `AXFocusedUIElement` と対象 identity、実 viewport 変化、操作中の状態保持 |
-| 保存・復旧 | 隔離文書／設定を変更 → 実保存 → close／再起動 → 内容を再読取り。窓が開いたことだけでは復元証拠にしない |
-| 窓・panel | 要件どおりの数・同一性・geometry・最小化／再生成。自由 resize や固定サイズを共通要件にしない |
-| Quit | 実 menu／shortcut 等の終了経路、owned PID 消失と終了結果。terminate／kill cleanup は正常 Quit の証拠ではない |
-
-非同期は観測可能な acknowledgment／状態を基準に、上限付きで待つ。source・build・unit test、AX 操作、実描画、試聴／質感、物理同期、配布物の検証を別の証拠として扱う。
-
-## 4. スクリーンショットと画像判定
-
-撮影範囲の許可と、使用 API の OS 権限を両方確認する。実画面 capture の preflight=false なら取得 API を呼ばず **blocked**。許可 dialog・TCC／OS／認証設定を変更しない。取得不能を offscreen／export／synthetic 画像で埋めず、それらを使った場合は別の観測種別として記録する。独立した AX ケースはその前提が成立すれば続行する。
-
-許可済みの取得方法だけで候補 PID の実 window ID・geometry・所有を照合し、対象窓／panelのみをローカル保存する。他アプリ・desktopを撮影せず、画像を外部送信しない。機密情報を含む新規文書・profile は使わない。
-
-画像チェックは、事前に定義した **対象領域・sample 時刻・期待関係・許容差** に従う。
-
-- animation は必要領域の変化、静的画面は安定／一致、操作結果は要件どおりの表示を確認する。画面のどこかが変わっただけでは機能の成功にならない。
-- clock・cursor・透ける背景等の除外は要件に合う領域／maskとして事前に記録し、検証対象を隠さない。ack 前後の samples を混ぜない。
-- decode・寸法・scale／色空間を確認する。空・単色・透明画像は取得失敗か本来の画面かを要件と取得証拠から区別する。正当な空 canvas を無条件に失敗にしない。
-- pixel差分は文字の正しさ・音・物理同期・質感まで証明しない。必要なら別の観測手段を用意する。比較器の self-test はアプリ画像の受け入れではない。
-
-## 5. 既存 runner が届かない見た目・操作を確かめる
-
-既存 runner に無い観測（透過・ぼかし、スクロールバー、窓の縁のリサイズ、レイアウト、一部のトグル）は、**実窓を使った一回限りの probe** で確かめてよい。ただし証拠の種別を分け、runner の PASS と混ぜない。「ユーザーの目視が必要」な質感・好みは probe で合格にしない。
-
-- **対象窓を CGWindowList から特定する**：`kCGWindowOwnerName`・`kCGWindowNumber`・bounds（左上原点・points）と `kCGWindowIsOnscreen`。窓 ID は起動のたびに変わる。操作前後の bounds を数値で比べる（画像だけで寸法を判断しない）。
-- **撮影は窓単位が既定**：`screencapture -l <windowID>` は窓自身の内容だけで、背景は含まない。`-R x,y,w,h` は画面の合成結果で、**他アプリやデスクトップが写り込む**。`-R` は透過・ぼかしの確認で、その領域全体を**自分が起動した背面窓**が覆っているときだけ使う。システム dialog を撮る場合も、その窓の範囲だけにする（全画面を撮らない）。
-- **透過・ぼかしは、壁紙ではなく制御した背景で測る**：壁紙はもともとぼけていることがあり、比較にならない。高周波の背景（8pt の白黒市松など、自分所有の全画面窓）を対象窓の背面に置き、設定の入／切で同じ領域の「隣り合う画素の差の平均」を比べる。差が出ない（入≒切）なら、その設定は効いていない。背面窓が対象窓に被らないように、他の窓（設定窓など）は先にずらす。測定値は「ぼかしが働く／働かない」の根拠で、色味・濃さ・好みは別（目視）。
-- **座標入力（縁のドラッグ・ホイール）**：送信前に、その点で最前面の窓が対象窓であることを CGWindowList の前後順で確認する（上に別の窓があれば入力しない）。窓の縁が画面の縁に接しているとつかめないので、先にタイトルバーで動かす。サイズ制限は「大きく引く」「大きく縮める」の両端で、止まった値を数値で記録する。ドラッグ中の中間状態を見るなら、状態ごと（例：最小の高さ）に窓単位で撮る。
-- **AX のトグル／ボタン**：所有 PID の AX ツリーから role と title／description で選び `AXPress` する。**起動直後の最初の AX 取得は空に見えることがある**ので、上限付き（例：5秒）で再試行し、「見つからない」を「存在しない」と読まない。押した後は状態（設定窓の表示、保存された設定値、窓の見た目）を別の観測で確認する。トグルは押すたびに保存されるので、検証の最初に隔離 HOME の保存ファイルを固定値に書き戻す。
-- **隔離**：検証用の HOME（一時ディレクトリ）で起動し、利用者の本物の設定・保存先を読まない・書かない。終了は PID を確認して終わらせ、他のプロセス名と取り違えない。
-- 入力は物理マウス・キーボードを使うため、**同時に別の検証や利用者の操作と重ねない**（runner の全ケースを実行している間は probe を動かさない）。
-
-## 6. 配布物（DMG・app bundle）を確かめる
-
-作成物そのものを開いて確かめる。build の成功やスクリプトの終了コードだけで合格にしない。
-
-- **整合**：同梱の checksum を `shasum -a 256 -c` で照合し、`hdiutil attach` でマウントして中身（`.app`、同梱するライセンス等）を一覧する。
-- **署名・対象**：`codesign -dvvv`（Identifier・Signature・TeamIdentifier・flags）、`codesign --verify --strict`、`lipo -archs`、`otool -l` の `LC_BUILD_VERSION`（minos・sdk）、`plutil -p` の Info.plist（bundle ID・version・最低 OS）。署名の種類（ad-hoc か Developer ID か）を実出力で書く。
-- **起動**：マウントしたコピーを（隔離 HOME で）起動し、窓・音・保存先が動くことを確認する。
-- **Gatekeeper**：`spctl --assess` の判定は取れるが、**隔離属性（`com.apple.quarantine`）を手で付けても、実際にブラウザで取得した場合と同じ警告が出るとは限らない**。警告の文言と承認手順は、実際に取得した配布物をクリーンな Mac で開くまで「未確認」と書く。
-- **ビルド環境の違い**：手元と CI（別の Xcode／SDK）では同じバイナリにならない。CI が作った成果物は、手元の結果の代わりにせず、取得して同じ検査を行う。
-
-## 7. 証拠・判定・再利用
-
-既存 runner の実 schema／exit mapping を読む。このスキルのために既存 format を書き換えたり、exit0だけで PASS にしない。新たに証拠を保存する場合は一意の private run directory（0700）と file（0600）、上書きしない pathを使う。
-
-報告の形：**要件参照・選択ケース → command／macOS・arch・app version/hash → expected と observed → 今回の report／画像／測定／stderr の local path → 判定 → 未実施範囲・人の判断・後始末**。既存 schema にない項目は実取得して補足し、未取得なら未確認と書く。
-
-- **fail**：実チェック不一致、必要証拠の破損／矛盾。ほかの blocked より優先。
-- **blocked**：必要権限・環境・観測手段がなく未完。未実施項目を PASS で補わない。
-- **pass**：選択した必須チェックすべてが実証済み。任意／未選択の画像チェックや製品全体とは区別する。
-
-他の macOS アプリでは、共通手順はそのまま、**固有レシピだけを置き換える**。根拠のない汎用 flags・固定 UI 名・receipt・画像期待値を持ち込まない。この directory を別プロジェクトの skill directory に置けば利用できるが、グローバル登録・ツール導入・設定変更は別の依頼として扱う。
+| [recipe-template.md](references/recipe-template.md) | writing or reading a project's recipe |
+| [preflight-and-permissions.md](references/preflight-and-permissions.md) | checking session/permissions; a permission is missing; resuming afterwards |
+| [input-safety.md](references/input-safety.md) | sending keys or pointer events; focus lost mid-case; expected observations per operation |
+| [images.md](references/images.md) | capturing windows, comparing images, checking transparency or blur |
+| [probes.md](references/probes.md) | checks a project runner does not cover; the reference probe tool in `scripts/` |
+| [distribution.md](references/distribution.md) | verifying a DMG / app bundle / release artifact |
+| [reporting.md](references/reporting.md) | writing the report; worked examples of false passes this skill prevents |
+| [EVALS.md](EVALS.md) | measuring whether the skill actually helps (a design, not yet run) |

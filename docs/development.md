@@ -147,7 +147,7 @@ Lat は現存する文書への案内として保守する。意味のある文�
 
 画像段階は `scripts/native-screenshot.swift` とScreenCaptureKitでAmbien自身のsceneだけを取得する。visual・deep・mixingはPNG3枚／隣接2比較、situationsは2組の計6枚／4比較、presentationはminimize/unhide/reopenの3組で計9枚／6比較をprivate local保存する。capture preflight falseは取得APIを呼ばず該当段階blocked、独立lifecycle／controls／wanderingは継続する。本人による権限準備は共通スキルに従い、AIによるTCC／OS設定変更・デスクトップ／他app撮影・外部送信をしない。helperは空・全透明・uniformなcropped RGBA・寸法不一致・不変を拒否する。単一色のglowでも透明backgroundとのcoverage/alphaが異なるならuniform interiorではないため、全cropped premultiplied RGBAを比較しvisible RGBだけでblankにしない。背景透過も差分に含むため、可視品質・粒だけの運動・gain・可聴無音・ガラス・物理同期を証明しない。[共通スキル](../.agents/skills/verifying-macos-apps/SKILL.md)、[固有レシピ](../.agents/skills/verifying-ambien/SKILL.md)、[実行証拠と限界](verification.md#native-自動判定と検証スキル) を参照する。両Swift scriptはAmbien専用で、共通スキルを他projectで使えても汎用runnerとして配布・登録していない。
 
-`scripts/native-e2e.swift` が見ない見た目・操作（設定窓の縁の伸縮・スクロールバー・背景のぼかし・演出の描画）の確認には、`scripts/native-probe.swift`（窓一覧・縁のドラッグ・ホイール・AXPress・背面の市松窓・隣接画素差の測定）を使う。使い方と注意は [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) と共通手順の5・6にある。
+`scripts/native-e2e.swift` が見ない見た目・操作（設定窓の縁の伸縮・スクロールバー・背景のぼかし・演出の描画）の確認には、共通スキルの `.agents/skills/verifying-macos-apps/scripts/native-probe.swift`（窓一覧・縁のドラッグ・ホイール・AXPress・背面の市松窓・隣接画素差の測定）を使う。使い方と注意は [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) と共通スキルの [probes](../.agents/skills/verifying-macos-apps/references/probes.md) にある。
 
 アプリの実動作は [検証手順と証拠の扱い](verification.md) に従い、SPEC の該当条件に必要な観測を別に実施する。ツール検査と製品受け入れ、操作許可と製品仕様の最終承認を最後まで分離する。
 
