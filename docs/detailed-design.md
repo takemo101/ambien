@@ -522,7 +522,7 @@ scene hidden／最小化／完全occlusion／closeではowned scene Taskを止�
 
 ### 確認済みhostと窓Interface
 
-[GPUI platform entry](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_platform/src/gpui_platform.rs)、[Ely init](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/lib.rs) の呼出し順を使う。
+[GPUI platform entry](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_platform/src/gpui_platform.rs)、[Ely init](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/src/lib.rs) の呼出し順を使う。
 
 ```rust
 // 固定 host API の呼出し形式。実際の entry/root は src/main.rs と src/app.rs。
@@ -567,7 +567,7 @@ P02 の声 factory は worker で rate・DSP・固定 delay を準備し、`Voic
 
 ### Ely実Interfaceとcontrolled form
 
-確認済みの [Slider](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/forms/slider.rs)、[Switch](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/forms/switch.rs)、[SegmentedControl](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/buttons/segmented.rs) を使う。
+確認済みの [Slider](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/src/forms/slider.rs)、[Switch](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/src/forms/switch.rs)、[SegmentedControl](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/src/buttons/segmented.rs) を使う。
 
 ```text
 Slider::new(id, value:f64).range(min,max).step(step)
@@ -811,7 +811,7 @@ HTTPS Pages と Releases redirect、公開権限、実初回取得（Gatekeeper 
 
 native 通知の補助依存は `async-channel=2.5.0`（native→main だけ）と `block2=0.6.2` を候補とするが、未使用の P01 では直接依存に追加しない。現存 P01 の借用 Adapter は `objc2=0.6.4`、`objc2-app-kit`／`objc2-foundation=0.3.2`、`raw-window-handle=0.6.2` を使う。gpui は default-features=false＋stacker、gpui_platform は false＋font-kit、Ely は false＋runtime_shaders。rev の正本は [SPEC](../SPEC.md#依存の選定)、実使用 features と解決版は [`Cargo.toml`](../Cargo.toml)／[`Cargo.lock`](../Cargo.lock)。現在の screen geometry には NSGraphics、NSNumber には Foundation の NSValue feature が必要である。通知・アクセシビリティ・Sparkle の features はそれぞれを実装する時に限定して追加する。
 
-[Zed manifest](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/Cargo.toml#L704-L755)、[Ely manifest](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/Cargo.toml#L1-L23) と実使用 API に合わせて P01 の lockfile を作成し、現行開発環境で GPUI/Ely/native の build と実窓の経路を確認した。両 project lock の完全一致や、未実装の CPAL/FunDSP/Sparkle の ABI・下限 OS の成立は主張しない。依存更新を勝手な互換 shim で吸収しない。
+[Zed manifest](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/Cargo.toml#L704-L755)、[Ely manifest](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/Cargo.toml#L1-L23) と実使用 API に合わせて P01 の lockfile を作成し、現行開発環境で GPUI/Ely/native の build と実窓の経路を確認した。両 project lock の完全一致や、未実装の CPAL/FunDSP/Sparkle の ABI・下限 OS の成立は主張しない。依存更新を勝手な互換 shim で吸収しない。
 
 ### 完了を止める具体的gate
 

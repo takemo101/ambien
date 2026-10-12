@@ -10,7 +10,7 @@
 
 | 対象 | 一次資料 | 確認すること・証拠の限界 |
 |---|---|---|
-| Ely と GPUI の接続 | [Ely の依存定義](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/Cargo.toml)、[初期化](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/lib.rs) | GPUI 改訂・Rust 要求・初期化の対応。宣言の一致は Ambien のビルド成功ではない。 |
+| Ely と GPUI の接続 | [Ely の依存定義](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/Cargo.toml)、[初期化](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/src/lib.rs) | GPUI 改訂・Rust 要求・初期化の対応。宣言の一致は Ambien のビルド成功ではない。 |
 | 固定窓と macOS backend | [GPUI の窓の選択肢](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/platform.rs)、[macOS の窓処理](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/window.rs)、[AppKit の contentMaxSize](https://developer.apple.com/documentation/appkit/nswindow/contentmaxsize) | 固定窓の style・拡大操作、論理座標・外枠・コンテンツ・倍率、画面収まりと位置復元。プロパティ一つで全 OS 経路の安全を保証しない。 |
 | 描画資源 | [GPUI の Metal 描画](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_apple/src/metal_renderer.rs)、[Metal family 別の制約](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf) | 固定窓でも必要な描画面・中間面、倍率変更時の資源寿命と物理寸法。固定論理サイズやテクスチャ上限は、常駐メモリ・確保成功・一定負荷の実測ではない。 |
 | 再生予定時刻 | [CPAL の timestamp](https://github.com/RustAudio/cpal/blob/e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7/src/timestamp.rs) | 生成と再生予定の区別、サンプル位置、出力再初期化後の時計対応。予定時刻の取得だけで物理的な音と光の同期を保証しない。 |

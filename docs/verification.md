@@ -295,7 +295,7 @@ helper の output を unbuffered にし、OS の PID 存在を `kill(pid, 0)`／
 
 この実行では screenshot、minimize/restore、blank drag、固定 bounds/tiling、foreground ⌘,／⌘Q、ガラス・音の品質は未検証。AX menu Quit の成功を以前の physical ⌘Q と host 生存の不一致の解消へ一般化しない。production source、工具導入／config、TCC／OS 設定を変更しておらず、一時 helper は除去した。これは小さなローカル helper による外部操作・PID assertion の限定証拠であり、P01 総合合格や恒久 harness の完成ではない。
 
-固定 GPUI は macOS で [AccessKit→NSAccessibility の bridge](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/window.rs#L2356-L2407) を持つ。default features 無効だけを根拠に AX がないとは判断しない。一方、現存の settings Paragraph／Heading と blank scene は semantic content node を付けておらず、今回の AX 実観測も native window／信号ボタン／menu が対象である。[node inclusion の role／ID条件](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/element.rs#L365-L383) と [Ely typography の anonymous rendering](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/typography/text.rs#L173-L192) を区別し、今後の custom control 全般が AX 非対応とは一般化しない。
+固定 GPUI は macOS で [AccessKit→NSAccessibility の bridge](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/window.rs#L2356-L2407) を持つ。default features 無効だけを根拠に AX がないとは判断しない。一方、現存の settings Paragraph／Heading と blank scene は semantic content node を付けておらず、今回の AX 実観測も native window／信号ボタン／menu が対象である。[node inclusion の role／ID条件](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/element.rs#L365-L383) と [Ely typography の anonymous rendering](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/typography/text.rs#L173-L192) を区別し、今後の custom control 全般が AX 非対応とは一般化しない。
 
 ### Native E2E runner
 
@@ -1269,3 +1269,11 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 ### 検証スキルの更新
 
 今回の作業（P27〜P32）で手元の実窓を使って確かめた方法のうち、`scripts/native-e2e.swift` が持たないもの（窓の縁のドラッグ・ホイール・AXPress・背面の市松窓によるぼかしの測定・隣接画素差）を `scripts/native-probe.swift` にまとめ、共通スキルに「既存 runner が届かない見た目・操作」と「配布物」の節、Ambien 固有スキルに probe の使い方と準備（隔離 HOME・保存ファイルの固定値・プロセス名の違い・設定窓をずらす・同時に動かさない）を加えた。`native-e2e.swift --case all` は P28〜P31 の変更後も全 PASS（約7分、debug build）。probe は windows・drag・wheel・press・backdrop・sharpness を実窓で動かして確認した（設定のぼかしの切替で隣接画素差が約0.058と約0.0004の間を行き来する）。見た目の好み・音・Gatekeeper の実際の警告は probe で合格にしない。
+
+### Ely の取得先の移動（P32）
+
+2026-10-12、公開した後の GitHub Actions の試し実行（run 38189742614）が、`ely-gpui-component` を取得できず build で失敗した。元の `github.com/ZacharyZhang-NY/Ely-GPUI-Components` は、アカウントごと 404 だった（手元は cargo のキャッシュで成立していた）。ユーザーが、リポジトリが `https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components`（Gitea）へ移動していることを示した。
+
+- 移動先の `main`（362a0fc）は履歴が書き直されており、これまで固定していた `7e39a9383dc2fd7404751d02cb166e95861ea3d6` は `main` から辿れず、退避用のタグ `pre-coauthor-strip` からしか辿れない。独立レビューがこれを指摘し、手元で確認した。タグが消えると、クリーンな build（GitHub Actions を含む）が再び失敗する。
+- 同じ日時・件名のコミット `78bf5917a5a5634ef16b42bc0637b2bce911728d` が `main` の履歴にあり、ソース木（tree）が `3a98236d8609a2e0553e67b96d060c1b00cfb36e` で旧コミットと同一であることを確認した。固定する改訂をこれに替えた（`Cargo.toml`・`Cargo.lock`・SPEC・文書のリンク）。コードは同じで、`cargo build --locked`・`cargo clippy`・`cargo test`（262件）が成功した。
+- 残る制約：取得先が作者の自前ホストであること（そのホストが無くなる、または再び履歴が書き直されると取得できない）。
