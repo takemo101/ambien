@@ -1209,6 +1209,8 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 - 修正：`apply_blur_material` で、窓を開いた直後と表面設定の変更ごとに素材を `underWindowBackground` へ替えた。修正後は、ぼかし入が 0.0004（市松模様が均一なグレーになった）、切が 0.0584（鮮明なまま）だった。実際のデスクトップ上でも、背後がぼけた色の場として見えることを画像で観測した。
 - `cargo fmt --all --check`、`cargo clippy --all-targets --locked --offline -- -D warnings`、`cargo test --locked --offline`、`npm run check:docs` は成功。純粋に試験できる規則がないため、新しい自動試験はない（native な素材の適用）。
 - 設定窓の「ぼかし」を AX で操作して入→切→入と切り替え、同じ測定で 0.0007（入）→0.0601（切、鮮明）→0.0004（入、再びぼけた）となり、入れ直したときも素材が再適用されることを実窓で観測した。
+- 調査の経緯：ユーザーの報告を受けた最初の実験は、デスクトップの壁紙の上で行ったが、壁紙そのものがぼけた画像だったため、ぼかしの入切で差が読み取れず結論が出なかった。鮮明な市松模様を背面に置く測定に変えて、入でも背後が鮮明なままという再現ができた。
+- probe を共通スキルへまとめた際の動作確認では、前回の実行で保存されたぼかし設定が切のまま残っていたため、最初の読み取りを「入」と書き誤り、数値が逆のラベルと整合することで気づいた。実行ごとに隔離した設定ファイルを固定値へ戻すようにした。
 
 ### 未確認範囲
 
@@ -1268,7 +1270,7 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 
 ### 検証スキルの更新
 
-今回の作業（P27〜P32）で手元の実窓を使って確かめた方法のうち、`scripts/native-e2e.swift` が持たないもの（窓の縁のドラッグ・ホイール・AXPress・背面の市松窓によるぼかしの測定・隣接画素差）を `scripts/native-probe.swift` にまとめ、共通スキルに「既存 runner が届かない見た目・操作」と「配布物」の節、Ambien 固有スキルに probe の使い方と準備（隔離 HOME・保存ファイルの固定値・プロセス名の違い・設定窓をずらす・同時に動かさない）を加えた。`native-e2e.swift --case all` は P28〜P31 の変更後も全 PASS（約7分、debug build）。probe は windows・drag・wheel・press・backdrop・sharpness を実窓で動かして確認した（設定のぼかしの切替で隣接画素差が約0.058と約0.0004の間を行き来する）。見た目の好み・音・Gatekeeper の実際の警告は probe で合格にしない。
+今回の作業（P27〜P32）で手元の実窓を使って確かめた方法のうち、`scripts/native-e2e.swift` が持たないもの（窓の縁のドラッグ・ホイール・AXPress・背面の市松窓によるぼかしの測定・隣接画素差）を `native-probe.swift` にまとめ、共通スキルに「既存 runner が届かない見た目・操作」と「配布物」の節、Ambien 固有スキルに probe の使い方と準備（隔離 HOME・保存ファイルの固定値・プロセス名の違い・設定窓をずらす・同時に動かさない）を加えた。`native-e2e.swift --case all` は P28〜P31 の変更後も全 PASS（約7分、debug build）。probe は windows・drag・wheel・press・backdrop・sharpness を実窓で動かして確認した（設定のぼかしの切替で隣接画素差が約0.058と約0.0004の間を行き来する）。見た目の好み・音・Gatekeeper の実際の警告は probe で合格にしない。
 
 ### Ely の取得先の移動（P32）
 
@@ -1283,3 +1285,5 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 - 手動実行（run 38223173111、main、公開しない）：package job が7分30秒で成功し、publish job はスキップされた。成果物 `ambien-dmg` を取得し、`shasum -a 256 -c` 成功、`Signature=adhoc`・`TeamIdentifier=not set`・arm64・minos 15.0（SDK 15.5。手元の build は SDK 27）・`CFBundleVersion` 2（run 番号）・同梱ライセンスを確認した。この DMG から取り出した `Ambien.app` を `open -n`（隔離 HOME）で起動し、シーン窓（960×600）が画面に出て、波紋が描かれることを撮影で確認した。
 - タグ `v0.1.0`（main の 81e19fd）の push で起動した run 38224113409 が成功し、package・publish の両 job が通った。pre-release `Ambien 0.1.0`（https://github.com/takemo101/ambien/releases/tag/v0.1.0）に、`Ambien-0.1.0-arm64.dmg`（6,555,202 bytes）と `.sha256` が付いた。公開 URL（認証なし）から curl で取得した DMG の SHA-256 が `.sha256`（`57c6f2680ce4ee17f7dfc1a71ca723fecf983de3f75a24e9eec2611ed796265c`）と一致した。
 - 未確認：ブラウザで取得した DMG での Gatekeeper の実際の警告と、リリースノートの承認手順（curl で取得したファイルには隔離属性が付かない）。macOS 15〜26 での動作。手元以外の Mac での初回起動。
+
+共通スキルの再構成（AMB-035）後の probe を、画面のロック解除後に実窓で確認した（2026-10-13、macOS 27.0.1、release build、隔離 HOME）。`backdrop`（PID を出力）・`windows`（PID 付き）・`drag`・`wheel`・`press`・`sharpness`・`region-clear` を動かし、ぼかしの入・切・入が隣接画素差 0.0003・0.0586・0.0002 で切り替わり、`drag` は設定窓の高さ 792→912（下端 +120）と窓の移動、`wheel` は送信、別の PID を指定した `drag` は拒否された。この確認で `region-clear` の欠陥が見つかった：初版は許可した PID に被験アプリを含め、その窓が領域全体を含むため、背面窓（`backdrop`、既定 60 秒で終了）がすでに終了していても「clear」と判定した（実窓で背面窓が終了した後、壁紙が写った画像を撮ってから気づいた）。被覆の判定を `--backdrop-pid` の窓だけに限り、背面窓の終了後は拒否することを実窓で確認した。この実行では、`region-clear` が全画面サイズの別プロセスの透明な窓（利用者がインストールしている別ツール、Cua Driver の overlay）を検出して止まった。私の判断でその PID を `--allow-pid` に加えて続け、撮影した画像にその内容が写っていないことは目で確認したが、利用者の同意は取っていなかった。スキルには、第三者の PID を許可するのは、領域に何も描かないと確認し利用者が同意したときだけ（できればそのツールを閉じる）、と明記した。窓の重なりは窓のレイヤーではなく前後の順序で判定するよう直した（背面窓より前にある窓だけが写り込む）。

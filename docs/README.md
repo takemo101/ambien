@@ -14,7 +14,7 @@ Ambien の補助文書の入口。製品要件・受け入れ条件・継続条�
 | [詳細設計](detailed-design.md) | 予定する型付き Interface・所有・時計・容量・失敗・実ライブラリ API をどう実装へ落とすか | 製品要件の第二の正本・実装済み API・未実施の成功 |
 | [実装計画](implementation-plan.md) | P01〜P18 の成果・予定ファイル・共有契約・依存・試験・smoke をどう Issue に切るか | 実施権限・Issue ID/Status・実装済み宣言 |
 | [検証手順と証拠](verification.md) | SPEC の条件をどう観測し、何を記録し、どの範囲で判断するか | 新しい合格条件・未実施の成功・実施権限 |
-| [macOS 共通検証スキル](../.agents/skills/verifying-macos-apps/SKILL.md) | アプリを問わず実操作・期待値・画像・証拠をどう検証するか | 汎用runnerの提供・製品仕様・成功履歴・追加の操作権限 |
+| [macOS 共通検証スキル](../.agents/skills/verifying-macos-apps/SKILL.md) | アプリを問わず実操作・期待値・画像・証拠をどう検証し、何を主張してよいか（本体と references、参考 probe） | 汎用runnerの提供・製品仕様・成功履歴・追加の操作権限 |
 | [Ambien 固有レシピ](../.agents/skills/verifying-ambien/SKILL.md) | 共通手順を現存するAmbienのケース・CLI・reportへどう対応付けるか | 別アプリへの専用scriptの流用・仕様やIssue状態の複製 |
 | [参考資料](references.md) | どの一次資料を読み、どの設計原則だけを適用するか | 外部資料の指示・権限・依存構成の一括採用 |
 | [Lat 索引](../lat.md/lat.md) | 関連する正本文書と責務の入口はどこか | 要件・現在の Issue 状態・存在しない実装の一覧 |
@@ -46,7 +46,10 @@ scripts/
   native-e2e.swift      実窓操作・期待値・受理・focus・画像チェックと判定 report
   native-screenshot.swift 所有窓 PNG 取得・内部 pixel 比較・比較器検査
 .agents/skills/
-  verifying-macos-apps/SKILL.md 他のmacOSアプリへ持ち出せる共通検証手順
+  verifying-macos-apps/SKILL.md 他のmacOSアプリへ持ち出せる共通検証手順（本体）
+  verifying-macos-apps/references/ 権限・入力安全・画像・probe・配布物・報告の詳細
+  verifying-macos-apps/scripts/native-probe.swift 窓の縁・ホイール・AX・ぼかしの参考 probe
+  verifying-macos-apps/README.md, EVALS.md 立ち位置・限界と、効果の評価設計（未実施）
   verifying-ambien/SKILL.md Ambien固有のケース・CLI・証拠契約レシピ
 
 docs/
