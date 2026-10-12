@@ -399,7 +399,7 @@ Rust の1つのアプリ。実行ループは GPUI、音声 I/O は CPAL、DSP �
 ### 依存の選定
 
 - `gpui` と `gpui_platform`：Zed `1a28cff4b409169bac058bca40dfbfeb7621d19b`。`gpui_platform` は `font-kit` を有効にする。
-- `ely-gpui-component`：`7e39a9383dc2fd7404751d02cb166e95861ea3d6`、パッケージ0.1.1。上記と同じ GPUI 改訂を宣言しており、Rust 1.95を要求する。
+- `ely-gpui-component`：`78bf5917a5a5634ef16b42bc0637b2bce911728d`、パッケージ0.1.1。上記と同じ GPUI 改訂を宣言しており、Rust 1.95を要求する。取得先は `https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components`（作者の自前の Gitea。元の GitHub のリポジトリは消えて移動した）。固定する改訂は、移動前に使っていた `7e39a9383dc2fd7404751d02cb166e95861ea3d6` と同じソース木（tree `3a98236d`）を持つ、移動先の `main` の履歴上のコミットである（移動先で履歴が書き直され、旧コミットは退避用のタグからしか辿れないため、`main` から辿れるコミットへ固定し直した）。自前のホストなので、配布の再現性はそのホストが続くことに依存する。
 - `fundsp`：0.23.0。`cpal`：0.18.2。
 - Sparkle：2.10.0。配布済み framework と必要なツールを使う。
 
@@ -455,8 +455,8 @@ FunDSP の汎用シーケンサーやグラフの差し替えが、すべて無�
 
 実行を伴わない一次資料の確認と、ローカルの読取り専用コマンドの観測を使った。ソース上の実現可能性と実機の動作保証は区別する。
 
-- [Ely の固定改訂と依存定義](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/Cargo.toml)
-- [Ely の初期化](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/blob/7e39a9383dc2fd7404751d02cb166e95861ea3d6/src/lib.rs)
+- [Ely の固定改訂と依存定義](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/Cargo.toml)
+- [Ely の初期化](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/commit/78bf5917a5a5634ef16b42bc0637b2bce911728d/src/lib.rs)
 - [GPUI の窓の選択肢](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/platform.rs)
 - [GPUI macOS の窓・固定サイズ・座標・倍率](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/window.rs)
 - [GPUI の Metal 描画](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_apple/src/metal_renderer.rs)

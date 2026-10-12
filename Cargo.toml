@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1a28cff4b409169bac058bca40dfbfeb7621d19b", default-features = false, features = ["stacker"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a28cff4b409169bac058bca40dfbfeb7621d19b", default-features = false, features = ["font-kit"] }
-ely = { package = "ely-gpui-component", git = "https://github.com/ZacharyZhang-NY/Ely-GPUI-Components", rev = "7e39a9383dc2fd7404751d02cb166e95861ea3d6", default-features = false, features = ["runtime_shaders"] }
+ely = { package = "ely-gpui-component", git = "https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components", rev = "78bf5917a5a5634ef16b42bc0637b2bce911728d", default-features = false, features = ["runtime_shaders"] }
 fundsp = { version = "=0.23.0", default-features = false, features = ["std"] }
 cpal = { version = "=0.18.2", default-features = false }
 async-channel = "=2.5.0"
