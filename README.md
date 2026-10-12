@@ -7,7 +7,13 @@
 - 音と絵が同じ世界を共有し、大きな粒だけがときどき光る。場所を写実的に描くアプリではない。
 - アプリ内の音量・消音・音の調整と、設定の保存・復元を備える。
 
-UI は GPUI＋Ely、DSP は FunDSP、音声 I/O は CPAL、アプリ内更新は Sparkle を使う設計です。対象は Apple Silicon の macOS 15以降ですが、macOS 15の実機は無く、確認できるまで下限の対応は宣言しません。配布は、Developer ID 署名・公証をしない DMG を `takemo101/ambien` の GitHub Releases に置く方針です（リポジトリの公開は別途の明示依頼を待つ未実施の操作です）。
+UI は GPUI＋Ely、DSP は FunDSP、音声 I/O は CPAL を使います。対象は Apple Silicon の macOS 15以降ですが、動作を確認したのは macOS 27.0.1 だけで、macOS 15〜26 の実機は無く、確認できるまで下限の対応は宣言しません。アプリ内更新（Sparkle）は設計済みですが、最初の公開版には含めません。
+
+## ダウンロード
+
+[Releases](https://github.com/takemo101/ambien/releases) から DMG を取得します（Developer ID 署名・公証をしない先行配布です）。DMG を開いて Ambien を Applications へドラッグし、初回は「システム設定 → プライバシーとセキュリティ」の「このまま開く」で許可します（または `xattr -dr com.apple.quarantine /Applications/Ambien.app`）。更新は新しい DMG の入れ直しです。ライセンスは [MIT](LICENSE) です。
+
+Release は、`main` にあるコミットへ `vX.Y.Z`（`Cargo.toml` の version と一致）のタグを打つと、GitHub Actions（[release.yml](.github/workflows/release.yml)）が DMG を作って公開します。手元では `scripts/package-app.sh` が同じ DMG を `dist/` に作ります。
 
 承認済み仕様に沿って、固定したGPUIシーン・Ely設定窓、雨／岩／深海の合成、CPAL標準出力、共通の手動多声交差、同じ粒のcanvas描画、音量・独立消音・受理通知を実装しています。ノブ初期値と三環境の音色は、ユーザーの試聴で確定済みです（P13、範囲と未確認は検証記録）。声のソース・自動試験・offline波形と、実native／CPALの受け入れは別証拠です。自動移動・保存・更新は後続の成果で、物理同期、高DPI負荷、配布の受け入れは別に必要です。[詳細設計](docs/detailed-design.md)と[実装計画](docs/implementation-plan.md)は現存部分と製品全体の予定を区別し、[検証記録](docs/verification.md)は実際の確認・過去の失敗・残る制約を示します。Issueの状態はmikanで管理します。
 
