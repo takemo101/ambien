@@ -1264,7 +1264,7 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 
 - **Gatekeeper の警告と承認手順**：手元の macOS 27 では、隔離属性を手で付けたコピーを `open` しても警告が出ず起動した（`spctl --status` は assessments enabled）。実際にブラウザで取得した DMG での警告の文言と、README／リリースノートに書いた手順（「このまま開く」・`xattr -dr com.apple.quarantine`）が通ることは未確認で、クリーンな Mac での確認が必要。
 - 手元以外の環境での起動（macOS 15〜26、他の Apple Silicon Mac、初回起動時の音声出力・窓・設定保存）。ビルドは手元では SDK 27 だが、GitHub の runner は別の Xcode／SDK で、同じバイナリにならない。
-- `.github/workflows/release.yml` は YAML の構文を確認しただけで、実際の runner での実行は未確認。公開後に手動実行で確認する。アプリのアイコンは無い（後続）。
+- アプリのアイコンは無い（後続）。
 
 ### 検証スキルの更新
 
@@ -1277,3 +1277,9 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 - 移動先の `main`（362a0fc）は履歴が書き直されており、これまで固定していた `7e39a9383dc2fd7404751d02cb166e95861ea3d6` は `main` から辿れず、退避用のタグ `pre-coauthor-strip` からしか辿れない。独立レビューがこれを指摘し、手元で確認した。タグが消えると、クリーンな build（GitHub Actions を含む）が再び失敗する。
 - 同じ日時・件名のコミット `78bf5917a5a5634ef16b42bc0637b2bce911728d` が `main` の履歴にあり、ソース木（tree）が `3a98236d8609a2e0553e67b96d060c1b00cfb36e` で旧コミットと同一であることを確認した。固定する改訂をこれに替えた（`Cargo.toml`・`Cargo.lock`・SPEC・文書のリンク）。コードは同じで、`cargo build --locked`・`cargo clippy`・`cargo test`（262件）が成功した。
 - 残る制約：取得先が作者の自前ホストであること（そのホストが無くなる、または再び履歴が書き直されると取得できない）。
+
+### GitHub Actions と公開した Release（P32）
+
+- 手動実行（run 38223173111、main、公開しない）：package job が7分30秒で成功し、publish job はスキップされた。成果物 `ambien-dmg` を取得し、`shasum -a 256 -c` 成功、`Signature=adhoc`・`TeamIdentifier=not set`・arm64・minos 15.0（SDK 15.5。手元の build は SDK 27）・`CFBundleVersion` 2（run 番号）・同梱ライセンスを確認した。この DMG から取り出した `Ambien.app` を `open -n`（隔離 HOME）で起動し、シーン窓（960×600）が画面に出て、波紋が描かれることを撮影で確認した。
+- タグ `v0.1.0`（main の 81e19fd）の push で起動した run 38224113409 が成功し、package・publish の両 job が通った。pre-release `Ambien 0.1.0`（https://github.com/takemo101/ambien/releases/tag/v0.1.0）に、`Ambien-0.1.0-arm64.dmg`（6,555,202 bytes）と `.sha256` が付いた。公開 URL（認証なし）から curl で取得した DMG の SHA-256 が `.sha256`（`57c6f2680ce4ee17f7dfc1a71ca723fecf983de3f75a24e9eec2611ed796265c`）と一致した。
+- 未確認：ブラウザで取得した DMG での Gatekeeper の実際の警告と、リリースノートの承認手順（curl で取得したファイルには隔離属性が付かない）。macOS 15〜26 での動作。手元以外の Mac での初回起動。
