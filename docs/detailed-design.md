@@ -535,7 +535,7 @@ gpui_platform::application()
     });
 ```
 
-`App::open_window(WindowOptions, ...)` で root `Entity<SceneView>`／`Entity<SettingsView>` を作る。両窓とも `WindowBounds::Windowed`、`titlebar:Some(...)`、`is_resizable:false`、`show:false`、`focus:false`、tabbing 無し。open 前 fit、同期 AppKit 設定の後 `activate_window()` で表示する。[WindowOptions](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/platform.rs#L2174-L2236)、[native style／renderer 初期化](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/window.rs#L990-L1107)
+`App::open_window(WindowOptions, ...)` で root `Entity<SceneView>`／`Entity<SettingsView>` を作る。両窓とも `WindowBounds::Windowed`、`titlebar:Some(...)`、`is_resizable`（シーンは false、設定窓は縦伸縮のため true）、`show:false`、`focus:false`、tabbing 無し。open 前 fit、同期 AppKit 設定の後 `activate_window()` で表示する。[WindowOptions](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui/src/platform.rs#L2174-L2236)、[native style／renderer 初期化](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/window.rs#L990-L1107)
 
 scene は、設定の「ぼかし」が入のとき Blurred（既定）、切のとき Transparent。システムの透明度低下が有効なら Opaque を優先する。Blurred では GPUI が窓の下に `BlurredView`（`NSVisualEffectView`）を足すが、その素材 `Selection` は現行 macOS で背後を何もぼかさないため、`platform::macos::apply_blur_material` が窓を開いた直後と表面設定の変更ごとに、その subview の素材を `underWindowBackground` へ替える（`BlurredView` が無い窓では何もしない）。「ガラスの濃さ」は Ely palette の `bg` に不透明度を掛けた膜を scene root に塗る（0 では何も塗らない）。透明 titlebar・タイトル文字なし、OS 信号ボタンを保持。空いた領域の drag を GPUI の titlebar drag 機構で有効化し、scene にボタン／label を置かない。設定は別通常窓、項目が収まらなければ scroll。window handle と root Subscription を保持し、close で handle／window-specific observer を解除する。root の解放を音声停止へ接続しない。「シーンを表示」は live handle なら前面、closed なら新しい root と Task を作る。設定も重複窓を作らず、既存 handle を前面へ。menu の登録済み選択は registry 順、wander／mute は model と同じ check 状態、quit は Coordinator 経由。
 
@@ -584,6 +584,8 @@ Slider／Switch の値 event は `cx.processor` または Entity update closure 
 
 UI は [設定窓](../SPEC.md#設定窓) の順に、小見出し付きの1列へ配置する（本文に「設定」見出し・使い方・要約・受理表示は出さない）。各項目は名前と値を一行、操作を下に置き、時間の「次回適用」を短く説明する。検証用の要約・受理・出力状態は大きさ0の `unseen_text` としてアクセシビリティだけに残す。スクロールは `ScrollHandle` を `track_scroll` で保持し、右端に常時見える細いつまみを描く。つまみの長さと位置、ドラッグから offset への換算は `thumb`／`offset_for_thumb_top` の純粋関数で、内容が収まるとき・数値が不正なときは描かない。自動の dominant 更新と manual の即時 target 表示を区別し、単に閲覧して wander を止めない。出力・保存 failure の表示に必要な Ely 部品も使い、4種類限定の framework 制約を作らない。
 
+設定窓だけは縦に伸縮できる。`WindowRole::Settings` は `is_resizable = true`（スタイルに `Resizable`）で開き、`WindowRole::size_limits(content, available_height)` が AppKit の内容寸法の最小・最大（幅は520固定、高さは最小400〜作業領域の内容高さ。作業領域が最小より低いときは収まる高さに固定）を返し、`constrain_window`／`refit_window` が `setContentMinSize`／`setContentMaxSize` へ適用する。再 fit の基準 `refit_baseline` は、設定窓なら利用者が最後に端のドラッグで選んだ高さ（未選択なら既定の高さ、最小未満・非有限は補正）で、窓の現在の高さではない。ドラッグ中だけ `live_resize_content_height`（`NSWindow::inLiveResize`）が高さを返し、設定窓の bounds observer が `AppModel.settings_height` へ記録する（再 fit による変化は記録しない）ため、狭い作業領域で縮められた窓は余裕ができれば選んだ高さへ戻る。シーンは常に固定寸法。作業領域だけが変わった場合も、フレームが変わらなくても最大高を更新する。選んだ高さは窓を閉じるまで保持し、保存しない（次回は既定の高さ760）。シーンは従来どおり最小＝最大の固定。
+
 ## AppKit座標と範囲補正
 
 ### raw借用と固定制約
@@ -602,7 +604,7 @@ AppKit Adapter が collectionBehavior の既存 bits から FullScreenPrimary／
 2. AppKit NSScreen の global bottom-left `frame` と `visibleFrame` を取得する。GPUI の display bounds／visible_bounds は display 内 top-left 論理座標なので区別する。[GPUI MacDisplay 変換](https://github.com/zed-industries/zed/blob/1a28cff4b409169bac058bca40dfbfeb7621d19b/crates/gpui_macos/src/display.rs#L112-L150)
 3. **open 前**に GPUI と同じ style（Titled／Closable、採用した Miniaturizable／FullSizeContentView、Resizable 無し）で `NSWindow::contentRectForFrameRect_styleMask(visible_outer,style,mtm)`、`frameRectForContentRect_styleMask(...)` を使う。固定 titlebar 高さを引かない。[geometry helpers](https://docs.rs/objc2-app-kit/0.3.2/src/objc2_app_kit/generated/NSWindow.rs.html#529-542)
 4. 基準 content を利用可能 content の各寸法以内へ補正し、その content の outer frame を visibleFrame へ clamp する。GPUI の初期 bounds.size は content、bounds.origin は display 相対 outer top-left。renderer が open 内で作られるので、初回サイズを open 後に縮めるだけで過大確保の予防としない。
-5. raw Adapter の固定 min/max を設定後に窓を表示する。画面移動・撤去・作業領域変更で今の画面を再読し、必要なら固定寸法を再 fit。前の狭い画面の縮小を任意可変サイズとして引き継がず、現在基準から再計算する。
+5. raw Adapter の固定 min/max を設定後に窓を表示する。画面移動・撤去・作業領域変更で今の画面を再読し、必要なら固定寸法を再 fit。前の狭い画面の縮小を任意可変サイズとして引き継がず、固定窓は役割の基準から、設定窓は利用者が選んだ高さ（なければ既定）から再計算する。
 
 座標の代表式（全値は logical points）を固定する。screen global frame を S、window outer の高さを H、保存相対 top-left を (x,y) とすると、AppKit outer origin は
 
