@@ -375,6 +375,13 @@ impl Render for SettingsView {
                         ),
                 )
                 .child(
+                    Switch::new("eightbit", controls.eightbit)
+                        .label("8bitモード")
+                        .on_change(cx.processor(|_, eightbit, _, cx| {
+                            dispatch_control_edit(ControlEdit::EightBit(eightbit), cx);
+                        })),
+                )
+                .child(
                     Switch::new("blur", controls.blur)
                         .label("ぼかし")
                         .on_change(cx.processor(|_, blur, _, cx| {

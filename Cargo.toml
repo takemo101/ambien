@@ -24,7 +24,7 @@ serde_json = "=1.0.151"
 objc2 = "=0.6.4"
 raw-window-handle = "=0.6.2"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSApplication", "NSButton", "NSControl", "NSGraphics", "NSResponder", "NSScreen", "NSView", "NSWindow", "NSWorkspace", "objc2-core-foundation"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSGeometry", "NSNotification", "NSObject", "NSOperation", "NSString", "NSValue", "block2", "objc2-core-foundation"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSGeometry", "NSNotification", "NSObject", "NSOperation", "NSString", "NSValue", "block2", "objc2-core-foundation"] }
 block2 = { version = "=0.6.2", default-features = false, features = ["std"] }
 objc2-core-audio = { version = "=0.3.2", default-features = false, features = ["std", "AudioHardware", "block2", "dispatch2"] }
 objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }

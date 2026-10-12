@@ -438,17 +438,20 @@ impl AppModel {
         Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
         let audio = self.audio.shared();
         let accessibility = self.accessibility;
-        let (blur, veil, intensity) = (
+        let (blur, veil, intensity, eightbit) = (
             self.controls.blur,
             self.controls.veil,
             self.controls.visuals,
+            self.controls.eightbit,
         );
         self.scene = Some(open_window(
             WindowRole::Scene,
             accessibility,
             blur,
             self.placement.as_ref(),
-            move |window, cx| SceneView::new(window, cx, audio, accessibility, veil, intensity),
+            move |window, cx| {
+                SceneView::new(window, cx, audio, accessibility, veil, intensity, eightbit)
+            },
             cx,
         )?);
         let handle = self.scene.expect("the scene was just opened");
@@ -592,7 +595,10 @@ impl AppModel {
         if changed
             && matches!(
                 edit,
-                ControlEdit::Blur(_) | ControlEdit::Veil(_) | ControlEdit::Visuals(_)
+                ControlEdit::Blur(_)
+                    | ControlEdit::Veil(_)
+                    | ControlEdit::Visuals(_)
+                    | ControlEdit::EightBit(_)
             )
         {
             self.apply_surface(cx);
@@ -772,18 +778,14 @@ impl AppModel {
         self.update_settings(cx);
     }
 
-    /// Pushes the blur choice, glass density and accessibility to the live scene. A scene
+    /// Pushes the blur choice, glass density, 8-bit mode and accessibility to the live scene. A scene
     /// opened later reads the same values when it is created.
     fn apply_surface(&mut self, cx: &mut Context<Self>) {
-        let (accessibility, blur, veil, intensity) = (
-            self.accessibility,
-            self.controls.blur,
-            self.controls.veil,
-            self.controls.visuals,
-        );
+        let accessibility = self.accessibility;
+        let controls = &self.controls;
         if let Some(handle) = self.scene
             && let Err(error) = handle.update(cx, |view, window, cx| {
-                view.set_surface(accessibility, blur, veil, intensity, window, cx);
+                view.set_surface(accessibility, controls, window, cx);
             })
         {
             eprintln!("Ambien: シーンの背景を反映できません: {error}");
