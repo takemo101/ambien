@@ -1244,3 +1244,28 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 - 使い心地（伸縮の掴みやすさ・最小400pt の妥当性・既定760pt）、ライト／ダーク、別ディスプレイへの移動や作業領域の変更（Dock・メニューバーの変化）後の高さ補正と選んだ高さへの復帰、低解像度で作業領域が最小より低い場合の挙動は実機では未確認（純粋関数の test のみ）。
 - OS のタイル配置（画面端へのドラッグ・Window メニュー・キーボード）とフルスクリーンが設定窓に効かないこと。窓を Resizable にしたため、従来の記録（両窓が固定のとき）をそのまま当てはめず、未確認とする。
 - 縦に伸縮した直後の窓の再描画の負荷は計測していない（設定窓は小さく、再描画は操作時のみ）。
+
+## P32 最初の公開版：DMG だけを GitHub Releases で配布する
+
+2026-10-12、macOS 27.0.1（26A434）、arm64（手元）。ad-hoc 署名のみの DMG を作る `scripts/package-app.sh`、`resources/Info.plist`、第三者ライセンス一覧 `scripts/third-party-licenses.py`、タグから DMG を作って Release を公開する `.github/workflows/release.yml` を加え、MIT の `LICENSE` を置いた。アプリ内更新（Sparkle）・更新鍵・appcast・Pages は含めない（SPEC「配布と更新」）。
+
+### 公開前監査（読取り専用）
+
+- 追跡ファイルと全履歴（76 commit）を、`ghp_`・`github_pat_`・`sk-`・`AKIA`・秘密鍵の header・`xox`・password 等の文字列で検索し、秘密情報らしいものは0件（一致した `token` は一般語）。履歴に鍵・証明書・wav・dmg・zip・`.mikan` のパスは無く、最大の blob は `docs/verification.md`（約280KB）。専用の秘密情報検査ツールは使っておらず、網羅ではない。
+- ホームディレクトリの絶対パスを含む追跡ファイルは `docs/verification.md` の3行だけ（ユーザー名は公開 GitHub アカウント名と同じ）。commit author は個人の Gmail（41）・GitHub noreply（34）・GitButler（1）。ユーザーは履歴をそのまま公開すること、MIT ライセンス、リポジトリ公開を選んだ。
+- 依存501 crate のライセンスは MIT／Apache-2.0／Unicode／BSD 系などで、GPL・AGPL は0件、MPL-2.0 が2件。`scripts/third-party-licenses.py` が一覧と各ライセンス本文（同じ本文は参照で重複を省く、約0.9MB）を生成し、DMG の `Contents/Resources/THIRD_PARTY_LICENSES.txt` に入る。うち54 crate は sources にライセンスファイルが無く、宣言されたライセンス名だけを書く。
+
+### AI 側の確認（手元の DMG）
+
+- `scripts/package-app.sh` が `dist/Ambien-0.1.0-arm64.dmg`（6.2MB）と `.sha256` を作り、`shasum -a 256 -c` が成功した。マウントした `Ambien.app` は `Identifier=com.takemo101.ambien`、`Signature=adhoc`、`TeamIdentifier=not set`、thin arm64、`LC_BUILD_VERSION` の minos 15.0（sdk 27.0）、`CFBundleShortVersionString` 0.1.0・`CFBundleVersion` 1・`LSMinimumSystemVersion` 15.0。`codesign --verify --strict` は成功。
+- 隔離属性を付けた `.app` で `spctl --assess` は `rejected`（ad-hoc 署名のため想定どおり）。
+
+### 未確認範囲
+
+- **Gatekeeper の警告と承認手順**：手元の macOS 27 では、隔離属性を手で付けたコピーを `open` しても警告が出ず起動した（`spctl --status` は assessments enabled）。実際にブラウザで取得した DMG での警告の文言と、README／リリースノートに書いた手順（「このまま開く」・`xattr -dr com.apple.quarantine`）が通ることは未確認で、クリーンな Mac での確認が必要。
+- 手元以外の環境での起動（macOS 15〜26、他の Apple Silicon Mac、初回起動時の音声出力・窓・設定保存）。ビルドは手元では SDK 27 だが、GitHub の runner は別の Xcode／SDK で、同じバイナリにならない。
+- `.github/workflows/release.yml` は YAML の構文を確認しただけで、実際の runner での実行は未確認。公開後に手動実行で確認する。アプリのアイコンは無い（後続）。
+
+### 検証スキルの更新
+
+今回の作業（P27〜P32）で手元の実窓を使って確かめた方法のうち、`scripts/native-e2e.swift` が持たないもの（窓の縁のドラッグ・ホイール・AXPress・背面の市松窓によるぼかしの測定・隣接画素差）を `scripts/native-probe.swift` にまとめ、共通スキルに「既存 runner が届かない見た目・操作」と「配布物」の節、Ambien 固有スキルに probe の使い方と準備（隔離 HOME・保存ファイルの固定値・プロセス名の違い・設定窓をずらす・同時に動かさない）を加えた。`native-e2e.swift --case all` は P28〜P31 の変更後も全 PASS（約7分、debug build）。probe は windows・drag・wheel・press・backdrop・sharpness を実窓で動かして確認した（設定のぼかしの切替で隣接画素差が約0.058と約0.0004の間を行き来する）。見た目の好み・音・Gatekeeper の実際の警告は probe で合格にしない。

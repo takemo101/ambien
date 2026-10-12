@@ -121,6 +121,7 @@ flowchart LR
  P14 --> P29
  P26 --> P30
  P28 --> P31
+ P13 --> P32
  P25 --> P26
  P14 --> P15 --> P16 --> P17 --> P18
  P13 --> P17
@@ -635,6 +636,23 @@ macOS 直接依存は Cargo の target macOS section に閉じる。P15/P16 が 
 - [ ] 高さを変えるとスクロールバーのつまみが合わせて変わる。
 
 **Behavior tests:** 役割ごとの最小・最大寸法の純粋関数（シーンは固定、設定は幅固定・高さの範囲、低い作業領域での補正）と、再 fit が伸縮した高さを保つこと。**Smoke/gate:** 実窓で縦の伸縮・最小高さ・横が動かないこと・つまみの追従を観測し、使い心地はユーザーが判断する。
+
+## P32 最初の公開版：DMG だけを GitHub Releases で配布する
+
+**DependsOn:** P13（初期値の確定。P14〜P18 の Sparkle・更新鍵・Pages は後続で、この単位には含めない）。**SPEC:** [配布と更新](../SPEC.md#配布と更新)、[配布前提](../SPEC.md#配布前提)。
+
+**Files（予定）:** Create `LICENSE`（MIT）、`resources/Info.plist`、`scripts/package-app.sh`（bundle 作成・ad-hoc 署名・DMG・SHA-256）、`scripts/third-party-licenses.py`（第三者ライセンス一覧）、`.github/workflows/release.yml`（タグから DMG を作って Release を公開）、`.github/release-notes.md`（リリースノートのひな形）。Modify `Cargo.toml`（`license`）、`README.md`（取得と初回起動の手順）、`docs/development.md`（packaging と公開の手順）、`docs/verification.md`、`docs/detailed-design.md`。
+
+**Produces:** bundle ID `com.takemo101.ambien`・Apple Silicon・最低 macOS 15 の `.app`（ad-hoc 署名のみ）を収めた DMG と SHA-256。公開前監査の記録。GitHub の pre-release に DMG を添え、Gatekeeper の承認手順と確認済み OS・未確認範囲を書く。アプリ内更新・更新鍵・appcast・Pages は作らない。
+
+- [ ] `scripts/package-app.sh` が `.app` と DMG を作り、`codesign -dv` で ad-hoc 署名・arm64・bundle 情報を確認できる。
+- [ ] 作った DMG を開き `.app` を実機で起動して、窓・音・設定の保存（Application Support）が動く。ad-hoc 署名での Gatekeeper の警告と承認手順を実機で確認する。
+- [ ] 第三者の依存のライセンス表示を DMG に同梱する。
+- [ ] 公開前監査（秘密情報・個人情報・履歴）の記録と、ユーザーの公開承認（リポジトリ公開・MIT・履歴の扱い）。
+- [ ] タグ（`vX.Y.Z`、`Cargo.toml` の version と一致、`main` 上）を push すると GitHub Actions が DMG を作り、pre-release として公開する。手動実行は公開せず成果物だけ残す。
+- [ ] 公開後、実際の URL から DMG を取得でき、SHA-256 が一致する。
+
+**Behavior tests:** 純粋に試験できる規則はない（packaging）。**Smoke/gate:** 作成した DMG の実機起動と、公開後の取得・hash 照合。使い心地と他の OS での動作はユーザーの確認が必要で、AI は未確認を成功にしない。
 
 ## 全 SPEC 節の coverage matrix
 

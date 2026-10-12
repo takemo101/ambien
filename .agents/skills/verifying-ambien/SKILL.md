@@ -1,6 +1,6 @@
 ---
 name: verifying-ambien
-description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・短い連続選択・ひとりで移ると時間設定・音量・消音の受理、予定表示・非表示と再表示、保存・再起動・未来版や破損の保護、または固有の検証コマンドと受け入れ条件を確認するとき。
+description: Use when Ambien の native E2E、実行元の権限不足・許可反映、フォーカス喪失、雨／岩／深海ノブ・短い連続選択・ひとりで移ると時間設定・音量・消音の受理、予定表示・非表示と再表示、保存・再起動・未来版や破損の保護、設定窓のレイアウト・スクロールバー・縦の伸縮、背景のぼかし・ガラス、演出の強さの見た目、DMG・リリースの検証、または固有の検証コマンドと受け入れ条件を確認するとき。
 ---
 
 # Ambien 固有の検証レシピ
@@ -72,6 +72,29 @@ stdout の今回の report path を読む。一意の run directory0700、`repor
 ```
 
 PID／window IDは今回の所有候補から取得する。capture outputは自分所有のprivate directory内の未使用絶対path。helperは空・全透明・uniformなcropped premultiplied RGBA・不変・寸法不一致を拒否する。透明background上のmonochrome shapeはcoverage/alphaが異なるためuniform interiorではない。alpha差を含むpixel変化も可視品質や粒同定の証拠にしない。両scriptは `ambien` executableと固有UI／caseの専用実装で、他appへそのまま流用しない。
+
+## runner の外の確認（probe）と、そのための準備
+
+`native-e2e.swift` の全ケースは設定窓の AX・メニュー・保存・窓の寿命を見るが、**見た目と一部の操作は見ない**：設定窓のレイアウトとスクロールバー、設定窓の縦の伸縮、背景のぼかし、演出の強さ（控えめ／標準／派手）の描画、DMG。これらは [共通手順の5・6](../verifying-macos-apps/SKILL.md) に従い、次の probe で観測する。結果は runner の PASS と別の証拠として記録する（`docs/verification.md`）。
+
+```sh
+/usr/bin/swiftc -O scripts/native-probe.swift -o /tmp/native-probe     # 使い捨てのビルド
+/tmp/native-probe windows --owner ambien                              # 窓 ID・bounds・onscreen
+/tmp/native-probe drag --window-id ID --edge bottom --by 150          # 縁・タイトルバー（--dx で横にも）
+/tmp/native-probe wheel --window-id ID --dy -60                       # ホイール（6回）
+/tmp/native-probe press --pid PID --title ぼかし                       # AXPress（既定 role は AXCheckBox）
+/tmp/native-probe backdrop --seconds 60 &                             # 全画面の白黒市松（背面に置く）
+/tmp/native-probe sharpness shot.png                                  # 隣接画素差の平均（鮮明≒0.06、ぼけ≒0）
+```
+
+- **起動と隔離**：`MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release --locked --offline` の後、検証用 HOME（例 `/tmp/ambien-blur-home`）で `HOME=… ./target/release/ambien`。保存先は `$HOME/Library/Application Support/Ambien/state.json`。固定値の例：`{"version":1,"volume":0.2,"mute":true,"blur":true,"veil":0.0,"visuals":"standard"}`（`visuals` は `calm`／`standard`／`vivid`、`mute` を true にして音を出さない）。トグルは押すたびにこのファイルへ保存されるので、**測定の前に毎回書き戻す**。`just try` は release を一時 HOME で起動する利用者向けの入口。
+- **窓を開く**：アプリのメニュー（2番目のメニューバー項目）の「設定…」を System Events で押す。**素の実行ファイルのプロセス名は `ambien`、`.app` にした配布物は `Ambien`**（bundle 名）なので、`process "…"` を取り違えない。シーンは 960×600 の窓、設定窓は幅520で高さ400（内容）〜作業領域。
+- **ぼかしの確認**：背面に `backdrop`、前面にシーン。設定窓はシーンの中央に被るので、`drag --edge title --by 300 --dx 1100` で先にずらす。シーンの bounds を `screencapture -R` で撮り、`sharpness` を入／切／入で測る（今回の実測：切 0.058、入 0.0004）。差が出ないなら、設定が効いていない（過去に GPUI の既定素材 `Selection` が背後をぼかさず、入でも 0.058 のままだった）。
+- **スクロールバー・縦の伸縮**：設定窓を `drag --edge bottom` で伸縮し、前後の bounds の数値（内容の最小400＝外枠で +タイトルバー分、幅520不変、画面下端までの最大）を記録する。最小の高さの窓を窓単位で撮り、つまみの長さが見える割合に合うことを見る。画面の縁に窓が接していたら、先にタイトルバーで動かす。
+- **演出の強さの見た目**：`visuals` を固定して起動し、メニューで岩などを選び、窓単位で複数枚撮って確認する。粒は疎なので、1枚で判断せず数秒ごとに撮り、拡大して見る（派手の岩のきらめきは小さい）。見た目の好み・かっこよさはユーザーが判断する。
+- **配布物**：`scripts/package-app.sh` が `dist/` に DMG と `.sha256` を作る。[共通手順の6](../verifying-macos-apps/SKILL.md) の検査を、マウントした `.app` に行う。GitHub Actions の `release.yml`（手動実行は公開せず成果物 `ambien-dmg` だけを残す）が作った DMG は、取得して同じ検査を行う。
+
+probe は入力を物理マウスで送るため、`native-e2e.swift` の実行中は動かさない。AI は見た目の好み・音・Gatekeeper の実際の警告を合格にせず、数値で言える範囲（bounds・測定値・署名情報）だけを記録する。
 
 ## 個別に残す受け入れ
 

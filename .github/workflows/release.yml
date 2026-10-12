@@ -1,0 +1,154 @@
+# Builds Ambien.app and a DMG on a GitHub-hosted Apple Silicon Mac.
+#
+#   push a tag like v0.1.0     -> builds, then publishes a GitHub Release with the DMG and its SHA-256
+#   Run workflow (manual)      -> builds only and keeps the DMG as a workflow artifact (a dry run);
+#                                 it never publishes, even when started from a tag
+#
+# The app is signed ad-hoc only (no Developer ID, no notarization). See scripts/package-app.sh.
+#
+# The build runs about 500 third-party crates' build scripts, so it has read-only access. Only the
+# separate publish job can write to the repository, and it compiles nothing.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the tag check needs main's history
+          persist-credentials: false
+
+      - name: Check the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH[-suffix]"; exit 1
+          fi
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "$TAG" != "v$CARGO_VERSION" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $CARGO_VERSION"; exit 1
+          fi
+          # Only a commit that is on main may be released (checkout fetched origin/main).
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main"; exit 1
+          fi
+
+      # Only the downloaded crate sources are cached. target/ is not, so a release is always
+      # compiled from scratch.
+      - name: Cache downloaded crates
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-sources-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-sources-
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install # reads rust-toolchain.toml
+
+      - name: Build, sign (ad-hoc) and make the DMG
+        env:
+          AMBIEN_BUILD: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          rustc --version
+          xcodebuild -version
+          scripts/package-app.sh
+
+      - name: Check the result
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 -c ./*.dmg.sha256
+          MOUNT=/tmp/ambien-dmg
+          trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true' EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" ./*.dmg >/dev/null
+          APP="$MOUNT/Ambien.app"
+          BIN="$APP/Contents/MacOS/ambien"
+          codesign --verify --strict --verbose=2 "$APP"
+          SIGNATURE="$(codesign -dv "$APP" 2>&1)"
+          echo "$SIGNATURE"
+          grep -qx 'Signature=adhoc' <<<"$SIGNATURE"
+          [ "$(lipo -archs "$BIN")" = arm64 ]
+          BUILD="$(otool -l "$BIN" | grep -A3 LC_BUILD_VERSION)"
+          echo "$BUILD"
+          grep -q 'minos 15.0' <<<"$BUILD"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = com.takemo101.ambien ]
+          test -s "$APP/Contents/Resources/THIRD_PARTY_LICENSES.txt"
+          test -s "$APP/Contents/Resources/LICENSE"
+
+      - name: Keep the DMG as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ambien-dmg
+          path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    # Only a pushed tag publishes. A manual run, even from a tag, stops after the package job.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # creates the Release
+    steps:
+      - name: Check out (for the release notes template)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the DMG
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ambien-dmg
+          path: dist
+
+      - name: Publish the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          DMG="$(ls dist/*.dmg)"
+          (cd dist && sha256sum -c ./*.dmg.sha256)
+          SHA256="$(cut -d' ' -f1 "$DMG.sha256")"
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$SHA256/g" -e "s/@DMG@/$(basename "$DMG")/g" \
+            .github/release-notes.md > dist/release-notes.md
+          # 0.x and any version with a suffix are pre-releases.
+          PRERELEASE=""
+          if [[ "$VERSION" == 0.* || "$VERSION" == *-* ]]; then PRERELEASE="--prerelease"; fi
+          gh release create "$TAG" "$DMG" "$DMG.sha256" \
+            --title "Ambien $VERSION" \
+            --notes-file dist/release-notes.md \
+            --verify-tag \
+            $PRERELEASE
