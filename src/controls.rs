@@ -79,6 +79,9 @@ pub(crate) enum ControlEdit {
     Volume(Normalized),
     Blur(bool),
     EightBit(bool),
+    BackgroundImage(bool),
+    BackgroundOpacity(Normalized),
+    BackgroundBlur(Normalized),
     Veil(Normalized),
     Visuals(VisualIntensity),
     Mute(bool),
@@ -139,6 +142,9 @@ struct CommonFields {
     volume: Normalized,
     blur: bool,
     eightbit: bool,
+    background_image: bool,
+    background_opacity: Normalized,
+    background_blur: Normalized,
     veil: Normalized,
     visuals: VisualIntensity,
     mute: bool,
@@ -154,6 +160,9 @@ impl From<&ControlState> for CommonFields {
             volume: state.volume,
             blur: state.blur,
             eightbit: state.eightbit,
+            background_image: state.background_image,
+            background_opacity: state.background_opacity,
+            background_blur: state.background_blur,
             veil: state.veil,
             visuals: state.visuals,
             mute: state.mute,
@@ -172,6 +181,12 @@ pub(crate) struct ControlState {
     pub blur: bool,
     /// Draw the scene as Famicom-style dots (a pixelating, palette-reducing post-process). Display only.
     pub eightbit: bool,
+    /// A background image copy (`background.png`) is set. Display only.
+    pub background_image: bool,
+    /// How strongly the background image shows, 0..=1. Display only.
+    pub background_opacity: Normalized,
+    /// How blurred the background image is, 0..=1. Display only.
+    pub background_blur: Normalized,
     /// Amount of colour film over the scene, 0..=1. Display only.
     pub veil: Normalized,
     /// How much the scene shows: calm (large particles only), standard or vivid. Display only.
@@ -212,6 +227,10 @@ impl ControlState {
             volume: Normalized::new(0.3).expect("SPEC volume is normalized"),
             blur: true,
             eightbit: false,
+            background_image: false,
+            background_opacity: Normalized::new(0.7)
+                .expect("SPEC background opacity is normalized"),
+            background_blur: Normalized::ZERO,
             veil: Normalized::ZERO,
             visuals: VisualIntensity::Calm,
             mute: false,
@@ -261,6 +280,21 @@ impl ControlState {
             ControlEdit::EightBit(value) => {
                 let mut common = CommonFields::from(&*self);
                 common.eightbit = value;
+                self.set_common(common)
+            }
+            ControlEdit::BackgroundImage(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.background_image = value;
+                self.set_common(common)
+            }
+            ControlEdit::BackgroundOpacity(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.background_opacity = value;
+                self.set_common(common)
+            }
+            ControlEdit::BackgroundBlur(value) => {
+                let mut common = CommonFields::from(&*self);
+                common.background_blur = value;
                 self.set_common(common)
             }
             ControlEdit::Veil(value) => {
@@ -370,6 +404,9 @@ impl ControlState {
         self.volume = common.volume;
         self.blur = common.blur;
         self.eightbit = common.eightbit;
+        self.background_image = common.background_image;
+        self.background_opacity = common.background_opacity;
+        self.background_blur = common.background_blur;
         self.veil = common.veil;
         self.visuals = common.visuals;
         self.mute = common.mute;
@@ -391,6 +428,9 @@ impl ControlState {
         self.volume = source.volume;
         self.blur = source.blur;
         self.eightbit = source.eightbit;
+        self.background_image = source.background_image;
+        self.background_opacity = source.background_opacity;
+        self.background_blur = source.background_blur;
         self.veil = source.veil;
         self.visuals = source.visuals;
         self.mute = source.mute;
@@ -585,6 +625,46 @@ mod tests {
         assert!(shown.eightbit);
         assert!(state.apply(ControlEdit::EightBit(false)).unwrap());
         assert!(!state.eightbit);
+    }
+
+    #[test]
+    fn background_image_edits_are_display_only_and_never_change_the_world() {
+        let registry = Registry::new().unwrap();
+        let mut state = ControlState::new(&registry);
+        assert!(!state.background_image);
+        assert_eq!(state.background_opacity.get(), 0.7);
+        assert_eq!(state.background_blur, Normalized::ZERO);
+        let before = state.clone();
+        let half = Normalized::new(0.5).unwrap();
+        assert!(state.apply(ControlEdit::BackgroundImage(true)).unwrap());
+        assert!(state.apply(ControlEdit::BackgroundOpacity(half)).unwrap());
+        assert!(
+            state
+                .apply(ControlEdit::BackgroundBlur(Normalized::ONE))
+                .unwrap()
+        );
+        assert!(state.background_image);
+        assert_eq!(state.background_opacity, half);
+        assert_eq!(state.background_blur, Normalized::ONE);
+        // Settings changed, but no manual selection, movement or sound field did.
+        assert_eq!(state.settings_revision.get(), 3);
+        assert_eq!(state.manual_revision, Revision::INITIAL);
+        assert_eq!(state.wander_revision, Revision::INITIAL);
+        assert_eq!(state.manual_target, before.manual_target);
+        assert_eq!(state.knobs, before.knobs);
+        assert_eq!(state.volume, before.volume);
+        assert_eq!(state.mute, before.mute);
+        assert_eq!(state.wander, before.wander);
+        // The same value again is not an edit, and a view copying the values sees the choice.
+        assert!(!state.apply(ControlEdit::BackgroundOpacity(half)).unwrap());
+        assert_eq!(state.settings_revision.get(), 3);
+        let mut shown = ControlState::new(&registry);
+        shown.copy_values_from(&state);
+        assert!(shown.background_image);
+        assert_eq!(shown.background_opacity, half);
+        assert_eq!(shown.background_blur, Normalized::ONE);
+        assert!(state.apply(ControlEdit::BackgroundImage(false)).unwrap());
+        assert!(!state.background_image);
     }
 
     #[test]

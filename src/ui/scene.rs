@@ -5,9 +5,9 @@ use std::{
 
 use ely::theme::ActiveTheme;
 use gpui::{
-    BorderStyle, Bounds, BoxShadow, ContentMask, Context, FocusHandle, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, PathBuilder, Pixels, Render, Rgba, Styled,
-    Subscription, Task, Window, canvas, div, fill, outline, point, px, size,
+    BorderStyle, Bounds, BoxShadow, ContentMask, Context, Corners, FocusHandle, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, PathBuilder, Pixels, Render, RenderImage, Rgba,
+    Styled, Subscription, Task, Window, canvas, div, fill, outline, point, px, size,
 };
 
 use crate::{
@@ -16,7 +16,8 @@ use crate::{
         timing::MachNanos,
         transport::{VISIBLE_CAPACITY, VisualEvent, WorldVisualHeader},
     },
-    controls::{ControlState, Normalized, VisualIntensity},
+    background::cover_rect,
+    controls::{ControlState, VisualIntensity},
     situations::VisualShape,
     ui::{
         appearance::{AccessibilityState, Motion},
@@ -147,6 +148,8 @@ pub(crate) struct SceneView {
     intensity: VisualIntensity,
     /// The 8-bit look is wanted, and the backing scale it was last applied at (`None` = not applied).
     eightbit: bool,
+    /// The ready-to-paint background image, with its opacity already in the pixels.
+    background: Option<Arc<RenderImage>>,
     dots_applied: Option<f64>,
     _visibility: Subscription,
     _placement: Subscription,
@@ -158,9 +161,8 @@ impl SceneView {
         cx: &mut Context<Self>,
         audio: Arc<AudioShared>,
         accessibility: AccessibilityState,
-        veil: Normalized,
-        intensity: VisualIntensity,
-        eightbit: bool,
+        controls: &ControlState,
+        background: Option<Arc<RenderImage>>,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -188,9 +190,10 @@ impl SceneView {
             animation: None,
             motion: accessibility.motion(),
             opaque: accessibility.reduce_transparency,
-            veil: veil.get(),
-            intensity,
-            eightbit,
+            veil: controls.veil.get(),
+            intensity: controls.visuals,
+            eightbit: controls.eightbit,
+            background,
             dots_applied: None,
             _visibility: visibility,
             _placement: placement,
@@ -218,6 +221,20 @@ impl SceneView {
         self.intensity = controls.visuals;
         self.eightbit = controls.eightbit;
         self.apply_dots(window);
+        cx.notify();
+    }
+
+    /// Shows (or removes) the background image; the pixels are prepared elsewhere.
+    pub(crate) fn set_background(
+        &mut self,
+        background: Option<Arc<RenderImage>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // GPUI keeps a replaced picture's texture in the window's atlas until told to drop it.
+        if let Some(old) = std::mem::replace(&mut self.background, background) {
+            let _ = window.drop_image(old);
+        }
         cx.notify();
     }
 
@@ -350,6 +367,12 @@ impl SceneView {
         if !is_drawable_viewport(bounds) {
             return;
         }
+        // The bottom layer: under the lights and particles, over the glass.
+        if let Some(image) = &self.background {
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                paint_background(window, bounds, image);
+            });
+        }
         let Some(source) = &self.source else {
             return;
         };
@@ -465,6 +488,33 @@ fn layout_scale(viewport: Bounds<Pixels>) -> f32 {
 }
 
 const DEFAULT_SHORT_SIDE: f32 = 600.0;
+
+/// Draws the background image over the whole viewport, aspect kept and the middle shown.
+fn paint_background(window: &mut Window, bounds: Bounds<Pixels>, image: &Arc<RenderImage>) {
+    let pixels = image.size(0);
+    let Some((x, y, width, height)) = cover_rect(
+        pixels.width.0 as f32,
+        pixels.height.0 as f32,
+        bounds.size.width.into(),
+        bounds.size.height.into(),
+    ) else {
+        return;
+    };
+    let image_bounds = Bounds::new(
+        point(bounds.origin.x + px(x), bounds.origin.y + px(y)),
+        size(px(width), px(height)),
+    );
+    if let Err(error) = window.paint_image(
+        bounds,
+        image_bounds,
+        Corners::default(),
+        image.clone(),
+        0,
+        false,
+    ) {
+        eprintln!("Ambien: 背景画像を描けません: {error}");
+    }
+}
 
 fn is_drawable_viewport(bounds: Bounds<Pixels>) -> bool {
     bounds.size.width > px(0.0)

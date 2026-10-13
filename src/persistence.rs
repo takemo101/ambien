@@ -415,6 +415,31 @@ fn time_setting(
     rounded as u32
 }
 
+/// The state file under the user's Application Support folder; its directory also holds the
+/// background image copy.
+pub(crate) fn default_state_path() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support/Ambien/state.json"))
+        .ok_or_else(|| "HOME がなく、状態保存先を決められません".to_owned())
+}
+
+/// Replaces `path` with `bytes` through a same-directory temporary file (mode 0600).
+pub(crate) fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
+    atomic_replace(path, bytes, &IoHooks::default())
+}
+
+/// The saved name of the background image: the file name inside the support folder, or null.
+fn background_image(value: Option<&Value>, fallback: bool, repairs: &mut Vec<String>) -> bool {
+    match value {
+        None | Some(Value::Null) => value.map_or(fallback, |_| false),
+        Some(Value::String(name)) if name == crate::background::FILE_NAME => true,
+        Some(_) => {
+            repairs.push("background_image".into());
+            fallback
+        }
+    }
+}
+
 fn normalize(root: &Map<String, Value>, registry: &Registry) -> (LoadedState, Option<String>) {
     let mut controls = ControlState::new(registry);
     let mut repairs = Vec::new();
@@ -434,6 +459,29 @@ fn normalize(root: &Map<String, Value>, registry: &Registry) -> (LoadedState, Op
         "eightbit",
         &mut repairs,
     );
+    controls.background_image = background_image(
+        root.get("background_image"),
+        controls.background_image,
+        &mut repairs,
+    );
+    controls.background_opacity = Normalized::new(number(
+        root.get("background_opacity"),
+        f64::from(controls.background_opacity.get()),
+        0.0,
+        1.0,
+        "background_opacity",
+        &mut repairs,
+    ) as f32)
+    .expect("clamped background opacity is normalized");
+    controls.background_blur = Normalized::new(number(
+        root.get("background_blur"),
+        f64::from(controls.background_blur.get()),
+        0.0,
+        1.0,
+        "background_blur",
+        &mut repairs,
+    ) as f32)
+    .expect("clamped background blur is normalized");
     controls.visuals = match root.get("visuals") {
         None => controls.visuals,
         Some(value) => value
@@ -576,6 +624,22 @@ impl StateDocument {
         root.insert("volume".into(), Value::from(controls.volume.get()));
         root.insert("blur".into(), Value::from(controls.blur));
         root.insert("eightbit".into(), Value::from(controls.eightbit));
+        root.insert(
+            "background_image".into(),
+            if controls.background_image {
+                Value::from(crate::background::FILE_NAME)
+            } else {
+                Value::Null
+            },
+        );
+        root.insert(
+            "background_opacity".into(),
+            Value::from(controls.background_opacity.get()),
+        );
+        root.insert(
+            "background_blur".into(),
+            Value::from(controls.background_blur.get()),
+        );
         root.insert("veil".into(), Value::from(controls.veil.get()));
         root.insert("visuals".into(), Value::from(controls.visuals.name()));
         root.insert("mute".into(), Value::from(controls.mute));
@@ -1358,6 +1422,71 @@ mod tests {
         worker.flush(revision).unwrap();
         let (state, _, _, _) = loaded(load_state(&fixture.path(), &registry));
         assert!(state.controls.eightbit);
+    }
+
+    #[test]
+    fn background_settings_default_repair_clamp_and_round_trip() {
+        let fixture = Fixture::new();
+        let registry = registry();
+        fixture.write(&json!({"version":1}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(!state.controls.background_image);
+        assert_eq!(state.controls.background_opacity.get(), 0.7);
+        assert_eq!(state.controls.background_blur.get(), 0.0);
+        assert!(notice.is_none());
+        // Only the saved file name or null is accepted; anything else returns to the default.
+        for wrong in [
+            json!("other.png"),
+            json!("../background.png"),
+            json!(true),
+            json!(3),
+        ] {
+            fixture.write(&json!({"version":1, "background_image":wrong}));
+            let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+            assert!(!state.controls.background_image);
+            assert!(notice.unwrap().contains("background_image"));
+        }
+        fixture.write(&json!({"version":1, "background_image":null}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(!state.controls.background_image);
+        assert!(notice.is_none());
+        fixture.write(&json!({"version":1, "background_image":"background.png"}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(state.controls.background_image);
+        assert!(notice.is_none());
+        // Wrong types fall back to the defaults; out-of-range numbers go to the nearest end.
+        fixture.write(&json!({"version":1, "background_opacity":"x", "background_blur":[1]}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.background_opacity.get(), 0.7);
+        assert_eq!(state.controls.background_blur.get(), 0.0);
+        let notice = notice.unwrap();
+        assert!(notice.contains("background_opacity") && notice.contains("background_blur"));
+        fixture.write(&json!({"version":1, "background_opacity":4.0, "background_blur":-2}));
+        let (state, _, _, _) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.background_opacity.get(), 1.0);
+        assert_eq!(state.controls.background_blur.get(), 0.0);
+        // The choices survive a restart, and clearing the image saves null.
+        fixture.write(&json!({"version":1}));
+        let (worker, startup, _notices) =
+            SaveWorker::start(fixture.path(), registry.clone()).unwrap();
+        startup.recv_blocking().unwrap();
+        let mut request = snapshot(&registry, 0.5);
+        request.controls.background_image = true;
+        request.controls.background_opacity = Normalized::new(0.25).unwrap();
+        request.controls.background_blur = Normalized::new(0.5).unwrap();
+        worker.submit(Revision::from_raw(1), request).unwrap();
+        worker.flush(Revision::from_raw(1)).unwrap();
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert!(notice.is_none());
+        assert!(state.controls.background_image);
+        assert_eq!(state.controls.background_opacity.get(), 0.25);
+        assert_eq!(state.controls.background_blur.get(), 0.5);
+        let mut request = snapshot(&registry, 0.5);
+        request.controls.background_image = false;
+        worker.submit(Revision::from_raw(2), request).unwrap();
+        worker.flush(Revision::from_raw(2)).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(fixture.path()).unwrap()).unwrap();
+        assert_eq!(saved["background_image"], Value::Null);
     }
 
     #[test]
