@@ -121,6 +121,8 @@ Lat は現存する文書への案内として保守する。意味のある文�
 
 ## 文書検査と Rust アプリ検証
 
+手元の入口は [justfile](../justfile)（`just` が必要）。`just check` が fmt・Clippy・`cargo test`・`npm run check:docs` を続けて実行し、`just build` が release ビルド（配備下限 macOS 15）、`just run` が release ビルドを普段の HOME で起動（本物の設定・保存を読み書きする）、`just try` が一時 HOME（本物の設定を触らない）での起動、`just reset-try` がその一時 HOME の削除、`just package` が [DMG のビルド](#dmg-のビルドとリリース) の手順で `dist/` に ad-hoc 署名の `.app` と DMG を作る。`just check` の成功は、実機での動作や製品受け入れの証明ではない。
+
 現在使える `npm run check:docs` と `npm run check` は **Lat の参照・section・graph 構造検査だけ**である。Rust の build、fmt、Clippy、テスト、リンク先内容の意味的な仕様整合、実機動作、製品受け入れ、配布準備を証明しない。検査手順を書いたことも、その実行成功の記録ではない。
 
 文書や graph を変更した作業の完了前に Lat 検査を行い、実行したコマンドと実際の結果を残す。並行作業では変更が揃った後に統合担当がまとめて検査し、途中の未完成状態で各担当が重複実行しない。検査の範囲を超える成功を報告しない。
