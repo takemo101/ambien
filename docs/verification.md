@@ -1305,3 +1305,12 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 
 - 見た目の好み（ドットの大きさ・ファミコンのパレット・淡い背景の場がまだ滑らかに見えること・すりガラスとの重なり）、ダーク外観、描画負荷（GPU・消費電力）、別のディスプレイ・倍率への移動と、Retina 以外の画面でのドットの大きさ。ユーザーの確認が必要で、AI は判断していない。
 - 倍率が違う画面への移動で `apply_dots` が再計算する経路は、単一のディスプレイでは実機で動かしていない（コード上の経路のみ）。
+
+## v0.2.0 リリース（AMB-038）
+
+2026-10-13、手元は macOS 27.0.1、arm64。v0.1.0 以降の利用者向けの変更は 8bitモード（P33）で、`Cargo.toml` の version を 0.2.0 へ上げ（PR #41、main の 1262354）、そのコミットへ `v0.2.0` のタグを GitHub API で作成して push した。
+
+- タグ起動の run 38328233164 が成功し、package・publish の両 job が通った。pre-release `v0.2.0` に `Ambien-0.2.0-arm64.dmg`（6,563,868 バイト）と `.sha256` が付いた。
+- 認証なしの URL（`releases/download/v0.2.0/…`）から取得し、`shasum -a 256 -c` が OK。マウントした `Ambien.app` は `codesign --verify --deep --strict` が成功し、署名は ad-hoc（TeamIdentifier なし）、`lipo` は arm64、`CFBundleShortVersionString` は 0.2.0、`CFBundleVersion` は 4（run 番号）、`LSMinimumSystemVersion` は 15.0、`LICENSE` と `THIRD_PARTY_LICENSES.txt` を同梱。
+- DMG から app を一時ディレクトリへコピーし、一時 HOME で `open` して起動した。960×600 のシーン窓が onscreen で現れ、終了で pid が消えた。
+- 未確認：ブラウザで取得した DMG の Gatekeeper の警告（v0.1.0 と同じ、ユーザーの確認が必要）、他の Mac・他の macOS、notarization なし。
