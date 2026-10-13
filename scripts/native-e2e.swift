@@ -287,16 +287,17 @@ func lifecycle(_ executable: URL, artifacts: URL) throws -> String {
         try candidate.expectWindows(2)
         try require(CFEqual(settings, try candidate.settings()), "Repeated settings created another window")
         print("PASS settings real menu / same native window")
-        for window in [initialScene, settings] {
+        for (window, isScene) in [(initialScene, true), (settings, false)] {
             let size = try windowSize(window)
             try minimizeRestore(window)
             try require(try windowSize(window) == size, "Minimize/restore changed frame size")
             let zoom = try attribute(window, "AXZoomButton")
             try require(CFGetTypeID(zoom) == AXUIElementGetTypeID(), "Zoom button missing")
-            try require((try attribute(zoom as! AXUIElement, "AXEnabled") as? Bool) == false,
-                        "Native zoom is enabled")
+            // The scene is resizable (zoom and full screen work); the settings window is not.
+            try require((try attribute(zoom as! AXUIElement, "AXEnabled") as? Bool) == isScene,
+                        isScene ? "Scene zoom is disabled" : "Settings zoom is enabled")
         }
-        print("PASS both windows native minimize / AX restore / unchanged frame / disabled zoom")
+        print("PASS both windows native minimize / AX restore / unchanged frame / scene zoom enabled, settings zoom disabled")
         let settingsClose = try attribute(settings, "AXCloseButton") as! AXUIElement
         try press(settingsClose)
         try candidate.expectWindows(1)
@@ -332,7 +333,7 @@ func lifecycle(_ executable: URL, artifacts: URL) throws -> String {
             print("PASS foreground cmd-Q / \(settingsFocused ? "settings" : "scene") / actual pid disappeared / exit0 pid=\(candidate.pid)")
         }
     }
-    return "Native menu, singleton settings, both minimize/restore and disabled zoom, close/recreate sizes, zero-window survival, menu Quit and foreground Cmd-Q from both windows; owned PIDs \(pids) disappeared with normal exit0."
+    return "Native menu, singleton settings, both minimize/restore, scene zoom enabled and settings zoom disabled, close/recreate sizes, zero-window survival, menu Quit and foreground Cmd-Q from both windows; owned PIDs \(pids) disappeared with normal exit0."
 }
 
 struct Blocked: Error, CustomStringConvertible {
@@ -2257,7 +2258,7 @@ do {
         let expected: String
         switch selected {
         case "lifecycle":
-            expected = "Real menus, same settings singleton, minimize/restore and disabled zoom on both windows, settings Cmd-comma recreation, scene close/zero-window/menu recreation, menu Quit and foreground Cmd-Q from both windows with real PID disappearance/normal0"
+            expected = "Real menus, same settings singleton, minimize/restore on both windows, scene zoom enabled and settings zoom disabled, settings Cmd-comma recreation, scene close/zero-window/menu recreation, menu Quit and foreground Cmd-Q from both windows with real PID disappearance/normal0"
         case "controls":
             expected = "P03 current rain metadata; exact main/audio settings+manual receipts for selected Space/Enter/mouse, real rain/wind edits, menu mute/mark, muted volume0/10/20, real scroll with unchanged revisions/focus/AX identity, settings unmute latest20%, close/recreate retaining main controls, menu Quit normal0"
         case "situations":

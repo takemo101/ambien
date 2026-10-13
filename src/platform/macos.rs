@@ -988,7 +988,7 @@ fn output_stream_ids(object: u32) -> Result<Vec<u32>, AudioMonitorError> {
     Ok(streams)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum WindowRole {
     Scene,
     Settings,
@@ -996,6 +996,11 @@ pub(crate) enum WindowRole {
 
 /// The settings window's smallest content height, fixed: it can be dragged taller, never shorter.
 const SETTINGS_MIN_HEIGHT: f64 = 400.0;
+
+/// The scene window's smallest content size, and its largest side. The largest is below the
+/// 16384-pixel texture limit GPUI's Metal surface has at 2x.
+const SCENE_MIN: (f64, f64) = (480.0, 300.0);
+const SCENE_MAX_SIDE: f64 = 8000.0;
 
 impl WindowRole {
     fn content_size(self) -> NSSize {
@@ -1005,21 +1010,30 @@ impl WindowRole {
         }
     }
 
-    pub(crate) fn resizes_vertically(self) -> bool {
-        matches!(self, Self::Settings)
-    }
-
-    /// The size a refit starts from. The scene always returns to its fixed size. The settings
-    /// window starts from the height the user last gave it by dragging (`chosen`; the default
-    /// when they never did), never below the minimum, at its fixed width. It is the chosen height
-    /// and not the window's current one, so a window a short work area pushed down grows back
-    /// when the work area allows.
-    fn refit_baseline(self, chosen: Option<f64>) -> NSSize {
+    /// The size a refit starts from. The scene keeps its current content size (never below the
+    /// minimum): a window the user stretched, zoomed or tiled is only brought back inside the
+    /// work area, never reset. The settings window starts from the height the user last gave it
+    /// by dragging (`chosen_height`; the default when they never did), never below its minimum,
+    /// at its fixed width. It is the chosen height and not the window's current one, so a window
+    /// a short work area pushed down grows back when the work area allows.
+    fn refit_baseline(self, chosen_height: Option<f64>, current: NSSize) -> NSSize {
         match self {
-            Self::Scene => self.content_size(),
+            Self::Scene => {
+                let usable = |value: f64, minimum: f64| {
+                    if value.is_finite() {
+                        value.max(minimum)
+                    } else {
+                        minimum
+                    }
+                };
+                NSSize::new(
+                    usable(current.width, SCENE_MIN.0),
+                    usable(current.height, SCENE_MIN.1),
+                )
+            }
             Self::Settings => NSSize::new(
                 self.content_size().width,
-                chosen
+                chosen_height
                     .filter(|height| height.is_finite())
                     .map_or(self.content_size().height, |height| {
                         height.max(SETTINGS_MIN_HEIGHT)
@@ -1029,12 +1043,23 @@ impl WindowRole {
     }
 
     /// The content size limits (smallest, largest) AppKit enforces for a window now `content`
-    /// big on a work area `available_height` tall. The scene is pinned to `content`. The settings
-    /// window's width is pinned and its height runs from the fixed minimum to the work area; when
-    /// the work area is shorter than the minimum the window is pinned to its fitted height.
+    /// big on a work area `available_height` tall. The scene runs from its minimum to its largest
+    /// side (a window the work area forced smaller than the minimum is allowed to stay that
+    /// small). The settings window's width is pinned and its height runs from the fixed minimum
+    /// to the work area; when the work area is shorter than the minimum the window is pinned to
+    /// its fitted height.
     fn size_limits(self, content: NSSize, available_height: f64) -> (NSSize, NSSize) {
-        if !self.resizes_vertically() {
-            return (content, content);
+        if self == Self::Scene {
+            return (
+                NSSize::new(
+                    SCENE_MIN.0.min(content.width),
+                    SCENE_MIN.1.min(content.height),
+                ),
+                NSSize::new(
+                    SCENE_MAX_SIDE.max(content.width),
+                    SCENE_MAX_SIDE.max(content.height),
+                ),
+            );
         }
         let minimum = SETTINGS_MIN_HEIGHT.min(content.height);
         let maximum = if available_height.is_finite() {
@@ -1051,10 +1076,11 @@ impl WindowRole {
     fn style(self) -> NSWindowStyleMask {
         let common = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
-            | NSWindowStyleMask::Miniaturizable;
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::Resizable;
         match self {
             Self::Scene => common | NSWindowStyleMask::FullSizeContentView,
-            Self::Settings => common | NSWindowStyleMask::Resizable,
+            Self::Settings => common,
         }
     }
 }
@@ -1606,6 +1632,32 @@ pub(crate) fn capture_placement(
     Ok((placement, display_id))
 }
 
+/// `behavior` with the window's full-screen and tiling bits set for its role, every other bit
+/// kept. The scene is a normal resizable window: the green button, full screen and tiling all
+/// work. The settings window only ever changes its height, so none of them are offered.
+fn collection_behavior(
+    role: WindowRole,
+    mut behavior: NSWindowCollectionBehavior,
+) -> NSWindowCollectionBehavior {
+    let every_mode = NSWindowCollectionBehavior::FullScreenPrimary
+        | NSWindowCollectionBehavior::FullScreenAuxiliary
+        | NSWindowCollectionBehavior::FullScreenAllowsTiling
+        | NSWindowCollectionBehavior::FullScreenNone
+        | NSWindowCollectionBehavior::FullScreenDisallowsTiling;
+    behavior.remove(every_mode);
+    behavior.insert(match role {
+        WindowRole::Scene => {
+            NSWindowCollectionBehavior::FullScreenPrimary
+                | NSWindowCollectionBehavior::FullScreenAllowsTiling
+        }
+        WindowRole::Settings => {
+            NSWindowCollectionBehavior::FullScreenNone
+                | NSWindowCollectionBehavior::FullScreenDisallowsTiling
+        }
+    });
+    behavior
+}
+
 pub(crate) fn constrain_window(
     window: &gpui::Window,
     role: WindowRole,
@@ -1646,19 +1698,9 @@ pub(crate) fn constrain_window(
     });
     // All fallible work precedes mutations: an error leaves existing finite placement
     // and constraints untouched. NSView::window's getter-owned Retained ends here.
-    let mut behavior = native.collectionBehavior();
-    behavior.remove(
-        NSWindowCollectionBehavior::FullScreenPrimary
-            | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::FullScreenAllowsTiling,
-    );
-    behavior.insert(
-        NSWindowCollectionBehavior::FullScreenNone
-            | NSWindowCollectionBehavior::FullScreenDisallowsTiling,
-    );
-    native.setCollectionBehavior(behavior);
+    native.setCollectionBehavior(collection_behavior(role, native.collectionBehavior()));
     if let Some(zoom) = native.standardWindowButton(NSWindowButton::ZoomButton) {
-        zoom.setEnabled(false);
+        zoom.setEnabled(role == WindowRole::Scene);
     }
     let (minimum, maximum) = role.size_limits(content_size, available_height);
     native.setContentMinSize(minimum);
@@ -1736,6 +1778,11 @@ pub(crate) fn refit_window(
     let native = view
         .window()
         .ok_or(WindowGeometryError::NativeHandleUnavailable)?;
+    // A full-screen scene is as big as the screen on purpose, and leaving full screen restores
+    // the size it had before. A refit would shrink it to the work area.
+    if role == WindowRole::Scene && native.styleMask().contains(NSWindowStyleMask::FullScreen) {
+        return Ok(false);
+    }
     let screen = native
         .screen()
         .ok_or(WindowGeometryError::DisplayUnavailable)?;
@@ -1745,7 +1792,7 @@ pub(crate) fn refit_window(
     let target = refit_target(
         screen.frame(),
         visible,
-        role.refit_baseline(chosen_height),
+        role.refit_baseline(chosen_height, metrics.content_for_frame(frame).size),
         metrics,
         frame,
     )?;
@@ -1784,6 +1831,28 @@ pub(crate) fn live_resize_content_height(window: &gpui::Window) -> Option<f64> {
     let frame = native.frame();
     let content = native.contentRectForFrameRect(frame);
     (valid_rect(frame) && valid_rect(content)).then_some(content.size.height)
+}
+
+/// The scene's placement, unless it is full screen or zoomed. Such a frame is the screen's, not
+/// a place the user chose, so it must never become the position the next launch opens at.
+/// `None` means "keep the last windowed placement".
+pub(crate) fn capture_windowed_placement(
+    window: &gpui::Window,
+) -> Option<Result<(WindowPlacement, DisplayId), WindowGeometryError>> {
+    if let Some(_mtm) = MainThreadMarker::new()
+        && let Ok(RawWindowHandle::AppKit(handle)) =
+            HasWindowHandle::window_handle(window).map(|handle| handle.as_raw())
+    {
+        // SAFETY: WindowHandle guarantees a valid NSView for the borrowed GPUI Window; the main
+        // thread was checked above and the reference ends with this synchronous scope.
+        let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+        if let Some(native) = view.window()
+            && (native.styleMask().contains(NSWindowStyleMask::FullScreen) || native.isZoomed())
+        {
+            return None;
+        }
+    }
+    Some(capture_placement(window))
 }
 
 #[cfg(test)]
@@ -1914,13 +1983,22 @@ mod tests {
     }
 
     #[test]
-    fn the_scene_is_pinned_and_the_settings_window_runs_from_a_fixed_minimum_to_the_work_area() {
+    fn the_scene_runs_from_a_minimum_to_a_large_side_and_the_settings_window_to_the_work_area() {
         let scene = WindowRole::Scene.content_size();
-        assert_eq!(WindowRole::Scene.size_limits(scene, 2000.0), (scene, scene));
-        assert!(!WindowRole::Scene.resizes_vertically());
+        let (minimum, maximum) = WindowRole::Scene.size_limits(scene, 2000.0);
+        assert_eq!((minimum.width, minimum.height), SCENE_MIN);
+        assert_eq!(
+            (maximum.width, maximum.height),
+            (SCENE_MAX_SIDE, SCENE_MAX_SIDE)
+        );
+        // The limits never exclude the window itself, whatever size the work area forced on it.
+        for content in [NSSize::new(300.0, 200.0), NSSize::new(9000.0, 4000.0)] {
+            let (minimum, maximum) = WindowRole::Scene.size_limits(content, 2000.0);
+            assert!(minimum.width <= content.width && content.width <= maximum.width);
+            assert!(minimum.height <= content.height && content.height <= maximum.height);
+        }
 
         let settings = WindowRole::Settings.content_size();
-        assert!(WindowRole::Settings.resizes_vertically());
         for height in [400.0, 650.0, 760.0, 1400.0] {
             let content = NSSize::new(settings.width, height);
             let (minimum, maximum) = WindowRole::Settings.size_limits(content, 1400.0);
@@ -1933,6 +2011,28 @@ mod tests {
             assert_eq!(minimum.height, SETTINGS_MIN_HEIGHT);
             assert_eq!(maximum.height, 1400.0);
         }
+    }
+
+    #[test]
+    fn the_scene_gets_full_screen_and_the_settings_window_none_and_other_bits_survive() {
+        let other = NSWindowCollectionBehavior::CanJoinAllSpaces;
+        // Whatever the window arrived with, the role's mode replaces the old one entirely.
+        let arrived = NSWindowCollectionBehavior::FullScreenNone
+            | NSWindowCollectionBehavior::FullScreenDisallowsTiling
+            | other;
+        let scene = collection_behavior(WindowRole::Scene, arrived);
+        assert!(scene.contains(NSWindowCollectionBehavior::FullScreenPrimary));
+        assert!(scene.contains(NSWindowCollectionBehavior::FullScreenAllowsTiling));
+        assert!(!scene.contains(NSWindowCollectionBehavior::FullScreenNone));
+        assert!(!scene.contains(NSWindowCollectionBehavior::FullScreenDisallowsTiling));
+        assert!(scene.contains(other));
+
+        let arrived = NSWindowCollectionBehavior::FullScreenPrimary | other;
+        let settings = collection_behavior(WindowRole::Settings, arrived);
+        assert!(settings.contains(NSWindowCollectionBehavior::FullScreenNone));
+        assert!(settings.contains(NSWindowCollectionBehavior::FullScreenDisallowsTiling));
+        assert!(!settings.contains(NSWindowCollectionBehavior::FullScreenPrimary));
+        assert!(settings.contains(other));
     }
 
     #[test]
@@ -1949,28 +2049,39 @@ mod tests {
     fn a_refit_follows_the_height_the_user_chose_and_grows_back_when_there_is_room() {
         let settings = WindowRole::Settings;
         let tall = NSSize::new(520.0, 1000.0);
+        let any = NSSize::new(0.0, 0.0); // the settings baseline ignores the current size
         // Never chosen: the default height. Chosen: that height, at the fixed width.
-        assert_eq!(settings.refit_baseline(None), settings.content_size());
-        assert_eq!(settings.refit_baseline(Some(1000.0)), tall);
+        assert_eq!(settings.refit_baseline(None, any), settings.content_size());
+        assert_eq!(settings.refit_baseline(Some(1000.0), any), tall);
         // Never below the minimum, and a broken height falls back to the default.
         assert_eq!(
-            settings.refit_baseline(Some(100.0)).height,
+            settings.refit_baseline(Some(100.0), any).height,
             SETTINGS_MIN_HEIGHT
         );
         assert_eq!(
-            settings.refit_baseline(Some(f64::NAN)),
+            settings.refit_baseline(Some(f64::NAN), any),
             settings.content_size()
         );
-        // The scene always returns to its fixed size.
+        // The scene keeps whatever size it has now (stretched, zoomed or tiled), never below its
+        // minimum, and a broken size falls back to the minimum.
+        let scene = WindowRole::Scene;
         assert_eq!(
-            WindowRole::Scene.refit_baseline(Some(100.0)),
-            WindowRole::Scene.content_size()
+            scene.refit_baseline(None, NSSize::new(1600.0, 900.0)),
+            NSSize::new(1600.0, 900.0)
+        );
+        assert_eq!(
+            scene.refit_baseline(None, NSSize::new(100.0, 100.0)),
+            NSSize::new(SCENE_MIN.0, SCENE_MIN.1)
+        );
+        assert_eq!(
+            scene.refit_baseline(None, NSSize::new(f64::NAN, 900.0)),
+            NSSize::new(SCENE_MIN.0, 900.0)
         );
 
         let screen = rect(0.0, 0.0, 1920.0, 1200.0);
         let visible = rect(0.0, 0.0, 1920.0, 1170.0);
         let tall_outer = metrics().frame_for_content(rect(100.0, 100.0, tall.width, tall.height));
-        let baseline = settings.refit_baseline(Some(tall.height));
+        let baseline = settings.refit_baseline(Some(tall.height), any);
         // On the same screen a window the user made tall is left exactly as it is.
         assert_eq!(
             refit_target(screen, visible, baseline, metrics(), tall_outer),
