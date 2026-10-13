@@ -1338,3 +1338,12 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 - 追記：スライダーへ AX の `AXValue` を設定しても値は変わらなかった（実マウスのクリックでは変わる）。濃さの変更のたびに再描画する経路は、実マウスで確認した範囲だけである。
 - 未確認：ファイル選択パネルでの選択と取り消し・失敗の通知の見た目、読めない画像の失敗通知の実窓表示、解除の実窓、再起動での復元のうち「選択直後に保存して再起動」の経路、スライダーの操作（濃さ・ぼかし）、ダーク外観、「透明度を下げる」、別ディスプレイ・倍率、HEIC など非対応の形式。
 - `native-e2e.swift` の lifecycle・controls・visual は、直した後の build で成功した。fmt・clippy -D warnings・`cargo test`（286件）・`check:docs` も成功した。
+
+## v0.3.0 リリース（AMB-041）
+
+2026-10-13、手元は macOS 27.0.1、arm64。v0.2.0 以降に入ったシーン窓の伸縮・最大化・フルスクリーン（P34）と背景画像（P35）を含む。`Cargo.toml` の version を 0.3.0 へ上げ（PR #45、main の 189c905）、そのコミットへ `v0.3.0` のタグを GitHub API で作成して push した。
+
+- タグ起動の run 38339392133 が成功し、package・publish の両 job が通った。pre-release `v0.3.0` に `Ambien-0.3.0-arm64.dmg`（7,671,481 バイト）と `.sha256` が付いた。
+- 認証なしの URL から取得し、`shasum -a 256 -c` が OK。マウントした `Ambien.app` は `codesign --verify --deep --strict` が成功し、署名は ad-hoc（TeamIdentifier なし）、`lipo` は arm64、`CFBundleShortVersionString` は 0.3.0、`CFBundleVersion` は 5（run 番号）、`LSMinimumSystemVersion` は 15.0。`THIRD_PARTY_LICENSES.txt` に `image` を含む記載があった。
+- DMG から app を一時ディレクトリへコピーして `open` で起動した。960×600 のシーン窓が onscreen で現れ、終了で pid が消えた。なお `open` は環境変数 `HOME` を渡さないため、この起動は本物の設定を読んだ（設定ファイルの更新時刻は起動前のままで、書き換えていない）。
+- 未確認：ブラウザで取得した DMG の Gatekeeper の警告（v0.1.0・v0.2.0 と同じ、ユーザーの確認が必要）、他の Mac・他の macOS、notarization なし。
