@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,18 +8,20 @@ use std::{
 use ely::theme::{Mode, Theme};
 use gpui::{
     AnyWindowHandle, App, AppContext, Context, DisplayId, Entity, Global, KeyBinding, Menu,
-    MenuItem, Render, SharedString, Subscription, Task, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId, WindowOptions, actions,
+    MenuItem, PathPromptOptions, Render, RenderImage, SharedString, Subscription, Task,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowId,
+    WindowOptions, actions,
 };
 
 use crate::{
     audio::{AudioController, OutputStatus, RecoverySignals},
+    background::{self, BLUR_DEBOUNCE},
     controls::{ControlEdit, ControlState, Revision},
     lifecycle::{
         AttemptId, POLL_INTERVAL, Requested, SaveDecision, TerminationCoordinator, fade_finished,
         final_save_allows_quit, latest_state_settled,
     },
-    persistence::{LoadedState, SaveError, SaveSnapshot, SaveStage, SaveStartup, SaveWorker},
+    persistence::{self, LoadedState, SaveError, SaveSnapshot, SaveStage, SaveStartup, SaveWorker},
     platform::macos::{
         EnvironmentMonitor, PowerMonitor, ScreenLayout, WindowGeometryError, WindowPlacement,
         WindowRole, capture_placement, capture_windowed_placement, constrain_window,
@@ -68,6 +70,18 @@ pub(crate) struct AppModel {
     menu_selection: Option<SituationIndex>,
     audio_updates: Option<Task<()>>,
     control_error: Option<SharedString>,
+    /// The folder holding `state.json`, and with it `background.png`; `None` without a HOME.
+    support_dir: Option<PathBuf>,
+    /// The shrunken background picture (and its blurred copy). Owned here, built off the UI thread.
+    background: Option<background::Source>,
+    /// The picture the scene shows now, with the opacity in its pixels.
+    background_image: Option<Arc<RenderImage>>,
+    /// Picking, importing, loading or removing: at most one at a time.
+    background_job: Option<Task<()>>,
+    /// The newest render, delayed while a slider moves. A newer request replaces (and so
+    /// cancels) an unfinished older one; a removal drops it so it cannot bring the image back.
+    background_render: Option<Task<()>>,
+    background_notice: Option<SharedString>,
     _quit: Option<Subscription>,
     save_worker: Option<SaveWorker>,
     save_updates: Option<Task<()>>,
@@ -109,21 +123,20 @@ pub(crate) fn start(cx: &mut App) {
         }
     };
     let mut save_worker = None;
+    let mut support_dir = None;
     let mut save_updates = None;
     // The worker owns all filesystem work. Wait before any stream/window exists,
     // so a restored mute and endpoint are effective from the first audio sample.
-    let startup = std::env::var_os("HOME")
-        .ok_or_else(|| "HOME がなく、状態保存先を決められません".to_owned())
-        .and_then(|home| {
-            let path = PathBuf::from(home).join("Library/Application Support/Ambien/state.json");
-            let (worker, startup, updates) =
-                SaveWorker::start(path, registry.clone()).map_err(|error| error.to_string())?;
-            save_worker = Some(worker);
-            save_updates = Some(updates);
-            startup
-                .recv_blocking()
-                .map_err(|error| format!("保存 worker から初期状態を受け取れません: {error}"))
-        });
+    let startup = persistence::default_state_path().and_then(|path| {
+        support_dir = path.parent().map(Path::to_path_buf);
+        let (worker, startup, updates) =
+            SaveWorker::start(path, registry.clone()).map_err(|error| error.to_string())?;
+        save_worker = Some(worker);
+        save_updates = Some(updates);
+        startup
+            .recv_blocking()
+            .map_err(|error| format!("保存 worker から初期状態を受け取れません: {error}"))
+    });
     let SaveStartup {
         settings: LoadedState {
             controls,
@@ -199,6 +212,12 @@ pub(crate) fn start(cx: &mut App) {
         menu_selection: None,
         audio_updates: None,
         control_error: None,
+        support_dir,
+        background: None,
+        background_image: None,
+        background_job: None,
+        background_render: None,
+        background_notice: None,
         _quit: None,
         save_worker,
         save_updates: None,
@@ -247,6 +266,7 @@ pub(crate) fn start(cx: &mut App) {
         model.termination_signal = Some(termination_signal)
     });
     cx.set_global(AppRoot(owner.clone()));
+    owner.update(cx, |model, cx| model.load_background(cx));
 
     let closed = cx.on_window_closed(|cx, window_id| {
         // Closing a failed, still-hidden window can occur during an entity update.
@@ -385,6 +405,20 @@ pub(crate) fn start(cx: &mut App) {
     });
 }
 
+pub(crate) fn dispatch_choose_background(cx: &mut App) {
+    cx.defer(|cx| {
+        let owner = cx.global::<AppRoot>().0.clone();
+        owner.update(cx, |model, cx| model.choose_background(cx));
+    });
+}
+
+pub(crate) fn dispatch_remove_background(cx: &mut App) {
+    cx.defer(|cx| {
+        let owner = cx.global::<AppRoot>().0.clone();
+        owner.update(cx, |model, cx| model.remove_background(cx));
+    });
+}
+
 // Component processors borrow SettingsView. Release that borrow before the reducer
 // publishes and copies the latest endpoints back into the same settings entity.
 pub(crate) fn dispatch_control_edit(edit: ControlEdit, cx: &mut App) {
@@ -438,19 +472,16 @@ impl AppModel {
         Theme::set_mode_now(Mode::from(cx.window_appearance()), cx);
         let audio = self.audio.shared();
         let accessibility = self.accessibility;
-        let (blur, veil, intensity, eightbit) = (
-            self.controls.blur,
-            self.controls.veil,
-            self.controls.visuals,
-            self.controls.eightbit,
-        );
+        let blur = self.controls.blur;
+        let controls = self.controls.clone();
+        let background = self.background_image.clone();
         self.scene = Some(open_window(
             WindowRole::Scene,
             accessibility,
             blur,
             self.placement.as_ref(),
             move |window, cx| {
-                SceneView::new(window, cx, audio, accessibility, veil, intensity, eightbit)
+                SceneView::new(window, cx, audio, accessibility, &controls, background)
             },
             cx,
         )?);
@@ -603,7 +634,201 @@ impl AppModel {
         {
             self.apply_surface(cx);
         }
+        if changed
+            && matches!(
+                edit,
+                ControlEdit::BackgroundOpacity(_) | ControlEdit::BackgroundBlur(_)
+            )
+        {
+            self.refresh_background(true, cx);
+        }
         self.update_settings(cx);
+    }
+
+    /// Asks for an image file, then copies it into the support folder off the UI thread. A failure
+    /// keeps the picture shown before and says why in the settings window.
+    fn choose_background(&mut self, cx: &mut Context<Self>) {
+        if self.coordinator.is_active() || self.background_job.is_some() {
+            return;
+        }
+        let Some(support_dir) = self.support_dir.clone() else {
+            self.background_notice = Some("背景画像を読めません: 保存先を決められません".into());
+            self.update_settings(cx);
+            return;
+        };
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("選ぶ".into()),
+        });
+        self.background_job = Some(cx.spawn(async move |owner, cx| {
+            let picked = match prompt.await {
+                Ok(Ok(paths)) => Ok(paths.and_then(|paths| paths.into_iter().next())),
+                Ok(Err(error)) => Err(format!("ファイル選択を開けません（{error}）")),
+                Err(_) => Ok(None), // The dialog went away without an answer.
+            };
+            let result = match picked {
+                Ok(Some(path)) => Some(
+                    cx.background_executor()
+                        .spawn(async move {
+                            background::import(&path, &support_dir)
+                                .map_err(|error| error.to_string())
+                        })
+                        .await,
+                ),
+                Ok(None) => None, // Cancelled.
+                Err(reason) => Some(Err(reason)),
+            };
+            let _ = owner.update(cx, |model, cx| {
+                model.background_job = None;
+                if let Some(result) = result {
+                    model.background_imported(result, cx);
+                }
+            });
+        }));
+    }
+
+    fn background_imported(
+        &mut self,
+        result: Result<image::RgbaImage, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(image) => {
+                self.background = Some(background::Source::new(image));
+                self.background_notice = None;
+                self.set_background_flag(true, cx);
+                // A new picture is drawn at once, not after the blur debounce.
+                self.refresh_background(false, cx);
+            }
+            Err(reason) => {
+                self.background_notice = Some(format!("背景画像を読めません: {reason}").into());
+            }
+        }
+        self.update_settings(cx);
+    }
+
+    /// Deletes the stored copy, then clears the picture. A failed delete keeps everything.
+    fn remove_background(&mut self, cx: &mut Context<Self>) {
+        if self.coordinator.is_active() || self.background_job.is_some() {
+            return;
+        }
+        self.background_render = None;
+        let support_dir = self.support_dir.clone();
+        self.background_job = Some(cx.spawn(async move |owner, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { support_dir.as_deref().map_or(Ok(()), background::remove) })
+                .await;
+            let _ = owner.update(cx, |model, cx| {
+                model.background_job = None;
+                match result {
+                    Ok(()) => {
+                        model.background = None;
+                        model.background_render = None;
+                        model.background_image = None;
+                        model.background_notice = None;
+                        model.set_background_flag(false, cx);
+                        model.push_background(cx);
+                    }
+                    Err(error) => {
+                        model.background_notice =
+                            Some(format!("背景画像を解除できません: {error}").into());
+                    }
+                }
+                model.update_settings(cx);
+            });
+        }));
+    }
+
+    /// Reads the saved copy at startup, off the UI thread. A failure leaves the scene without a
+    /// background and keeps the saved choice.
+    fn load_background(&mut self, cx: &mut Context<Self>) {
+        let Some(support_dir) = self
+            .support_dir
+            .clone()
+            .filter(|_| self.controls.background_image)
+        else {
+            return;
+        };
+        self.background_job = Some(cx.spawn(async move |owner, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    background::load_saved(&support_dir).map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = owner.update(cx, |model, cx| {
+                model.background_job = None;
+                match result {
+                    Ok(image) => {
+                        model.background = Some(background::Source::new(image));
+                        model.refresh_background(false, cx);
+                    }
+                    Err(reason) => {
+                        model.background_notice =
+                            Some(format!("背景画像を読めません: {reason}").into());
+                    }
+                }
+                model.update_settings(cx);
+            });
+        }));
+    }
+
+    /// Records whether a background image is set (a display-only edit that is saved).
+    fn set_background_flag(&mut self, set: bool, cx: &mut Context<Self>) {
+        match self.controls.apply(ControlEdit::BackgroundImage(set)) {
+            Ok(true) => {
+                // Like every other edit, tell the audio side the settings moved on; otherwise
+                // the quit waits for an acknowledgement that never comes.
+                if let (_, Some(source)) = self.audio.shared().snapshot() {
+                    source.controls.publish(&self.controls);
+                }
+                self.schedule_save(cx);
+            }
+            Ok(false) => {}
+            Err(error) => self.control_error = Some(error.to_string().into()),
+        }
+    }
+
+    /// Builds the picture for the current blur and opacity off the UI thread. The blur waits
+    /// [`BLUR_DEBOUNCE`] after its last change; an opacity change reuses the blurred copy. A newer
+    /// request replaces (and so cancels) an older one that has not finished.
+    fn refresh_background(&mut self, debounce: bool, cx: &mut Context<Self>) {
+        let Some(source) = self.background.clone() else {
+            return;
+        };
+        let blur = self.controls.background_blur.get();
+        let opacity = self.controls.background_opacity.get();
+        self.background_render = Some(cx.spawn(async move |owner, cx| {
+            if debounce {
+                cx.background_executor().timer(BLUR_DEBOUNCE).await;
+            }
+            let rendered = cx
+                .background_executor()
+                .spawn(async move { source.render(blur, opacity) })
+                .await;
+            let _ = owner.update(cx, |model, cx| {
+                model.background_render = None;
+                if let Some(source) = &mut model.background {
+                    source.remember(&rendered);
+                }
+                model.background_image = Some(rendered.image);
+                model.push_background(cx);
+            });
+        }));
+    }
+
+    fn push_background(&self, cx: &mut Context<Self>) {
+        let image = self.background_image.clone();
+        if let Some(handle) = self.scene
+            && let Err(error) = handle.update(cx, |view, window, cx| {
+                view.set_background(image, window, cx)
+            })
+        {
+            eprintln!("Ambien: シーンに背景画像を反映できません: {error}");
+        }
     }
 
     fn update_settings(&self, cx: &mut Context<Self>) {
@@ -800,6 +1025,7 @@ impl AppModel {
                 .as_ref()
                 .or(self.save_notice.as_ref())
                 .cloned(),
+            background: self.background_notice.clone(),
             reduce_transparency: self.accessibility.reduce_transparency,
         }
     }

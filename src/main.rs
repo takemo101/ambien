@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod background;
 mod controls;
 mod lifecycle;
 mod persistence;

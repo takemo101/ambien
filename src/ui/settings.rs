@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ely::{
-    buttons::SegmentedControl,
+    buttons::{Button, SegmentedControl},
     forms::{Radio, Slider, Switch},
     primitives::FocusScope,
     theme::ActiveTheme,
@@ -10,11 +10,11 @@ use ely::{
 use gpui::{
     AppContext, Context, DragMoveEvent, ElementId, FocusHandle, InteractiveElement, IntoElement,
     ParentElement, Render, Role, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, px,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
 };
 
 use crate::{
-    app::dispatch_control_edit,
+    app::{dispatch_choose_background, dispatch_control_edit, dispatch_remove_background},
     audio::{AudioSource, OutputStatus, transport::ControlReceipt},
     controls::{ControlEdit, ControlState, Normalized, VisualIntensity},
     situations::{KnobIndex, Registry, SituationIndex},
@@ -38,6 +38,8 @@ struct SelectionActivation {
 pub(crate) struct SettingsNotices {
     pub(crate) control: Option<SharedString>,
     pub(crate) persistence: Option<SharedString>,
+    /// The background image could not be read or saved; the earlier one (if any) stays.
+    pub(crate) background: Option<SharedString>,
     /// The system's "reduce transparency" is on and overrides the blur and glass density.
     pub(crate) reduce_transparency: bool,
 }
@@ -203,6 +205,10 @@ impl Render for SettingsView {
             has_notice = true;
             notices = notices.child(Paragraph::new(format!("設定を変更できません: {error}")));
         }
+        if let Some(error) = &self.notices.background {
+            has_notice = true;
+            notices = notices.child(Paragraph::new(error.clone()));
+        }
         if !self.output_normal {
             has_notice = true;
             notices = notices.child(Paragraph::new(self.audio_status.clone()));
@@ -341,6 +347,67 @@ impl Render for SettingsView {
                     "システムの「透明度を下げる」が優先され、背景は不透明です",
                 ));
             }
+            let mut background = div().flex().flex_col().gap_3().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(Paragraph::new("背景画像"))
+                    .child(
+                        div()
+                            .id("background-image-a11y")
+                            .role(Role::Group)
+                            .aria_label("背景画像")
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("background-choose", "画像を選ぶ…")
+                                    .on_click(|_, _, cx| dispatch_choose_background(cx)),
+                            )
+                            .when(controls.background_image, |row| {
+                                row.child(Caption::new("設定済み")).child(
+                                    Button::new("background-remove", "解除")
+                                        .on_click(|_, _, cx| dispatch_remove_background(cx)),
+                                )
+                            }),
+                    ),
+            );
+            if controls.background_image {
+                background = background
+                    .child(slider_row(
+                        "画像の濃さ",
+                        format!("{:.0}%", controls.background_opacity.get() * 100.0),
+                        "background-opacity-a11y".into(),
+                        Slider::new(
+                            "background-opacity",
+                            f64::from(controls.background_opacity.get()) * 100.0,
+                        )
+                        .range(0.0, 100.0)
+                        .step(1.0)
+                        .on_change(cx.processor(|_, value: f64, _, cx| {
+                            if let Some(value) = Normalized::new((value / 100.0) as f32) {
+                                dispatch_control_edit(ControlEdit::BackgroundOpacity(value), cx);
+                            }
+                        })),
+                    ))
+                    .child(slider_row(
+                        "画像のぼかし",
+                        format!("{:.0}%", controls.background_blur.get() * 100.0),
+                        "background-blur-a11y".into(),
+                        Slider::new(
+                            "background-blur",
+                            f64::from(controls.background_blur.get()) * 100.0,
+                        )
+                        .range(0.0, 100.0)
+                        .step(1.0)
+                        .on_change(cx.processor(|_, value: f64, _, cx| {
+                            if let Some(value) = Normalized::new((value / 100.0) as f32) {
+                                dispatch_control_edit(ControlEdit::BackgroundBlur(value), cx);
+                            }
+                        })),
+                    ));
+            }
             let appearance = section("見た目")
                 .child(
                     div()
@@ -388,7 +455,8 @@ impl Render for SettingsView {
                             dispatch_control_edit(ControlEdit::Blur(blur), cx);
                         })),
                 )
-                .child(veil);
+                .child(veil)
+                .child(background);
             content = content.child(appearance);
 
             let wander = section("自動で移る")
