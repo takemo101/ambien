@@ -170,11 +170,14 @@ impl SceneView {
         let placement = cx.observe_window_bounds(window, |view, window, cx| {
             // A move to a display with another backing scale needs the dots re-sized.
             view.apply_dots(window);
-            crate::app::dispatch_scene_placement_changed(
-                window.window_handle().window_id(),
-                crate::platform::macos::capture_placement(window),
-                cx,
-            );
+            // Full screen and zoom are the screen's frame, not a place the user chose.
+            if let Some(placement) = crate::platform::macos::capture_windowed_placement(window) {
+                crate::app::dispatch_scene_placement_changed(
+                    window.window_handle().window_id(),
+                    placement,
+                    cx,
+                );
+            }
         });
         let (status, source) = audio.snapshot();
         let mut view = Self {
@@ -350,6 +353,7 @@ impl SceneView {
         let Some(source) = &self.source else {
             return;
         };
+        let scale = layout_scale(bounds);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             let mut colors = [[0.0_f32; 3]; backdrop::MAX_SITUATIONS];
             for (slot, definition) in colors.iter_mut().zip(source.registry.definitions()) {
@@ -379,10 +383,11 @@ impl SceneView {
             for (index, definition) in source.registry.definitions().iter().enumerate() {
                 let intensity = self.particles.contributions[index] * self.particles.breath[index];
                 if intensity > 0.0 {
-                    let radius = self.motion.glow_radius(
-                        self.particles.contributions[index],
-                        self.particles.breath[index],
-                    );
+                    let radius = scale
+                        * self.motion.glow_radius(
+                            self.particles.contributions[index],
+                            self.particles.breath[index],
+                        );
                     if definition.visual.shape == VisualShape::Impact {
                         // A rock's ambient light has no round edge either.
                         let centre = disc_bounds(bounds, [0.5, 0.58], [0.0, 0.0], 0.0).origin;
@@ -442,13 +447,24 @@ impl SceneView {
                 );
                 for (index, mark) in look.marks().enumerate() {
                     if budget.allows(index, mark) {
-                        paint_mark(window, bounds, position, mark);
+                        paint_mark(window, bounds, position, &mark.scaled(scale));
                     }
                 }
             }
         });
     }
 }
+
+/// The shortest side of the viewport in logical pixels over the default scene's 600: how much
+/// bigger or smaller than the default window every light, glow and ripple is drawn. The backdrop
+/// already sizes its lights from the same short side. Positions are normalized and stretch to the
+/// window's aspect ratio, so only the sizes follow this, and a circle is never drawn as an ellipse.
+fn layout_scale(viewport: Bounds<Pixels>) -> f32 {
+    let short = f32::from(viewport.size.width.min(viewport.size.height));
+    short / DEFAULT_SHORT_SIDE
+}
+
+const DEFAULT_SHORT_SIDE: f32 = 600.0;
 
 fn is_drawable_viewport(bounds: Bounds<Pixels>) -> bool {
     bounds.size.width > px(0.0)
@@ -1125,6 +1141,21 @@ mod tests {
                 assert!((normalized_y - position[1]).abs() < 1e-5);
             }
         }
+    }
+
+    #[test]
+    fn sizes_follow_the_short_side_so_the_default_window_is_unchanged_and_circles_stay_round() {
+        let of =
+            |w: f32, h: f32| layout_scale(Bounds::new(point(px(0.0), px(0.0)), size(px(w), px(h))));
+        // The default window draws exactly what it always drew.
+        assert_eq!(of(960.0, 600.0), 1.0);
+        // Half the default, and a window narrower than it is tall: the short side decides.
+        assert_eq!(of(480.0, 300.0), 0.5);
+        assert_eq!(of(300.0, 900.0), 0.5);
+        // A wide window only spreads the world; it does not make the lights bigger.
+        assert_eq!(of(2400.0, 600.0), 1.0);
+        // A full-screen 16:9 window.
+        assert_eq!(of(1920.0, 1080.0), 1.8);
     }
 
     #[test]

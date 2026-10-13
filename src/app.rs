@@ -22,9 +22,9 @@ use crate::{
     persistence::{LoadedState, SaveError, SaveSnapshot, SaveStage, SaveStartup, SaveWorker},
     platform::macos::{
         EnvironmentMonitor, PowerMonitor, ScreenLayout, WindowGeometryError, WindowPlacement,
-        WindowRole, capture_placement, constrain_window, finish_termination,
-        install_termination_gate, prepare_window, read_display_options, read_screen_layout,
-        refit_window,
+        WindowRole, capture_placement, capture_windowed_placement, constrain_window,
+        finish_termination, install_termination_gate, prepare_window, read_display_options,
+        read_screen_layout, refit_window,
     },
     situations::{Registry, SituationIndex},
     ui::{
@@ -913,11 +913,13 @@ impl AppModel {
         if let Some(window) = self.scene {
             // A window rectangle that cannot be read right now (a screen change in
             // progress) keeps the last finite one; it must neither block a save nor a quit.
-            match window.update(cx, |_, window, _| capture_placement(window)) {
-                Ok(Ok((placement, display))) => {
+            match window.update(cx, |_, window, _| capture_windowed_placement(window)) {
+                Ok(Some(Ok((placement, display)))) => {
                     self.remember_placement(placement, display, cx);
                 }
-                Ok(Err(error)) => {
+                // Full screen or zoomed: the screen's frame is not the user's place.
+                Ok(None) => {}
+                Ok(Some(Err(error))) => {
                     eprintln!("Ambien: 保存時の窓位置を確認できず、最後の位置を使います: {error}");
                 }
                 Err(error) => {
@@ -1221,7 +1223,7 @@ fn open_window<V: Render + 'static>(
             display_id: Some(prepared.display_id),
             titlebar: Some(titlebar),
             window_background: background,
-            is_resizable: role.resizes_vertically(),
+            is_resizable: true,
             is_minimizable: true,
             is_movable: true,
             app_owns_titlebar_drag: matches!(role, WindowRole::Scene),

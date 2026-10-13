@@ -145,6 +145,107 @@ pub(crate) enum Mark {
     },
 }
 
+impl Mark {
+    /// The same mark with every length (radius, offset, width, arm, stroke) multiplied by
+    /// `scale`. Colour, opacity, side count, rotation and seed are not lengths and stay as they
+    /// are, so a window of another size shows the same shapes, only larger or smaller.
+    pub(crate) fn scaled(self, scale: f32) -> Self {
+        let by = |value: f32| value * scale;
+        let offset = |value: [f32; 2]| [by(value[0]), by(value[1])];
+        match self {
+            Self::Glow {
+                offset: o,
+                radius,
+                rgb,
+                opacity,
+            } => Self::Glow {
+                offset: offset(o),
+                radius: by(radius),
+                rgb,
+                opacity,
+            },
+            Self::Haze {
+                offset: o,
+                radius,
+                rgb,
+                opacity,
+            } => Self::Haze {
+                offset: offset(o),
+                radius: by(radius),
+                rgb,
+                opacity,
+            },
+            Self::Ring {
+                offset: o,
+                radius,
+                width,
+                rgb,
+                opacity,
+            } => Self::Ring {
+                offset: offset(o),
+                radius: by(radius),
+                width: by(width),
+                rgb,
+                opacity,
+            },
+            Self::Dot {
+                offset: o,
+                radius,
+                rgb,
+                opacity,
+            } => Self::Dot {
+                offset: offset(o),
+                radius: by(radius),
+                rgb,
+                opacity,
+            },
+            Self::Poly {
+                offset: o,
+                radius,
+                sides,
+                rotation,
+                seed,
+                stroke,
+                rgb,
+                opacity,
+            } => Self::Poly {
+                offset: offset(o),
+                radius: by(radius),
+                sides,
+                rotation,
+                seed,
+                stroke: by(stroke),
+                rgb,
+                opacity,
+            },
+            Self::Cross {
+                arm,
+                width,
+                rgb,
+                opacity,
+            } => Self::Cross {
+                arm: by(arm),
+                width: by(width),
+                rgb,
+                opacity,
+            },
+            Self::Shards {
+                arm,
+                width,
+                seed,
+                rgb,
+                opacity,
+            } => Self::Shards {
+                arm: by(arm),
+                width: by(width),
+                seed,
+                rgb,
+                opacity,
+            },
+        }
+    }
+}
+
 /// Everything the look depends on. `opacity` is the particle's fade envelope for this frame.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ParticleInput {
@@ -1379,6 +1480,117 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn scaling_a_mark_changes_only_its_lengths() {
+        let rgb = [0.1, 0.2, 0.3];
+        let marks = [
+            Mark::Glow {
+                offset: [1.0, -2.0],
+                radius: 3.0,
+                rgb,
+                opacity: 0.4,
+            },
+            Mark::Haze {
+                offset: [1.0, -2.0],
+                radius: 3.0,
+                rgb,
+                opacity: 0.4,
+            },
+            Mark::Ring {
+                offset: [1.0, -2.0],
+                radius: 3.0,
+                width: 0.5,
+                rgb,
+                opacity: 0.4,
+            },
+            Mark::Dot {
+                offset: [1.0, -2.0],
+                radius: 3.0,
+                rgb,
+                opacity: 0.4,
+            },
+            Mark::Poly {
+                offset: [1.0, -2.0],
+                radius: 3.0,
+                sides: 5,
+                rotation: 0.7,
+                seed: 9,
+                stroke: 1.5,
+                rgb,
+                opacity: 0.4,
+            },
+            Mark::Cross {
+                arm: 3.0,
+                width: 0.5,
+                rgb,
+                opacity: 0.4,
+            },
+            Mark::Shards {
+                arm: 3.0,
+                width: 0.5,
+                seed: 9,
+                rgb,
+                opacity: 0.4,
+            },
+        ];
+        for mark in marks {
+            // A window of the default size draws exactly what it always drew.
+            assert_eq!(mark.scaled(1.0), mark);
+            // Twice as big: the lengths double, and nothing else moves.
+            let twice = match mark {
+                Mark::Glow { .. } => Mark::Glow {
+                    offset: [2.0, -4.0],
+                    radius: 6.0,
+                    rgb,
+                    opacity: 0.4,
+                },
+                Mark::Haze { .. } => Mark::Haze {
+                    offset: [2.0, -4.0],
+                    radius: 6.0,
+                    rgb,
+                    opacity: 0.4,
+                },
+                Mark::Ring { .. } => Mark::Ring {
+                    offset: [2.0, -4.0],
+                    radius: 6.0,
+                    width: 1.0,
+                    rgb,
+                    opacity: 0.4,
+                },
+                Mark::Dot { .. } => Mark::Dot {
+                    offset: [2.0, -4.0],
+                    radius: 6.0,
+                    rgb,
+                    opacity: 0.4,
+                },
+                Mark::Poly { .. } => Mark::Poly {
+                    offset: [2.0, -4.0],
+                    radius: 6.0,
+                    sides: 5,
+                    rotation: 0.7,
+                    seed: 9,
+                    stroke: 3.0,
+                    rgb,
+                    opacity: 0.4,
+                },
+                Mark::Cross { .. } => Mark::Cross {
+                    arm: 6.0,
+                    width: 1.0,
+                    rgb,
+                    opacity: 0.4,
+                },
+                Mark::Shards { .. } => Mark::Shards {
+                    arm: 6.0,
+                    width: 1.0,
+                    seed: 9,
+                    rgb,
+                    opacity: 0.4,
+                },
+            };
+            assert_eq!(mark.scaled(2.0), twice);
         }
     }
 }
