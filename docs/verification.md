@@ -1397,3 +1397,12 @@ installed SDK `AudioHardwareBase.h` の `kAudioHardwareBadObjectError = '!obj'` 
 - 実窓（release、フルスクリーン）の撮影で、蛍が窓の上寄り（上から約17%）にも現れ、複数の蛍が下寄り・中央にも見えた。
 - `native-e2e.swift` の lifecycle・controls・visual は成功した。
 - 未確認：新しい6種が名前の虫らしく聞こえるか、虫の数・種類・各声の釣り合い（特に近いアオマツムシ・コオロギの大きさ）、虫の量1での賑やかさ、蛍の数の見た目（最大16）、実機の CPU の細かい差（再生は短時間）。
+
+## v0.4.0 リリース（AMB-047）
+
+2026-10-14、手元は macOS 27.0.1、arm64。v0.3.0 以降に入った新シチュエーション「秋の夜長」（P36）と、その調整（P37〜P39、AMB-044）を含む。`Cargo.toml` の version を 0.4.0 へ上げ（PR #52、main の e54612f）、そのコミットへ `v0.4.0` のタグを GitHub API で作成して push した。
+
+- タグ起動の run 38522296998 が成功し、package・publish の両 job が通った。pre-release `v0.4.0` に `Ambien-0.4.0-arm64.dmg`（7,692,116 バイト）と `.sha256` が付いた。
+- 認証なしの URL から取得し、`shasum -a 256 -c` が OK。マウントした `Ambien.app` は `codesign --verify --deep --strict` が成功し、署名は ad-hoc（TeamIdentifier なし）、`lipo` は arm64、`CFBundleShortVersionString` は 0.4.0、`CFBundleVersion` は 6（run 番号）、`LSMinimumSystemVersion` は 15.0。
+- DMG から app を一時ディレクトリへコピーし、実行ファイルを一時 HOME（`last` を `autumn`、消音）で直接起動した（本物の設定は触っていない）。960×600 のシーン窓が onscreen で現れ、CPU は 0.3%、終了で pid が消えた。
+- 未確認：ブラウザで取得した DMG の Gatekeeper の警告（v0.1.0〜v0.3.0 と同じ、ユーザーの確認が必要）、他の Mac・他の macOS、notarization なし、リリース版での秋の夜長の音の聞こえ方（開発 build と同じコードだが、リリース版を耳では確認していない）。
