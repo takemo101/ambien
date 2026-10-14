@@ -50,7 +50,7 @@ static KNOBS: [KnobDefinition; 2] = [
     KnobDefinition {
         id: "wind",
         label: "風の量",
-        initial: match Normalized::new(0.20) {
+        initial: match Normalized::new(0.50) {
             Some(value) => value,
             None => panic!("initial out of range"),
         },
@@ -830,9 +830,15 @@ const SWELL_MIN_SECONDS: f64 = 10.0;
 const SWELL_MAX_SECONDS: f64 = 18.0;
 /// The wind's level never falls below this share of its size: there is no gust-then-silence.
 const WIND_FLOOR: f32 = 0.30;
-const RUMBLE_LEVEL: f32 = 0.012;
-const RUSTLE_LEVEL: f32 = 0.0072;
-const RUSTLE_Q: f32 = 0.9;
+/// The knob's curve: `1 - (1 - x)^3`, 0 at 0 and 1 at 1, steeper at the bottom than the middle so
+/// the middle of the slider is already audible, yet with a finite slope at 0 (a knob move never
+/// makes the wind jump).
+fn wind_curve(x: f32) -> f32 {
+    1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)
+}
+const RUMBLE_LEVEL: f32 = 0.0047;
+const RUSTLE_LEVEL: f32 = 0.0155;
+const RUSTLE_Q: f32 = 0.6;
 const FLUTTER_HZ: f32 = 22.0;
 
 struct Wind {
@@ -891,7 +897,7 @@ impl Wind {
             swell: 0.0,
             level: 0.0,
             rumble_cutoff: 90.0,
-            rustle_center: 2_600.0,
+            rustle_center: 1_500.0,
             rumble_noise: noise(0xa54f_f53a_5f1d_36f1),
             rumble_pink: Pinkpass::new(),
             rumble_filters: [Lowpole::new(90.0), Lowpole::new(90.0)],
@@ -900,7 +906,7 @@ impl Wind {
             flutter_state: [0.0; 2],
             flutter_pole: pole(FLUTTER_HZ, rate),
             flutter_gain: 1.0,
-            rustle: std::array::from_fn(|_| Resonator::new(2_600.0, RUSTLE_Q)),
+            rustle: std::array::from_fn(|_| Resonator::new(1_500.0, RUSTLE_Q)),
         }
     }
 
@@ -947,13 +953,13 @@ impl Wind {
         // A floor, the wave, and the occasional larger swell on top; the knob sets the size of
         // all of them and reaches exactly 0 (silent) with it. Never above 1.
         self.level = if wind > 0.0 {
-            wind.sqrt() * (WIND_FLOOR + (0.25 + 0.20 * wind) * self.wave + 0.25 * self.swell)
+            wind_curve(wind) * (WIND_FLOOR + (0.25 + 0.20 * wind) * self.wave + 0.25 * self.swell)
         } else {
             0.0
         };
         self.rumble_cutoff = 70.0 + 110.0 * self.level;
         // The rustle's band follows the knob, always below Nyquist at any supported rate.
-        self.rustle_center = (2_200.0 + 1_800.0 * wind).min(sample_rate as f32 * 0.40);
+        self.rustle_center = (1_100.0 + 1_300.0 * wind).min(sample_rate as f32 * 0.40);
     }
 
     /// Stereo wind sample. The noise is scaled before the filters, so the wind dying away with
@@ -977,7 +983,7 @@ impl Wind {
             let flutter =
                 (0.25 + 0.9 * (self.flutter_state[channel] * self.flutter_gain).abs()).min(1.6);
             let rustle = self.rustle[channel]
-                .tick(&[source * level * level, self.rustle_center, RUSTLE_Q].into())[0]
+                .tick(&[source * level, self.rustle_center, RUSTLE_Q].into())[0]
                 * flutter
                 * RUSTLE_LEVEL;
             rumble + rustle
@@ -1410,7 +1416,7 @@ mod tests {
         let ids: Vec<_> = definition.knobs.iter().map(|knob| knob.id).collect();
         assert_eq!(ids, ["insects", "wind"]);
         assert_eq!(definition.knobs[0].initial.get(), 0.55);
-        assert_eq!(definition.knobs[1].initial.get(), 0.20);
+        assert_eq!(definition.knobs[1].initial.get(), 0.50);
         assert_eq!(definition.grain_capacity, MAX_INSECTS);
         assert_eq!(definition.visual.shape, VisualShape::SlowGlow);
         assert!(
@@ -2527,7 +2533,7 @@ mod tests {
         // Gradually: neighbouring periods differ by under two seconds.
         assert!(periods.windows(2).all(|p| (p[1] - p[0]).abs() < 2.0));
         // Smooth and continuous: never silent between waves, never a sharp onset.
-        let floor = 0.5_f32.sqrt() * WIND_FLOOR;
+        let floor = wind_curve(0.5) * WIND_FLOOR;
         assert!(
             levels.iter().all(|l| *l >= floor - 1e-6 && *l <= 1.0),
             "floor {floor}"
@@ -2581,11 +2587,23 @@ mod tests {
     }
 
     /// The wind's loudest second is at least this many decibels below the insects' default RMS.
-    const WIND_MARGIN_DB: f64 = 6.0;
+    const WIND_MARGIN_DB: f64 = 3.0;
 
-    /// The loudest 1 s window (RMS in dBFS over both channels, hop 0.5 s) of a run with `seed`.
-    fn loudest_second(seed: u64, knobs: [Normalized; 2], seconds: usize) -> f64 {
+    /// The A-weighting of `f` Hz in decibels (the standard analytic curve, 0 dB at 1 kHz).
+    fn a_weight_db(f: f64) -> f64 {
+        let f2 = f * f;
+        let ra = 12194.0_f64.powi(2) * f2 * f2
+            / ((f2 + 20.6_f64.powi(2))
+                * ((f2 + 107.7_f64.powi(2)) * (f2 + 737.9_f64.powi(2))).sqrt()
+                * (f2 + 12194.0_f64.powi(2)));
+        20.0 * ra.log10() + 2.0
+    }
+
+    /// Per second of a wind-only run (insects at 0): the RMS in dBFS of the output (one channel;
+    /// both are alike), unweighted and A-weighted (small speakers lose everything under 200 Hz).
+    fn wind_seconds(seed: u64, wind: f32, seconds: usize) -> Vec<(f64, f64)> {
         let rate = 24_000_u32;
+        let knobs = knobs(0.0, wind);
         let mut voice = AutumnVoice::new(VoicePreparation {
             sample_rate: rate,
             seed,
@@ -2595,46 +2613,93 @@ mod tests {
         voice.insects_knob = KnobRamp::new(knobs[0]);
         voice.wind_knob = KnobRamp::new(knobs[1]);
         let ring = VisualRing::new(8, 1);
-        let half = rate as usize / 2;
-        let (mut halves, mut energy) = (Vec::new(), 0.0_f64);
+        let (mut out, mut buffer) = (Vec::new(), Vec::new());
         for sample in 0..rate as usize * seconds {
-            let frame = step(&mut voice, &knobs, &ring, sample);
-            energy += f64::from(frame[0]).powi(2) + f64::from(frame[1]).powi(2);
-            if (sample + 1) % half == 0 {
-                halves.push(energy);
-                energy = 0.0;
+            buffer.push(step(&mut voice, &knobs, &ring, sample)[0]);
+            if buffer.len() < rate as usize {
+                continue;
             }
+            let power =
+                buffer.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / buffer.len() as f64;
+            let size = 32_768;
+            let mut data = vec![(0.0_f64, 0.0_f64); size];
+            for (slot, x) in data.iter_mut().zip(&buffer) {
+                slot.0 = f64::from(*x);
+            }
+            fft(&mut data);
+            let weighted: f64 = data
+                .iter()
+                .enumerate()
+                .take(size / 2)
+                .skip(1)
+                .map(|(index, (re, im))| {
+                    let frequency = index as f64 * f64::from(rate) / size as f64;
+                    (re * re + im * im) * 10f64.powf(a_weight_db(frequency) / 10.0)
+                })
+                .sum::<f64>()
+                * 2.0
+                / (size as f64 * buffer.len() as f64);
+            out.push((10.0 * power.log10(), 10.0 * weighted.log10()));
+            buffer.clear();
         }
-        let loudest = halves
-            .windows(2)
-            .map(|pair| pair[0] + pair[1])
-            .fold(0.0, f64::max);
-        20.0 * (loudest / (2.0 * f64::from(rate))).sqrt().log10()
+        out
+    }
+
+    /// Mean (by power), median and loudest of per-second levels, picked with `pick`.
+    fn level_stats(seconds: &[(f64, f64)], pick: fn(&(f64, f64)) -> f64) -> (f64, f64, f64) {
+        let mut values: Vec<f64> = seconds.iter().map(pick).collect();
+        let mean = 10.0
+            * (values.iter().map(|v| 10f64.powf(v / 10.0)).sum::<f64>() / values.len() as f64)
+                .log10();
+        values.sort_by(f64::total_cmp);
+        (mean, values[values.len() / 2], values[values.len() - 1])
     }
 
     #[test]
-    fn the_winds_loudest_second_stays_a_set_margin_below_the_insects_and_the_default_far_below() {
-        // Insects alone at the default knob, whole-run RMS.
+    fn the_wind_is_audible_in_the_gaps_by_default_and_its_loudest_second_stays_below_the_insects() {
+        // Insects alone at the default knob (whole-run RMS), and the insects' own quiet moments.
         let (insects, _) = levels(24_000, knobs(0.55, 0.0), 120);
-        let mut loudest = f64::MIN;
+        let mut at_one = Vec::new();
         for seed in [3_u64, 19, 71] {
-            loudest = loudest.max(loudest_second(seed, knobs(0.0, 1.0), 300));
+            at_one.extend(wind_seconds(seed, 1.0, 300));
         }
+        let (_, _, loudest) = level_stats(&at_one, |x| x.0);
+        let (_, _, loudest_weighted) = level_stats(&at_one, |x| x.1);
+        // Behind the insects at its very loudest (knob 1, over 15 minutes, three worlds)...
         assert!(
-            loudest <= insects - WIND_MARGIN_DB,
-            "wind's loudest second {loudest:.1} dBFS vs insects {insects:.1} dBFS"
+            loudest <= insects - WIND_MARGIN_DB
+                && loudest_weighted <= insects - WIND_MARGIN_DB + 1.0,
+            "loudest second {loudest:.1} dBFS (A {loudest_weighted:.1}) vs insects {insects:.1}"
         );
-        // Audible as a gentle undulation, not silent.
-        assert!(loudest > -60.0, "{loudest}");
-        // At the default wind knob it is much lower still.
-        let default = loudest_second(19, knobs(0.0, 0.20), 300);
+        // ...but gently present: not far under it either.
+        assert!(loudest > insects - 6.0, "{loudest:.1}");
+        // At the default knob its seconds average about -46 dBFS, the level of the insects' quiet
+        // moments, so it is there in the gaps between calls.
+        let default = KNOBS[1].initial.get();
+        let mut at_default = Vec::new();
+        for seed in [3_u64, 19, 71] {
+            at_default.extend(wind_seconds(seed, default, 300));
+        }
+        let (mean, median, _) = level_stats(&at_default, |x| x.0);
+        let (mean_weighted, _, _) = level_stats(&at_default, |x| x.1);
         assert!(
-            default <= loudest - 8.0,
-            "default {default:.1} vs full {loudest:.1}"
+            (-47.0..=-44.0).contains(&mean) && (-47.0..=-44.0).contains(&median),
+            "default wind: mean {mean:.1}, median {median:.1} dBFS"
         );
-        assert!(default > -75.0, "default is not silent: {default}");
-        // The default scene is not made louder by its wind.
-        let (both, _) = levels(24_000, knobs(0.55, 0.20), 120);
+        assert!(
+            (-46.5..=-43.0).contains(&mean_weighted),
+            "A-weighted {mean_weighted:.1}"
+        );
+        // The slider is audible in the middle: a quarter of it is within 6 dB of its top.
+        let quarter = wind_seconds(19, 0.25, 120);
+        let (quarter_mean, _, _) = level_stats(&quarter, |x| x.0);
+        let (top_mean, _, _) = level_stats(&at_one, |x| x.0);
+        assert!(
+            top_mean - quarter_mean < 7.0 && quarter_mean > -52.0,
+            "{quarter_mean:.1}"
+        );
+        // The default scene is hardly made louder by its wind.
+        let (both, _) = levels(24_000, knobs(0.55, default), 120);
         assert!(both - insects < 0.5, "{both:.1} vs {insects:.1}");
     }
 
@@ -2732,7 +2797,7 @@ mod tests {
         // (docs/verification.md: raw -40.8/-51.1/-46.6 with trims 2.0/6.0/4.0).
         // Measured with this same method (24 kHz, 90 s, both channels): autumn -34.9 dBFS (P37), rain
         // -35.1 and deep -35.1 at their default knobs.
-        let (rms, peak) = levels(24_000, knobs(0.55, 0.20), 90);
+        let (rms, peak) = levels(24_000, knobs(0.55, 0.50), 90);
         assert!((-37.0..=-33.0).contains(&rms), "default RMS {rms} dBFS");
         assert!(peak > 0.0 && peak < 0.5, "default peak {peak}");
     }

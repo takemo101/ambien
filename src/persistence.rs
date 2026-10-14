@@ -1340,14 +1340,14 @@ mod tests {
         assert_eq!(state.controls.manual_target, autumn);
         assert_eq!(
             state.controls.knobs[range.clone()],
-            normalized([0.55, 0.20])
+            normalized([0.55, 0.50])
         );
         assert_eq!(notice, None);
         // Out of range is clamped; a knob from some other version is left alone.
         fixture.write(&json!({"version":1, "situations":{"autumn":{
             "insects":1.7, "wind":"loud", "frogs":0.9}}}));
         let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
-        assert_eq!(state.controls.knobs[range.clone()], normalized([1.0, 0.20]));
+        assert_eq!(state.controls.knobs[range.clone()], normalized([1.0, 0.50]));
         assert!(notice.is_some(), "the wrong type is reported as repaired");
         // A save writes the two knobs, keeps the unknown one and loads back the same values.
         let (worker, startup, notices) =
