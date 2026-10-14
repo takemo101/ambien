@@ -11,7 +11,7 @@ mod scatter;
 use std::f32::consts::TAU;
 
 use crate::{controls::VisualIntensity, situations::VisualShape, ui::appearance::Motion};
-use scatter::{Scatter, lead_ring_radius, scatter, shock_outline};
+use scatter::{Scatter, firefly_drift, lead_ring_radius, scatter, shock_outline};
 
 /// The most marks one particle can have (a vivid rock impact: core and its halo, shock ring and
 /// its halo, up to twenty shards and seven sparks with halos, dust and the texture marks).
@@ -325,6 +325,19 @@ fn tinted(rgb: [f32; 3], serial: u64, strength: f32) -> [f32; 3] {
         (rgb[1] * light).clamp(0.0, 1.0),
         (rgb[2] * (1.0 + tilt) * light).clamp(0.0, 1.0),
     ]
+}
+
+/// Warm yellow-green of a firefly: always the bright night colour, whatever the appearance.
+const FIREFLY: [f32; 3] = [0.78, 0.92, 0.38];
+
+/// The colour a particle's spread is taken around: the situation's own colour, except that the
+/// autumn fireflies have a colour of their own (the situation's dark indigo is the night they
+/// light).
+fn light_colour(shape: VisualShape, rgb: [f32; 3]) -> [f32; 3] {
+    match shape {
+        VisualShape::Firefly => FIREFLY,
+        _ => rgb,
+    }
 }
 
 fn finite_or_zero(value: f32) -> f32 {
@@ -649,7 +662,7 @@ fn texture(
                 }
             }
         }
-        VisualShape::SlowGlow => {}
+        VisualShape::SlowGlow | VisualShape::Firefly => {}
     }
 }
 
@@ -660,10 +673,14 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
     let opacity = finite_or_zero(input.opacity).clamp(0.0, 1.0);
     let radius = finite_or_zero(input.radius).max(0.0);
     let strength = finite_or_zero(input.strength).clamp(0.0, 1.0);
-    let rgb = tinted(input.rgb, input.serial, strength);
+    // A firefly only exists in the night scene, which is dark in either appearance (the night
+    // film sees to that), so it always has the bright dark-window look.
+    let dark = input.dark || input.shape == VisualShape::Firefly;
+    let rgb = tinted(light_colour(input.shape, input.rgb), input.serial, strength);
     let (phase, second) = unit_pair(input.serial ^ 0xa5a5_a5a5_5a5a_5a5a);
     let mut look = Look::new();
-    if !input.large {
+    // A firefly is always drawn, at every intensity, whatever its event says.
+    if !input.large && input.shape != VisualShape::Firefly {
         // Small particles show only when the viewer asked for more than the calm scene: a
         // faint, tiny, still dot, the cheapest possible mark; vivid adds a brief twinkle.
         if input.intensity != VisualIntensity::Calm {
@@ -709,6 +726,19 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
         1.0
     };
     let rock = input.shape == VisualShape::Impact;
+    // A firefly wanders from where it was lit; every other light stays where it was born, and
+    // reduced motion keeps even a firefly still.
+    let centre = if input.shape == VisualShape::Firefly && !still {
+        firefly_drift(input.serial, age)
+    } else {
+        [0.0, 0.0]
+    };
+    // A firefly's glow is wider and softer than the others'.
+    let reach = if input.shape == VisualShape::Firefly {
+        3.2
+    } else {
+        2.4
+    };
     // The core light. A rock's is a faceted shape, not a round glow; everything else keeps the
     // soft round light.
     if rock {
@@ -724,7 +754,7 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
         });
     } else {
         look.push(Mark::Glow {
-            offset: [0.0, 0.0],
+            offset: centre,
             radius: core * wobble,
             rgb,
             opacity,
@@ -732,7 +762,7 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
     }
     if !still {
         // A soft glow around the core at every intensity; light windows get a deeper colour.
-        let (halo, tone) = if input.dark {
+        let (halo, tone) = if dark {
             (lighten(rgb, 0.2), 0.28)
         } else {
             (deepen(rgb, 0.8), 0.22)
@@ -755,8 +785,8 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
             );
         } else {
             look.push(Mark::Haze {
-                offset: [0.0, 0.0],
-                radius: core * wobble * 2.4,
+                offset: centre,
+                radius: core * wobble * reach,
                 rgb: halo,
                 opacity: opacity * tone,
             });
@@ -774,11 +804,11 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
                 age,
                 opacity,
                 serial: input.serial,
-                dark: input.dark,
+                dark,
             },
         );
     }
-    if !still && input.intensity != VisualIntensity::Calm {
+    if !still && input.intensity != VisualIntensity::Calm && input.shape != VisualShape::Firefly {
         texture(
             &mut look,
             input,
@@ -810,7 +840,13 @@ mod tests {
         }
     }
 
-    const SHAPES: [VisualShape; 3] = [
+    const SHAPES: [VisualShape; 4] = [
+        VisualShape::Point,
+        VisualShape::Impact,
+        VisualShape::SlowGlow,
+        VisualShape::Firefly,
+    ];
+    const ORIGINAL_SHAPES: [VisualShape; 3] = [
         VisualShape::Point,
         VisualShape::Impact,
         VisualShape::SlowGlow,
@@ -1011,7 +1047,9 @@ mod tests {
 
     #[test]
     fn calm_has_no_texture_and_only_its_core_halo_changes_colour_between_dark_and_light() {
-        for shape in SHAPES {
+        // The original three share one colour in both windows; a firefly and a star are deeper
+        // on light (tested with them).
+        for shape in ORIGINAL_SHAPES {
             let dark = marks_of(&at(shape, VisualIntensity::Calm, true), Motion::Full);
             let light = marks_of(&at(shape, VisualIntensity::Calm, false), Motion::Full);
             assert!(!dark.iter().any(|mark| matches!(mark, Mark::Cross { .. })));
@@ -1063,7 +1101,7 @@ mod tests {
 
     #[test]
     fn every_intensity_glows_softly_around_the_core_lighter_on_dark_and_deeper_on_light() {
-        for shape in SHAPES {
+        for shape in ORIGINAL_SHAPES {
             for level in [
                 VisualIntensity::Calm,
                 VisualIntensity::Standard,
@@ -1168,7 +1206,12 @@ mod tests {
                     .count()
             };
             assert_eq!((glints(&calm), glints(&standard)), (0, 0), "{shape:?}");
-            assert!(glints(&vivid) >= 1, "{shape:?}");
+            // A firefly's light is its glow; only the others add a glint at vivid.
+            assert_eq!(
+                glints(&vivid) >= 1,
+                shape != VisualShape::Firefly,
+                "{shape:?}"
+            );
         }
     }
 
@@ -1193,6 +1236,9 @@ mod tests {
                     .count();
                 if shape == VisualShape::Impact {
                     assert_eq!((crosses, spikes), (0, 1), "a rock has one burst of spikes");
+                } else if shape == VisualShape::Firefly {
+                    // A firefly's light is its glow; the cross belongs to the star.
+                    assert_eq!((crosses, spikes), (0, 0), "a firefly has no glint");
                 } else {
                     assert_eq!((crosses, spikes), (1, 0), "{shape:?} keeps its plus sign");
                 }
@@ -1318,10 +1364,10 @@ mod tests {
     #[test]
     fn reduced_motion_keeps_only_the_core_light_at_every_intensity() {
         for shape in SHAPES {
-            let calm = marks_of(&at(shape, VisualIntensity::Calm, true), Motion::Reduced);
-            assert_eq!(calm.len(), 1);
-            for intensity in [VisualIntensity::Standard, VisualIntensity::Vivid] {
-                for dark in [true, false] {
+            for dark in [true, false] {
+                let calm = marks_of(&at(shape, VisualIntensity::Calm, dark), Motion::Reduced);
+                assert_eq!(calm.len(), 1);
+                for intensity in [VisualIntensity::Standard, VisualIntensity::Vivid] {
                     assert_eq!(
                         marks_of(&at(shape, intensity, dark), Motion::Reduced),
                         calm,
@@ -1591,6 +1637,245 @@ mod tests {
                 },
             };
             assert_eq!(mark.scaled(2.0), twice);
+        }
+    }
+
+    /// The colour of a mark that lights (a core, halo, dot, ...).
+    fn mark_rgb(mark: &Mark) -> [f32; 3] {
+        match *mark {
+            Mark::Glow { rgb, .. }
+            | Mark::Haze { rgb, .. }
+            | Mark::Dot { rgb, .. }
+            | Mark::Ring { rgb, .. }
+            | Mark::Cross { rgb, .. }
+            | Mark::Poly { rgb, .. }
+            | Mark::Shards { rgb, .. } => rgb,
+        }
+    }
+
+    const LEVELS: [VisualIntensity; 3] = [
+        VisualIntensity::Calm,
+        VisualIntensity::Standard,
+        VisualIntensity::Vivid,
+    ];
+
+    #[test]
+    fn fireflies_are_warm_yellow_green_deeper_on_light_and_not_the_situations_colour() {
+        let mean_core = |shape, dark| {
+            let mut sum = [0.0_f32; 3];
+            for serial in 0..100_u64 {
+                let own = marks_of(
+                    &ParticleInput {
+                        serial,
+                        ..at(shape, VisualIntensity::Calm, dark)
+                    },
+                    Motion::Full,
+                );
+                // The situation's dark indigo does not tint what it lights.
+                let indigo = marks_of(
+                    &ParticleInput {
+                        serial,
+                        rgb: [0.16, 0.20, 0.45],
+                        ..at(shape, VisualIntensity::Calm, dark)
+                    },
+                    Motion::Full,
+                );
+                assert_eq!(mark_rgb(&own[0]), mark_rgb(&indigo[0]));
+                let rgb = mark_rgb(&own[0]);
+                assert!(rgb.iter().all(|channel| (0.0..=1.0).contains(channel)));
+                for channel in 0..3 {
+                    sum[channel] += rgb[channel] / 100.0;
+                }
+            }
+            sum
+        };
+        let [r, g, b] = mean_core(VisualShape::Firefly, true);
+        assert!(
+            g > b + 0.25 && r > b + 0.1 && g >= r,
+            "yellow-green: {r} {g} {b}"
+        );
+        let (dark, light) = (
+            mean_core(VisualShape::Firefly, true),
+            mean_core(VisualShape::Firefly, false),
+        );
+        assert_eq!(
+            dark, light,
+            "the same bright yellow-green on a light and a dark window"
+        );
+        assert!(
+            dark.iter().sum::<f32>() > 1.6,
+            "bright, never deepened: {dark:?}"
+        );
+    }
+
+    #[test]
+    fn a_firefly_wanders_a_little_from_where_it_was_lit_and_a_reduced_motion_one_stays() {
+        let centre = |serial, age, motion| match marks_of(
+            &ParticleInput {
+                serial,
+                age,
+                ..at(VisualShape::Firefly, VisualIntensity::Calm, true)
+            },
+            motion,
+        )[0]
+        {
+            Mark::Glow { offset, .. } => offset,
+            other => panic!("a firefly's core is a glow: {other:?}"),
+        };
+        for serial in [1_u64, 2, 77, 4_000_000] {
+            assert_eq!(
+                centre(serial, 0.0, Motion::Full),
+                [0.0, 0.0],
+                "lit where it was born"
+            );
+            let path: Vec<[f32; 2]> = (0..=200)
+                .map(|step| centre(serial, step as f32 / 200.0, Motion::Full))
+                .collect();
+            assert_eq!(
+                path,
+                (0..=200)
+                    .map(|step| centre(serial, step as f32 / 200.0, Motion::Full))
+                    .collect::<Vec<_>>()
+            );
+            for pair in path.windows(2) {
+                let jump = (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]);
+                assert!(jump < 1.5, "a gentle drift, not a jump: {jump}");
+            }
+            let (xs, ys): (Vec<f32>, Vec<f32>) = path.iter().map(|p| (p[0], p[1])).unzip();
+            let range = |values: &[f32]| {
+                values.iter().cloned().fold(f32::MIN, f32::max)
+                    - values.iter().cloned().fold(f32::MAX, f32::min)
+            };
+            // A few per cent of the default window's width, never beyond a tenth of it (96 px),
+            // and only a little way down from where it was lit (the lower-to-middle band).
+            assert!(
+                range(&xs) > 12.0 && range(&xs) <= 180.0,
+                "wanders sideways: {}",
+                range(&xs)
+            );
+            assert!(xs.iter().all(|x| x.abs() <= 90.0));
+            assert!(ys.iter().all(|y| (-100.0..=35.0).contains(y)));
+            assert!(range(&ys) > 3.0, "and up and down: {}", range(&ys));
+            for age in [0.0, 0.3, 0.8, 1.0] {
+                assert_eq!(
+                    centre(serial, age, Motion::Reduced),
+                    [0.0, 0.0],
+                    "reduced motion is static"
+                );
+            }
+        }
+        assert_ne!(centre(1, 0.5, Motion::Full), centre(2, 0.5, Motion::Full));
+    }
+
+    #[test]
+    fn every_level_of_a_firefly_has_sound_marks_inside_the_budget_and_light_only_deepens() {
+        for shape in SHAPES
+            .into_iter()
+            .filter(|shape| *shape == VisualShape::Firefly)
+        {
+            for intensity in LEVELS {
+                for dark in [true, false] {
+                    for motion in [Motion::Full, Motion::Reduced] {
+                        for large in [true, false] {
+                            for serial in [0_u64, 1, 99, u64::MAX] {
+                                for step in 0..=10 {
+                                    let input = ParticleInput {
+                                        age: step as f32 / 10.0,
+                                        large,
+                                        serial,
+                                        ..at(shape, intensity, dark)
+                                    };
+                                    let marks = marks_of(&input, motion);
+                                    assert!(
+                                        marks.len() <= 12 && marks.len() <= MAX_MARKS,
+                                        "{shape:?} {intensity:?}: {}",
+                                        marks.len()
+                                    );
+                                    for mark in &marks {
+                                        assert!(
+                                            mark_rgb(mark).iter().all(|c| (0.0..=1.0).contains(c))
+                                        );
+                                        let (opacity, lengths) = match *mark {
+                                            Mark::Glow {
+                                                opacity,
+                                                radius,
+                                                offset,
+                                                ..
+                                            }
+                                            | Mark::Haze {
+                                                opacity,
+                                                radius,
+                                                offset,
+                                                ..
+                                            }
+                                            | Mark::Dot {
+                                                opacity,
+                                                radius,
+                                                offset,
+                                                ..
+                                            } => (opacity, vec![radius, offset[0], offset[1]]),
+                                            Mark::Cross {
+                                                opacity,
+                                                arm,
+                                                width,
+                                                ..
+                                            } => (opacity, vec![arm, width]),
+                                            other => panic!("unexpected mark {other:?}"),
+                                        };
+                                        assert!(
+                                            (0.0..=1.0).contains(&opacity)
+                                                && lengths.iter().all(|v| v.is_finite())
+                                        );
+                                        if let Mark::Glow { radius, .. }
+                                        | Mark::Haze { radius, .. }
+                                        | Mark::Dot { radius, .. } = *mark
+                                        {
+                                            assert!(radius > 0.0);
+                                        }
+                                    }
+                                    // A firefly is the same bright night light on a light and a
+                                    // dark window: it never takes the deepened light-window look.
+                                    assert_eq!(
+                                        marks,
+                                        marks_of(
+                                            &ParticleInput {
+                                                dark: !dark,
+                                                ..input
+                                            },
+                                            motion
+                                        ),
+                                        "{shape:?} {intensity:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_firefly_gains_marks_with_each_level_and_keeps_its_core_first() {
+        let count =
+            |intensity| marks_of(&at(VisualShape::Firefly, intensity, true), Motion::Full).len();
+        assert!(
+            count(VisualIntensity::Calm) >= 2,
+            "a core and a soft halo even when calm"
+        );
+        assert!(count(VisualIntensity::Standard) > count(VisualIntensity::Calm));
+        assert!(count(VisualIntensity::Vivid) > count(VisualIntensity::Standard));
+        for intensity in LEVELS {
+            let marks = marks_of(&at(VisualShape::Firefly, intensity, true), Motion::Full);
+            assert!(matches!(marks[0], Mark::Glow { .. }));
+            // A crowd thins fireflies from the finest decoration, never the core.
+            let mut budget = Budget::new(400);
+            let allowed: Vec<bool> = marks
+                .iter()
+                .enumerate()
+                .map(|(i, m)| budget.allows(i, m))
+                .collect();
+            assert!(allowed[0]);
         }
     }
 }

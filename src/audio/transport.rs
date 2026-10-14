@@ -469,6 +469,7 @@ impl EventSlot {
                 0 => VisualShape::Point,
                 1 => VisualShape::Impact,
                 2 => VisualShape::SlowGlow,
+                3 => VisualShape::Firefly,
                 _ => return None,
             },
             large: self.shape.load(Ordering::SeqCst) & LARGE_BIT != 0,
@@ -945,6 +946,47 @@ mod tests {
             lifetime: Duration::from_nanos(100),
             serial: 0,
         }
+    }
+
+    #[test]
+    fn every_shape_and_the_large_flag_survive_the_ring_for_a_whole_twelve_second_bout() {
+        let shapes = [
+            VisualShape::Point,
+            VisualShape::Impact,
+            VisualShape::SlowGlow,
+            VisualShape::Firefly,
+        ];
+        let ring = VisualRing::new(shapes.len() * 2, 1);
+        for (index, shape) in shapes.into_iter().enumerate() {
+            for large in [false, true] {
+                let mut particle = event(index as u64, 0, 0.5);
+                particle.shape = shape;
+                particle.large = large;
+                // A firefly lives as long as an insect's bout, up to twelve seconds.
+                particle.lifetime = Duration::from_secs(12);
+                assert!(ring.push_event(particle));
+            }
+        }
+        let mut cache = [None; 8];
+        assert_eq!(
+            ring.read_live_into(epoch(1), MachNanos::new(11_999_999_999), &mut cache),
+            shapes.len() * 2
+        );
+        for shape in shapes {
+            for large in [false, true] {
+                assert!(
+                    cache
+                        .iter()
+                        .flatten()
+                        .any(|event| event.shape == shape && event.large == large),
+                    "{shape:?} large={large}"
+                );
+            }
+        }
+        assert_eq!(
+            ring.read_live_into(epoch(1), MachNanos::new(12_000_000_000), &mut cache),
+            0
+        );
     }
 
     #[test]

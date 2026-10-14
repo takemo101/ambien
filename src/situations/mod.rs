@@ -1,7 +1,10 @@
+mod autumn;
 mod deep;
 mod rain;
 mod rock;
 pub(crate) mod synthesis;
+
+pub(crate) use autumn::bout_envelope;
 
 use std::{error::Error, fmt, ops::Range};
 
@@ -50,12 +53,16 @@ pub enum VisualShape {
     Point = 0,
     Impact = 1,
     SlowGlow = 2,
+    /// A drifting yellow-green light whose brightness follows [`bout_envelope`] (秋の夜長).
+    Firefly = 3,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct VisualStyle {
     pub color: [f32; 3],
     pub shape: VisualShape,
+    /// The situation's background is a star field (drawn by the scene, not by visual events).
+    pub stars: bool,
 }
 
 pub struct KnobDefinition {
@@ -151,6 +158,7 @@ impl Registry {
             rain::definition(),
             rock::definition(),
             deep::definition(),
+            autumn::definition(),
         ])
     }
 
@@ -272,6 +280,64 @@ mod tests {
             Registry::validate(vec![definition]),
             Err(VoicePreparationError::InvalidDefinition)
         ));
+    }
+
+    #[test]
+    fn autumn_is_the_fourth_registration_with_its_own_knob_range_and_a_working_voice() {
+        use crate::audio::{
+            timing::{MachNanos, StreamEpoch},
+            transport::VisualRing,
+        };
+
+        let registry = Registry::new().unwrap();
+        let ids: Vec<_> = registry.definitions().iter().map(|d| d.id).collect();
+        assert_eq!(ids, ["rain", "rock", "deep", "autumn"]);
+        let autumn = registry.resolve("autumn").unwrap();
+        assert_eq!(autumn.get(), 3);
+        // Knob ranges are contiguous: 2 + 3 + 2 before it, its own two after.
+        assert_eq!(registry.knob_range(autumn), 7..9);
+        assert_eq!(registry.knob_count(), 9);
+        let definition = &registry.definitions()[autumn.get()];
+        assert_eq!(definition.label, "秋の夜長");
+        assert_eq!(definition.visual.shape, VisualShape::SlowGlow);
+        let mut voice = registry
+            .prepare_voice(
+                autumn,
+                VoicePreparation {
+                    sample_rate: 48_000,
+                    seed: 5,
+                    grain_capacity: definition.grain_capacity,
+                },
+            )
+            .unwrap();
+        let ring = VisualRing::new(64, registry.definitions().len());
+        let knobs = [Normalized::ONE, Normalized::ONE];
+        let mut energy = 0.0_f64;
+        for sample in 0..48_000 * 20 {
+            let world = WorldSeconds::new(sample as f64 / 48_000.0).unwrap();
+            let mut events = VisualWriter::new(
+                &ring,
+                StreamEpoch::new(1).unwrap(),
+                autumn,
+                world,
+                MachNanos::new(sample as u64 * 20_833),
+            );
+            voice.advance_world(
+                VoiceFrame {
+                    world,
+                    delta_seconds: 1.0 / 48_000.0,
+                    sample_rate: 48_000,
+                },
+                &knobs,
+                &mut events,
+            );
+            for value in voice.render_sample() {
+                assert!(value.is_finite() && value.abs() < 0.85);
+                energy += f64::from(value).powi(2);
+            }
+        }
+        assert!(energy > 0.0, "the registered voice sings");
+        assert_eq!(voice.prepared_delay().unwrap().get(), 0.0);
     }
 
     #[test]

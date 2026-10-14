@@ -8,7 +8,7 @@ use async_channel::{Receiver, RecvError, Sender, TrySendError};
 use ely::theme::Theme;
 use gpui::{App, WindowBackgroundAppearance};
 
-use crate::situations::VisualShape;
+use crate::situations::{VisualShape, bout_envelope};
 
 /// OS display options Ambien reacts to. Both are independent of audio state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,8 +74,13 @@ fn smoothstep(value: f32) -> f32 {
 }
 
 impl Motion {
-    /// Opacity envelope over a particle's normalized age (0 = born, 1 = expired).
-    pub(crate) fn particle_fade(self, age: f32) -> f32 {
+    /// Opacity envelope over a particle's normalized age (0 = born, 1 = expired). A firefly is the
+    /// exception: its brightness is its insect's bout envelope (the very function the sound's
+    /// gain uses), which already starts and ends at 0 smoothly, whatever the motion setting.
+    pub(crate) fn particle_fade(self, shape: VisualShape, age: f32) -> f32 {
+        if shape == VisualShape::Firefly {
+            return bout_envelope(age);
+        }
         match self {
             Self::Full => (1.0 - age).clamp(0.0, 1.0).powi(2),
             Self::Reduced => {
@@ -90,6 +95,8 @@ impl Motion {
             (Self::Reduced, _) | (_, VisualShape::Point) => 1.0,
             (Self::Full, VisualShape::Impact) => 1.0 + age * 1.6,
             (Self::Full, VisualShape::SlowGlow) => 1.0 + age * 0.4,
+            // A firefly swells as its insect's song swells and shrinks as it stops.
+            (Self::Full, VisualShape::Firefly) => 0.8 + 0.4 * bout_envelope(age),
         }
     }
 
@@ -158,13 +165,14 @@ mod tests {
             assert_eq!(reduced.shape_scale(VisualShape::SlowGlow, age), 1.0);
         }
         assert!(full.shape_scale(VisualShape::Impact, 0.5) > 1.5);
-        assert_eq!(full.particle_fade(0.0), 1.0, "full motion starts at once");
-        assert_eq!(reduced.particle_fade(0.0), 0.0);
-        assert_eq!(reduced.particle_fade(1.0), 0.0);
-        let mut previous = reduced.particle_fade(0.0);
+        let fade = |motion: Motion, age| motion.particle_fade(VisualShape::Point, age);
+        assert_eq!(fade(full, 0.0), 1.0, "full motion starts at once");
+        assert_eq!(fade(reduced, 0.0), 0.0);
+        assert_eq!(fade(reduced, 1.0), 0.0);
+        let mut previous = fade(reduced, 0.0);
         let mut peak: f32 = 0.0;
         for step in 1..=1000 {
-            let fade = reduced.particle_fade(step as f32 / 1000.0);
+            let fade = fade(reduced, step as f32 / 1000.0);
             assert!((fade - previous).abs() < 0.03, "no jump at step {step}");
             peak = peak.max(fade);
             previous = fade;
@@ -172,6 +180,28 @@ mod tests {
         assert!(peak > 0.99, "a soft pulse still reaches the full envelope");
         assert_eq!(reduced.glow_radius(0.5, 0.0), reduced.glow_radius(0.5, 1.0));
         assert!(full.glow_radius(0.5, 1.0) > full.glow_radius(0.5, 0.0));
+    }
+
+    #[test]
+    fn a_fireflys_fade_is_the_bout_envelope_in_both_motions_and_only_full_motion_swells_it() {
+        for motion in [Motion::Full, Motion::Reduced] {
+            assert_eq!(motion.particle_fade(VisualShape::Firefly, 0.0), 0.0);
+            assert_eq!(motion.particle_fade(VisualShape::Firefly, 1.0), 0.0);
+            for step in 0..=100 {
+                let age = step as f32 / 100.0;
+                assert_eq!(
+                    motion.particle_fade(VisualShape::Firefly, age),
+                    bout_envelope(age)
+                );
+            }
+        }
+        // Another shape fades the generic way (brightest when born); a firefly does not.
+        assert_eq!(Motion::Full.particle_fade(VisualShape::Point, 0.0), 1.0);
+        assert_eq!(Motion::Full.shape_scale(VisualShape::Firefly, 0.0), 0.8);
+        assert!((Motion::Full.shape_scale(VisualShape::Firefly, 0.5) - 1.2).abs() < 1e-6);
+        for age in [0.0, 0.5, 1.0] {
+            assert_eq!(Motion::Reduced.shape_scale(VisualShape::Firefly, age), 1.0);
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@
 | `src/app.rs` | `AppModel` の所有 root、Ely 初期化、メニュー actions、設定端点、窓 handles、失敗表示、各 Module の接続 |
 | `src/controls.rs` | `Normalized`、登録 index、`Revision`、`ControlState` と UI 操作 Reducer。viewport は制御に混ぜない |
 | `src/situations/mod.rs` | `Registry`、`SituationDefinition`、`KnobDefinition`、`Voice`、`PreparedVoice`、登録リスト |
-| `src/situations/rain.rs`・`rock.rs`・`deep.rs` | 各声の固有合成、曲線、見え方、試聴で確定するノブ初期値 |
+| `src/situations/rain.rs`・`rock.rs`・`deep.rs`・`autumn.rs` | 各声の固有合成、曲線、見え方、試聴で確定するノブ初期値（`autumn.rs` は虫・風の声と、音と映像が共有する bout の式 `bout_envelope`） |
 | `src/situations/synthesis.rs` | 固定粒 pool、包絡、Poisson、色付き揺らぎの実際に共有する Implementation。外部 plugin framework ではない |
 | `src/audio/mod.rs` | `AudioController` worker、標準出力、config、build/play/pause、停止・復旧 |
 | `src/audio/render.rs` | `PreparedEngine`、型付き CPAL render、合成・混合・出力形式変換 |
@@ -297,6 +297,20 @@ pan は event と共通の normalized x から equal-power stereo を作る。y�
 
 非寄与の雨／岩／深海は新規Poisson入場を止め、既存粒の論理age・ノブ追従・息／天候の時間更新とPRNG状態を保持する。寄与境界で古い粒のaudio eligibilityとDSP履歴を無効化し、再入場で古い音を復活させない。global mute／volume0はこの非寄与状態へ変換しない。settingsは現存Ely Radioの実role／label／選択状態を持つ個別choiceを登録metadataから生成し、mouseとSpace／Enterのreleaseはそのchoiceのtyped targetへ届く。受理表示は「手動の表示対象」であり、g²最大・実聴感dominantとは呼ばない。
 
+### 秋の夜長の声と視覚（P36）
+
+`situations/autumn.rs` は固定10匹の虫と風1声を持つ（登録の `grain_capacity` が虫の pool 数）。ノブは `insects`・`wind`（暫定の初期値 0.55／0.20。試聴でユーザーが確定し、SPEC と KnobDefinition へ反映する）。pool は準備時に確保し、callback は確保しない。
+
+- **虫（2段の揺らぎ）**：種類は鈴虫（4〜5.5kHz の正弦、0.4〜0.9秒の鈴、間隔1.1〜1.8秒）・コオロギ（3〜4.5kHz の短い半正弦 pulse を3〜5回、間隔2.2〜3.6秒）・マツムシ（3〜4kHz、3音でそれぞれ音高が違う、間隔2.4〜3.6秒）・クツワムシ（2〜3kHz、7 pulse の連打を2〜3回、間隔3.8〜5秒。1.1倍の第2成分で荒くし、音量も休止の頻度も小さめ）・カネタタキ（6〜8kHz の短い ping、0.8〜1.2秒の一定間隔）。個々の虫は pitch（種ごとの狭い範囲）・休みの長さ `gap_base`・左右位置 `x`・位相を持ち、phrase 開始ごとに pitch ±1%・間隔 ±2% の揺れ、世界時刻の遅い正弦（周期17〜45秒、虫ごと）による間隔 ±5%・pitch ±0.5% のずれが加わる。短周期は phrase の繰り返し、長周期は bout（鳴き始め→鳴く→鳴き止む）で、bout の長さと休止は虫ごとの `WorldRandom`（世界の時刻とだけ連動。壁時計なし）で抽選する。bout の長さは SPEC の4〜12秒の中で種ごとに決め（鈴虫・カネタタキ4〜12秒、コオロギ・マツムシ6〜12秒、クツワムシ8〜12秒）、遅い声ほど長い bout にして1つの bout に phrase が入るようにする。
+- **どの bout も鳴く**：1回目の phrase は、うねりが聞こえ始める値（`PHRASE_MIN_ENVELOPE`＝0.08、bout の長さの約12.5%）を越えた時点で始める。bout の最初の2回の間（MIN_PHRASES_PER_BOUT＝2）は、休止を「bout の聞こえる区間（12.5%〜87.5%）の残り」で上から抑え、うねりが引く前に次の phrase が始まるようにする。したがって蛍が灯る bout には少なくとも2回の phrase がある（試験が全種・複数 seed で確かめる）。
+- **共有式**：`situations::bout_envelope(u) = smoothstep(min(1, 1.25*sin²(πu)))`（`u = bout_age/bout_length`）。両端で厳密に0、`u≈0.35〜0.65` で1、端の傾き0。音側は虫の出力に毎 sample この値を掛け、phrase 間隔の進み（`0.35+0.65*値`。カネタタキは一定）にも使う。映像側は蛍の明るさ（`appearance::Motion::particle_fade`。reduced でも同じ）と膨らみ（`0.8+0.4*値`）に同じ関数を使い、生成の `lifetime`／`age` 以外の式を持たない。
+- **発生**：視覚イベントは蛍だけで、bout の開始で1匹1つの `Firefly`（x＝その虫の pan の元の x、y は窓の下寄り0.55〜0.9、強さは虫の明るさと knob、`lifetime = max(bout長, 4秒)`＝bout 長、large）。phrase の繰り返しは視覚イベントを出さない。非寄与の間は新しい bout／phrase を始めず、世界の進行と抽選状態だけを保つ。
+- **ノブ**：虫 `x` は、虫 `i` を `x*pool > i` のとき有効にし、同時に bout 中の虫を `ceil(x*6)` までに抑え（同時に灯る蛍も同じ上限で、省略はしない）、休止を `(6〜12秒)*(1.9-1.4x)`、phrase の音量を `0.65+0.35x` 倍にする。有効かどうかは新しい bout を始める条件だけで、ノブを0でない値へ下げても進行中の bout は最後まで鳴き、phrase を続ける（蛍が実在する声と対応し続ける）。ノブが正確に0のときは、新しい bout に加えて進行中の bout も新しい phrase（繰り返し）を始めず、すでに鳴っている phrase は終わりまで鳴り、始まっている bout とその蛍は寿命まで残る（最長12秒で全員が鳴き止む）。風 `x` は gust の間隔 `(14〜54秒)*(1.9-1.3x)`、強さ `√x`、葉擦れの中心 `2.2〜4kHz`（Nyquist の0.4倍以下）。0 では新しい gust が始まらず、出力は正確に0（フィルタ入力へ gust 強さを掛けるため余韻は残らない）。
+- **風**：gust は6〜12秒、形は `sin²(πu)`。ごく低い rumble（pink→低域2段 lowpole、cutoff 70〜180Hz）と、葉擦れ（white noise に強さ²を掛けて低Qの `Resonator` を通し、遅い揺らぎで振幅を変える）。左右は独立した noise。
+- **空間と音量**：`RestartableReverb::with_room(rate, 0.30秒, 0.45)`、wet 0.16 の小さな屋外。出力は `soft_ceiling`（0.85）。`OUTPUT_TRIM` と各種 level は、既定のノブ（0.55／0.20）の RMS が 24kHz・90秒・両ch の同じ測り方で雨・深海（−35.1dBFS）に合うよう決めた（−34.7dBFS。試験が −37〜−33dBFS を要求する）。聴感の釣り合いはユーザーの試聴で確定する。
+- **蛍の視覚**：`VisualShape::Firefly = 3` を足した（`SHAPE_MASK` は0xffのまま、transport は復号側だけに3を足した）。`appearance`・`look`・`look::scatter` の全 match を更新した。蛍は夜の場面にしか存在せず、夜の膜でどの外観でも暗い窓になるため、`look::look` は形が `Firefly` なら `dark` に依らず常に明るいダーク窓の見た目（核・暈・散りの色を明るく重ねる）にし、`scatter::firefly` を含めライト用の深い色の分岐は持たない。色は situation の暗い藍ではなく黄緑（0.78/0.92/0.38）を `look::light_colour` で選び、色の幅は他と同じ `tinted`（serial と強さ）で付ける。明るさは `bout_envelope(age)` で、1粒の mark は最大約10で `MAX_MARKS` と影の予算に収まる。動きは `scatter::firefly_drift(serial, age)`：生まれた位置（虫の x と y）からの offset を論理px（既定窓の短辺600px基準。scene が窓の短辺で拡縮）で返す純粋関数で、進む向きを「開始方向＋周期の異なる3つの遅い正弦」で滑らかに変えながら中点則で32分割して積分する。経路長は蛍ごとに90〜180px、横は ±90px（既定窓の幅の約1割）、縦は上へ100px・下へ35pxに `tanh` で柔らかく収める（窓の下寄りから中ほど）。reduced motion では動かない（offset 0）。
+- **星空と夜の膜（`ui::stars`）**：星は視覚イベントではなく背景で、`VisualStyle.stars`（雨・岩・深海は false、秋の夜長は true）を持つ situation の寄与に従って scene が描く。ライト・ダークのどちらの外観でも夜に見えるよう、scene は背景の光の直後・星と粒の前に、窓全面へ深い藍（rgb 0.03/0.05/0.14）の膜を1枚の quad で重ねる。膜の濃さは `stars::film(dark, presence)`（ライト 0.78・ダーク 0.30 に星と同じ presence を掛ける。presence 0 なら `None` で何も描かない）で、明るいライトのガラス（0.9 のグレー）でも暗い紺（各チャンネル 0.35 未満）になる。透明度低下の不透明モードでも同じ膜を使う。星の数 `stars::count(intensity, 窓の論理面積)` は、既定の窓（960×600）で控えめ260・標準450・派手650、窓が大きいと面積に比例して増え（既定より小さい窓は既定の数のまま）、段階ごとの上限（控えめ600・標準1000・派手1400＝`MAX_STARS`、1フレームの quad 数の上限）で止まる。星の番号の並びは窓の大きさにも段階にも依らず固定なので、低い段階も小さい窓も同じ空の先頭の部分集合で、窓を広げると末尾へ星が足されるだけ（既存の星は動かない）。scene は `bounds` の論理面積から数を決める。1フレームの描画は最大1400個の小さな quad で、確保もキャッシュもなく、不透明度が `MIN_VISIBLE` 未満の星は省く（星は表示粒の容量・`look::Budget` の mark／影の予算の外）。星 `i` の位置・大きさ・色・最大の明るさ・周期・位相は番号だけの純粋関数 `stars::star`：位置は粒の番号だけから決まる固定の分布で、x 一様、y は `0.98*u^1.8`（上寄りが密、下は疎）。直径は多くが0.6〜1.6px（立方で小さい側に偏る）、約15%の「明るい星」だけ1.4〜2.0px（窓の短辺÷600で拡縮）。色は外観に依らず常に明るい配色（深い藍の星のライト版は持たない。SPEC の「ライトでは深い色」規則の、秋の夜長の星と蛍に限る例外）：淡い青白80%・暖かい白12%・淡い橙8%で、明るい星の約45%は純白（どの色も最大チャンネルがほぼ1で白まで届く）。最大の明るさは通常0.58〜1、明るい星0.9〜1。きらめきは周期6〜40秒（対数一様）・位相は星ごと、`0.18+0.82*s`（`s` は正弦を0〜1にした値）で、暗い側の滞在は明るい側より短く、沈んでも0.18までと穏やか。reduced motion は最大の0.85倍で定常。暗い窓・寄与1での数値（試験が固定）：最も明るい星のピークはほぼ満値（250/255前後）、最も暗い星のピークでも140/255以上、どの瞬間も5〜7割の星が80/255を超える（既定窓の標準の空で平均約65%）。全体の明るさは `stars::presence(寄与, 息) = 寄与*(0.85+0.15*息)`（息はごく軽い揺らぎで、寄与1では0.85を下回らない）で、寄与が0なら何も描かず、不透明度 0.04 未満の星は quad を作らない。光・十字・ガラス玉の見た目は付けない。サブピクセルの quad はにじんで薄くなるため、`stars::pixel_quad` が1つ1つの星を物理ピクセルの整数の辺（1px以上）・格子上の位置へ丸め、3px以上だけ角を丸める（`window.scale_factor()` で換算。決定的で試験済み）。フレームごとの確保・キャッシュはない。8bitモードの後処理（`CIPixellate`）は1〜2pxの星を3pxのブロックへ平均するため、その間は星が薄くなる（描画側の仕様どおり）。
+
 ### 音質の確定方法
 
 音色係数・voice level・ノブ `initial` は、まず実音を作るための candidate として各 voice Module 内で明示的に扱う。保存 JSON 例を既定値の根拠にしない。candidate の値と変更理由を試聴記録へ残し、各声、端点、最大粒、最大重なり、連続 retarget の finite／peak／RMS／クリックを実経路で観測する。統計上 finite でも心地よいとは呼ばない。
@@ -480,7 +494,7 @@ pub struct VisualEvent {
     pub y: Normalized,
     pub strength: Normalized,
     pub radius: LogicalPixels,
-    pub shape: VisualShape,        // Point / Impact / SlowGlow
+    pub shape: VisualShape,        // Point / Impact / SlowGlow / Firefly
     pub lifetime: Duration,
     pub serial: u64,
 }

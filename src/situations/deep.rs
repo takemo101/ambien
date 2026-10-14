@@ -69,6 +69,7 @@ const BUBBLE_LEVEL: f32 = 0.05;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.12, 0.28, 0.48],
     shape: VisualShape::SlowGlow,
+    stars: false,
 };
 
 pub(super) fn definition() -> SituationDefinition {

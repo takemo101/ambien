@@ -28,6 +28,8 @@ GPUI がアプリの実行ループを持ち、シーンと設定はその上の
 
 [`src/situations/`](../src/situations/) が登録と雨／岩／深海固有の声・粒・揺らぎ・残響を持ち、[`src/audio/`](../src/audio/) のworkerが標準Deviceとconfig、声・固定配列・N声gain vectorを準備してstreamを開始する。callbackは単発lease借用の間だけengineとsample世界時計を進め、共通手動／自動slerp、到着基準の滞在とcallback単位の有限抽選budget、数値制御・受理通知・視覚リング・epoch専用error bitsetに触れる。混合後の音量と消音は独立して追従し、世界やシーンを停止しない。UIはDSPを所有しない。workerは受理mailboxを読み、出力・表示／再開対象・受理世代・失敗の離散変更だけを非RTの `AudioShared` とbounded wake経路で渡し、callbackからchannelへ送らない。自動表示はg²、同率は以前の表示、保存用の自動同率はdeparture。manual ack前はmainの最新targetを即表示する。実寄与gainsは時刻付き視覚stateで別に配送する。出力失敗時はworkerがgateを閉じてengineを回収し、凍結中も最新設定を受理できるが世界は進めない。シーンは既に受け入れたキャッシュとfade時刻を保持する。非可視シーンの更新は止め、復帰時は現在の生存イベントを読み直してからtimerを開始する。
 
+秋の夜長は、声が出した視覚イベント（蛍の寿命）と、描画側が使う蛍の明るさの式を、同じ純粋関数 `situations::bout_envelope`（虫1匹の長周期のうねり）で共有する。音側はその値で虫の声の大きさと鳴く頻度を、描画側は蛍の明るさを決めるため、音と光は別の乱数や時計を持たずに一致する。星空は視覚イベントではなく、situation の登録が持つ `stars` の印に従って scene が背景に描く固定上限の点の列で、各星の位置・色・きらめきは番号と世界時刻だけから決まり、situation の寄与に従って現れ、消える。
+
 復旧時も同じ engine と最新制御の transport を保持する。app owner の NSWorkspace observer と音声 worker の CoreAudio listener は stream から独立して生存し、native callback は容量固定の signal だけを更新する。worker が現在の標準出力を読み直し、旧 gate を永久に閉じて engine を回収し、必要な rate 準備・新しい stream／時刻対応を作る。同一 rate は声を再構築しない。凍結中も最新操作を受理し、候補 stream の準備失敗後は保持中の世代へ receipt を戻す。新 epoch は別 lease cell／error cell を持ち、古い callback・通知が新 engine を借用しない。通常の再準備と sleep は失敗表示と区別し、pause／停止時刻の失敗は同じ試行の再開で覆い隠さない。native 通知を契機とした一回の再試行に限り、一定周期の成功待ちや代用 rate はない。
 
 ## 操作から音と絵まで

@@ -9,7 +9,10 @@
 use std::f32::consts::TAU;
 
 use super::{Facet, Look, Mark, deepen, facet_glow, lighten, mix, seed};
-use crate::{controls::VisualIntensity, situations::VisualShape};
+use crate::{
+    controls::VisualIntensity,
+    situations::{VisualShape, bout_envelope},
+};
 
 /// What the scatter depends on. `opacity` is the particle's envelope for this frame.
 pub(super) struct Scatter {
@@ -115,7 +118,7 @@ pub(super) fn lead_ring_radius(shape: VisualShape, radius: f32, age: f32) -> f32
     match shape {
         VisualShape::Point => rain_unit(radius) * (2.0 + 15.0 * ease_out(age)),
         VisualShape::Impact => rock_unit(radius) * (2.5 + 13.0 * ease_out(age)),
-        VisualShape::SlowGlow => 0.0,
+        VisualShape::SlowGlow | VisualShape::Firefly => 0.0,
     }
 }
 
@@ -132,7 +135,117 @@ pub(super) fn scatter(look: &mut Look, s: &Scatter) {
         VisualShape::Point => rain(look, s, soft),
         VisualShape::Impact => rock(look, s, soft),
         VisualShape::SlowGlow => deep(look, s, soft),
+        VisualShape::Firefly => firefly(look, s, soft),
     }
+}
+
+/// The most a firefly strays from where it was lit, in logical pixels at the default window size
+/// (a 600 px short side): sideways either way (about a tenth of the default window's width),
+/// and in the lower-to-middle band, a good way up but only a little further down.
+const WANDER_SIDE: f32 = 90.0;
+const WANDER_UP: f32 = 100.0;
+const WANDER_DOWN: f32 = 35.0;
+/// Steps of the numeric integral of its heading; the same fixed number at every age, so the
+/// position is a smooth function of age.
+const WANDER_STEPS: u32 = 32;
+
+/// `limit * tanh(value / limit)`: close to `value` near zero, never beyond `limit`.
+fn squash(value: f32, limit: f32) -> f32 {
+    limit * (value / limit).tanh()
+}
+
+/// How far a firefly has wandered from where it was lit, in logical pixels at the default window
+/// size. It flies a path of its own length (90 to 180 px over its life, so a slow wanderer and a
+/// brisker one) whose heading turns smoothly: a start direction plus three slow sinusoids of
+/// unrelated rates, so it curves gently and never bends sharply or doubles back along a line. The
+/// reach is softly kept inside the band above, and the whole is a pure function of the event's
+/// serial and its age (0 when it is lit), with no random source in the painter.
+pub(super) fn firefly_drift(serial: u64, age: f32) -> [f32; 2] {
+    let age = age.clamp(0.0, 1.0);
+    if age == 0.0 {
+        return [0.0, 0.0];
+    }
+    let start = TAU * unit(serial, 1);
+    let length = 90.0 + 90.0 * unit(serial, 2);
+    // (turns over the life, swing in radians, phase), slowest and widest first.
+    let wave = |index: u64, turns: f32, swing: f32| {
+        (
+            turns * (0.8 + 0.4 * unit(serial, 10 + index)),
+            swing * (0.7 + 0.6 * unit(serial, 20 + index)),
+            TAU * unit(serial, 30 + index),
+        )
+    };
+    let waves = [wave(0, 0.8, 1.0), wave(1, 1.7, 0.35), wave(2, 2.8, 0.15)];
+    let heading = |at: f32| {
+        waves.iter().fold(start, |sum, (turns, swing, phase)| {
+            sum + swing * (TAU * turns * at + phase).sin()
+        })
+    };
+    let step = age / WANDER_STEPS as f32;
+    let mut at = [0.0_f32, 0.0];
+    for index in 0..WANDER_STEPS {
+        let angle = heading((index as f32 + 0.5) * step);
+        at[0] += angle.cos() * step * length;
+        at[1] += angle.sin() * step * length;
+    }
+    // Screen y grows downwards.
+    let down = at[1] >= 0.0;
+    [
+        squash(at[0], WANDER_SIDE),
+        squash(at[1], if down { WANDER_DOWN } else { WANDER_UP }),
+    ]
+}
+
+/// A firefly's decoration, on top of its core light and halo (which the look places at the
+/// firefly's drifted position): from standard a bright little lamp and a wide soft glow; vivid
+/// adds a faint trail of its recent positions, an out-of-focus disc beside it and a bloom.
+fn firefly(look: &mut Look, s: &Scatter, soft: f32) {
+    if s.intensity == VisualIntensity::Calm {
+        return;
+    }
+    // The core swells with the insect's song, exactly as the look sizes it.
+    let core = s.radius * (0.8 + 0.4 * bout_envelope(s.age));
+    let here = firefly_drift(s.serial, s.age);
+    // A firefly is always the bright night look (the look passes `dark` for it in any appearance).
+    let lamp = lighten(s.rgb, 0.55);
+    look.push(Mark::Dot {
+        offset: here,
+        radius: (core * 0.35).max(0.8),
+        rgb: lamp,
+        opacity: soft * 0.9,
+    });
+    halo(look, s, here, core * 5.5, soft * 0.45);
+    if s.intensity != VisualIntensity::Vivid {
+        return;
+    }
+    for step in 1..=3_u8 {
+        let behind = firefly_drift(s.serial, s.age - 0.015 * f32::from(step));
+        look.push(Mark::Dot {
+            offset: behind,
+            radius: (core * (0.32 - 0.07 * f32::from(step))).max(0.7),
+            rgb: s.rgb,
+            opacity: soft * 0.4 / f32::from(step),
+        });
+    }
+    let bearing = TAU * unit(s.serial, 5);
+    let distance = core * (2.2 + 1.4 * unit(s.serial, 6));
+    look.push(Mark::Haze {
+        offset: [
+            here[0] + bearing.cos() * distance,
+            here[1] + bearing.sin() * distance,
+        ],
+        radius: core * (1.4 + 0.8 * unit(s.serial, 7)),
+        rgb: s.rgb,
+        opacity: soft * 0.18,
+    });
+    // No additive blend: a firefly is always lit on the night scene, so a larger, lighter glow.
+    let (bloom, tone, size) = (lighten(s.rgb, 0.35), 0.28, 2.2);
+    look.push(Mark::Glow {
+        offset: here,
+        radius: core * size,
+        rgb: bloom,
+        opacity: soft * tone,
+    });
 }
 
 /// A drop landing: ripples spread out one after another and a crown of droplets is thrown up and
@@ -399,10 +512,11 @@ fn deep(look: &mut Look, s: &Scatter, soft: f32) {
 mod tests {
     use super::*;
 
-    const SHAPES: [VisualShape; 3] = [
+    const SHAPES: [VisualShape; 4] = [
         VisualShape::Point,
         VisualShape::Impact,
         VisualShape::SlowGlow,
+        VisualShape::Firefly,
     ];
     const LEVELS: [VisualIntensity; 3] = [
         VisualIntensity::Calm,
@@ -780,5 +894,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_fireflys_wander_turns_smoothly_stays_in_its_band_and_differs_from_firefly_to_firefly() {
+        let steps = 600;
+        let path = |serial: u64| -> Vec<[f32; 2]> {
+            (0..=steps)
+                .map(|step| firefly_drift(serial, step as f32 / steps as f32))
+                .collect()
+        };
+        let mut ends = std::collections::BTreeSet::new();
+        let (mut widest, mut sharpest) = (0.0_f32, 0.0_f32);
+        for serial in 1..=300_u64 {
+            let path = path(serial);
+            assert_eq!(path[0], [0.0, 0.0], "lit where it was born");
+            assert_eq!(path, self::path_again(serial, steps), "a pure function");
+            ends.insert(path[steps].map(f32::to_bits));
+            let mut previous: Option<[f32; 2]> = None;
+            for pair in path.windows(2) {
+                let velocity = [pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]];
+                // Never more than a gentle stroll: 180 px over the life is 0.3 px a step.
+                assert!(
+                    velocity[0].hypot(velocity[1]) < 0.4,
+                    "{serial}: {velocity:?}"
+                );
+                // Slowing to a crawl against the soft edge is not a bend; only consecutive
+                // steps of a real stroll are compared.
+                if velocity[0].hypot(velocity[1]) > 0.04 {
+                    if let Some(before) = previous {
+                        let turn = (velocity[1].atan2(velocity[0]) - before[1].atan2(before[0]))
+                            .rem_euclid(TAU);
+                        let turn = turn.min(TAU - turn);
+                        sharpest = sharpest.max(turn);
+                    }
+                    previous = Some(velocity);
+                } else {
+                    previous = None;
+                }
+            }
+            assert!(path.iter().all(|p| p[0].abs() <= WANDER_SIDE));
+            assert!(
+                path.iter()
+                    .all(|p| (-WANDER_UP..=WANDER_DOWN).contains(&p[1]))
+            );
+            let sideways = path.iter().map(|p| p[0].abs()).fold(0.0, f32::max);
+            widest = widest.max(sideways);
+        }
+        // No sharp bend anywhere (the heading changes by well under a tenth of a turn per
+        // 1/600 of the life).
+        assert!(sharpest < 0.25, "sharpest turn {sharpest}");
+        // A tenth of a 960 px window is 96 px: the wander can use most of it, never more.
+        assert!(widest > 30.0 && widest <= 90.0, "{widest}");
+        assert!(ends.len() > 280, "every firefly goes its own way");
+    }
+
+    fn path_again(serial: u64, steps: usize) -> Vec<[f32; 2]> {
+        (0..=steps)
+            .map(|step| firefly_drift(serial, step as f32 / steps as f32))
+            .collect()
     }
 }

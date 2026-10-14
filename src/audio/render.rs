@@ -610,6 +610,14 @@ mod tests {
     use super::*;
     use crate::audio::transport::EVENT_CAPACITY;
 
+    /// Whether the voices of `involved` contribute and every other registered situation's does
+    /// not: a selection arc among some situations moves only those, however many are registered.
+    fn exactly_contributing(voices: &[PreparedVoice], involved: &[SituationIndex]) -> bool {
+        voices
+            .iter()
+            .all(|voice| voice.contributing == involved.contains(&voice.index))
+    }
+
     fn prepare_engine(
         registry: Arc<Registry>,
         controls: ControlState,
@@ -1420,6 +1428,8 @@ mod tests {
             let mut b_events = [None; crate::audio::transport::VISIBLE_CAPACITY];
             let mut silent_event_observed = false;
             let mut audible_energy = 0.0_f64;
+            // Allocated here: the measured callback region below must stay heap-free.
+            let mut before = vec![0.0; count];
             let (_, heap) = crate::rt_alloc::measure(|| {
                 for block in 0..10 {
                     if block == 5 {
@@ -1433,7 +1443,6 @@ mod tests {
                     output_f32(&edited, &mut b, 2, &info, &errors);
                     assert_eq!(a, b);
                 }
-                let mut before = [0.0; 3];
                 before.copy_from_slice(edited.try_borrow().unwrap().engine().mix.gains());
                 assert!(before[rain.get()] > 0.0 && before[rock.get()] > 0.0);
                 assert_eq!(before[deep.get()], 0.0);
@@ -1464,9 +1473,13 @@ mod tests {
                 {
                     let mut guard = edited.try_borrow().unwrap();
                     let engine = guard.engine();
-                    assert!(engine.voices.iter().all(|voice| voice.contributing));
-                    for (gain, old) in engine.mix.gains().iter().zip(before) {
-                        assert!(*gain > 0.0);
+                    assert!(exactly_contributing(&engine.voices, &[rain, rock, deep]));
+                    for (index, (gain, old)) in engine.mix.gains().iter().zip(&before).enumerate() {
+                        assert_eq!(
+                            *gain > 0.0,
+                            [rain, rock, deep].iter().any(|s| s.get() == index),
+                            "only the three situations of the arc are audible (index {index})"
+                        );
                         // Numerical one-frame continuity bound, not a listening
                         // or correlated-waveform loudness guarantee.
                         assert!((*gain - old).abs() <= std::f64::consts::PI / f64::from(rate));
@@ -1552,7 +1565,10 @@ mod tests {
                     let edited_engine = edited_guard.engine();
                     assert_eq!(reference_engine.mix.gains(), edited_engine.mix.gains());
                     assert_eq!(reference_engine.world(), edited_engine.world());
-                    assert!(edited_engine.voices.iter().all(|voice| voice.contributing));
+                    assert!(exactly_contributing(
+                        &edited_engine.voices,
+                        &[rain, rock, deep]
+                    ));
                     assert!(edited_engine.mix.is_crossing());
                 }
                 let final_info = callback_info(3_000_000_000 - 1_000_000_000 / u64::from(rate));
@@ -1621,15 +1637,10 @@ mod tests {
                         );
                     }
                     if turn > 0 {
-                        assert!(
-                            edited
-                                .try_borrow()
-                                .unwrap()
-                                .engine()
-                                .voices
-                                .iter()
-                                .all(|voice| voice.contributing)
-                        );
+                        assert!(exactly_contributing(
+                            &edited.try_borrow().unwrap().engine().voices,
+                            &[rain, rock, deep]
+                        ));
                     }
                 }
                 // The thousandth rapid intent is rain, already audible in the
@@ -1767,6 +1778,7 @@ mod tests {
 
         for (old_rate, new_rate) in [(48_000, 32_000), (44_100, 96_000)] {
             let registry = Arc::new(Registry::new().unwrap());
+            let rain = registry.resolve("rain").unwrap();
             let rock = registry.resolve("rock").unwrap();
             let deep = registry.resolve("deep").unwrap();
             let count = registry.definitions().len();
@@ -1800,7 +1812,14 @@ mod tests {
             old.close();
             let mut previous = old.try_take().unwrap();
             let before = previous.mix.gains().to_vec();
-            assert!(before.iter().all(|gain| *gain > 0.0));
+            assert!(
+                before[rain.get()] > 0.0 && before[rock.get()] > 0.0 && before[deep.get()] > 0.0,
+                "the three situations of the arc overlap"
+            );
+            assert!(
+                exactly_contributing(&previous.voices, &[rain, rock, deep]),
+                "no other registered situation is pulled in"
+            );
             assert_eq!(previous.movement, Movement::ManualCrossing { target: deep });
             previous.prepare_output_epoch(new_rate).unwrap();
             let next_epoch = StreamEpoch::new(24).unwrap();
@@ -1824,7 +1843,7 @@ mod tests {
                     let engine = guard.engine();
                     assert!(engine.mix.is_crossing());
                     assert_eq!(engine.movement, Movement::ManualCrossing { target: deep });
-                    assert!(engine.voices.iter().all(|voice| voice.contributing));
+                    assert!(exactly_contributing(&engine.voices, &[rain, rock, deep]));
                 }
                 output_f32(&next, &mut last, 2, &callback_info(2_500_000_000), &errors);
                 {
