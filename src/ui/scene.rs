@@ -496,6 +496,7 @@ impl SceneView {
                         radius: event.radius.get(),
                         strength: event.strength.get(),
                         serial: event.serial,
+                        y: event.y.get(),
                         rgb: color,
                         large: event.large,
                         intensity: self.intensity,

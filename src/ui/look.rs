@@ -256,6 +256,8 @@ pub(crate) struct ParticleInput {
     pub(crate) radius: f32,
     pub(crate) strength: f32,
     pub(crate) serial: u64,
+    /// The particle's height in the window (0 top, 1 bottom): a firefly's wander stays inside.
+    pub(crate) y: f32,
     pub(crate) rgb: [f32; 3],
     /// A large particle is drawn at every intensity; a small one only above calm.
     pub(crate) large: bool,
@@ -729,7 +731,7 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
     // A firefly wanders from where it was lit; every other light stays where it was born, and
     // reduced motion keeps even a firefly still.
     let centre = if input.shape == VisualShape::Firefly && !still {
-        firefly_drift(input.serial, age)
+        firefly_drift(input.serial, age, input.y)
     } else {
         [0.0, 0.0]
     };
@@ -804,6 +806,7 @@ pub(crate) fn look(input: &ParticleInput, motion: Motion) -> Look {
                 age,
                 opacity,
                 serial: input.serial,
+                y: input.y,
                 dark,
             },
         );
@@ -833,6 +836,7 @@ mod tests {
             radius: 6.0,
             strength,
             serial,
+            y: 0.5,
             large: true,
             intensity: VisualIntensity::Calm,
             dark: true,
@@ -1425,6 +1429,7 @@ mod tests {
                                             radius,
                                             strength,
                                             serial: u64::MAX,
+                                            y: 0.5,
                                             large,
                                             intensity,
                                             dark,
@@ -1747,14 +1752,14 @@ mod tests {
                     - values.iter().cloned().fold(f32::MAX, f32::min)
             };
             // A few per cent of the default window's width, never beyond a tenth of it (96 px),
-            // and only a little way down from where it was lit (the lower-to-middle band).
+            // and up or down alike, 100 px at most (lit at mid-height, the window has room).
             assert!(
                 range(&xs) > 12.0 && range(&xs) <= 180.0,
                 "wanders sideways: {}",
                 range(&xs)
             );
             assert!(xs.iter().all(|x| x.abs() <= 90.0));
-            assert!(ys.iter().all(|y| (-100.0..=35.0).contains(y)));
+            assert!(ys.iter().all(|y| (-100.0..=100.0).contains(y)));
             assert!(range(&ys) > 3.0, "and up and down: {}", range(&ys));
             for age in [0.0, 0.3, 0.8, 1.0] {
                 assert_eq!(
@@ -1876,6 +1881,38 @@ mod tests {
                 .map(|(i, m)| budget.allows(i, m))
                 .collect();
             assert!(allowed[0]);
+        }
+    }
+
+    #[test]
+    fn sixteen_fireflies_fit_the_mark_and_shadow_budgets_whole_at_every_level_and_age() {
+        // Up to sixteen fireflies glow at once (one per bout): each keeps every one of its marks
+        // and the frame stays inside both budgets, in any appearance and with reduced motion.
+        for intensity in LEVELS {
+            for dark in [true, false] {
+                for motion in [Motion::Full, Motion::Reduced] {
+                    for age in [0.05_f32, 0.3, 0.5, 0.8, 0.97] {
+                        let marks = marks_of(
+                            &ParticleInput {
+                                age,
+                                ..at(VisualShape::Firefly, intensity, dark)
+                            },
+                            motion,
+                        );
+                        let shadows = marks.iter().filter(|mark| is_shadow(mark)).count();
+                        let mut budget = Budget::new(16);
+                        let drawn = marks
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, mark)| budget.allows(*index, mark))
+                            .count();
+                        assert_eq!(drawn, marks.len(), "{intensity:?} dark {dark} age {age}");
+                        assert!(marks.len() * 16 <= MARK_BUDGET, "{} marks", marks.len());
+                        assert!(shadows * 16 <= SHADOW_BUDGET, "{shadows} shadows");
+                        assert!(marks.len() <= MAX_MARKS);
+                    }
+                }
+            }
         }
     }
 }

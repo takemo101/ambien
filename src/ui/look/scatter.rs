@@ -25,6 +25,8 @@ pub(super) struct Scatter {
     pub(super) age: f32,
     pub(super) opacity: f32,
     pub(super) serial: u64,
+    /// The particle's height in the window (0 top, 1 bottom).
+    pub(super) y: f32,
     /// The window is on a dark appearance.
     pub(super) dark: bool,
 }
@@ -140,11 +142,16 @@ pub(super) fn scatter(look: &mut Look, s: &Scatter) {
 }
 
 /// The most a firefly strays from where it was lit, in logical pixels at the default window size
-/// (a 600 px short side): sideways either way (about a tenth of the default window's width),
-/// and in the lower-to-middle band, a good way up but only a little further down.
+/// (a 600 px short side): sideways either way (about a tenth of the default window's width) and
+/// up or down alike, but never out of the window: it stops short of the top and bottom edges by
+/// `WINDOW_MARGIN` of the short side, so a firefly lit high may wander down and one lit low up.
 const WANDER_SIDE: f32 = 90.0;
-const WANDER_UP: f32 = 100.0;
-const WANDER_DOWN: f32 = 35.0;
+const WANDER_VERTICAL: f32 = 100.0;
+/// Share of the window's height kept clear above and below the wandering firefly (the short
+/// side is the window's height in any window at least as wide as it is tall; in a taller one
+/// the limit is only more cautious).
+const WINDOW_MARGIN: f32 = 0.06;
+const SHORT_SIDE: f32 = 600.0;
 /// Steps of the numeric integral of its heading; the same fixed number at every age, so the
 /// position is a smooth function of age.
 const WANDER_STEPS: u32 = 32;
@@ -160,7 +167,7 @@ fn squash(value: f32, limit: f32) -> f32 {
 /// unrelated rates, so it curves gently and never bends sharply or doubles back along a line. The
 /// reach is softly kept inside the band above, and the whole is a pure function of the event's
 /// serial and its age (0 when it is lit), with no random source in the painter.
-pub(super) fn firefly_drift(serial: u64, age: f32) -> [f32; 2] {
+pub(super) fn firefly_drift(serial: u64, age: f32, y: f32) -> [f32; 2] {
     let age = age.clamp(0.0, 1.0);
     if age == 0.0 {
         return [0.0, 0.0];
@@ -188,12 +195,15 @@ pub(super) fn firefly_drift(serial: u64, age: f32) -> [f32; 2] {
         at[0] += angle.cos() * step * length;
         at[1] += angle.sin() * step * length;
     }
-    // Screen y grows downwards.
-    let down = at[1] >= 0.0;
-    [
-        squash(at[0], WANDER_SIDE),
-        squash(at[1], if down { WANDER_DOWN } else { WANDER_UP }),
-    ]
+    // Screen y grows downwards. How far it may go either way is what is left of the window
+    // (inside the margin) from where it was lit, at most `WANDER_VERTICAL`.
+    let room = |share: f32| (share * SHORT_SIDE).clamp(1.0, WANDER_VERTICAL);
+    let limit = if at[1] >= 0.0 {
+        room(1.0 - WINDOW_MARGIN - y)
+    } else {
+        room(y - WINDOW_MARGIN)
+    };
+    [squash(at[0], WANDER_SIDE), squash(at[1], limit)]
 }
 
 /// A firefly's decoration, on top of its core light and halo (which the look places at the
@@ -205,7 +215,7 @@ fn firefly(look: &mut Look, s: &Scatter, soft: f32) {
     }
     // The core swells with the insect's song, exactly as the look sizes it.
     let core = s.radius * (0.8 + 0.4 * bout_envelope(s.age));
-    let here = firefly_drift(s.serial, s.age);
+    let here = firefly_drift(s.serial, s.age, s.y);
     // A firefly is always the bright night look (the look passes `dark` for it in any appearance).
     let lamp = lighten(s.rgb, 0.55);
     look.push(Mark::Dot {
@@ -219,7 +229,7 @@ fn firefly(look: &mut Look, s: &Scatter, soft: f32) {
         return;
     }
     for step in 1..=3_u8 {
-        let behind = firefly_drift(s.serial, s.age - 0.015 * f32::from(step));
+        let behind = firefly_drift(s.serial, s.age - 0.015 * f32::from(step), s.y);
         look.push(Mark::Dot {
             offset: behind,
             radius: (core * (0.32 - 0.07 * f32::from(step))).max(0.7),
@@ -552,6 +562,7 @@ mod tests {
                 age,
                 opacity: 0.8,
                 serial: 12345,
+                y: 0.5,
                 dark,
             },
         );
@@ -897,19 +908,18 @@ mod tests {
     }
 
     #[test]
-    fn a_fireflys_wander_turns_smoothly_stays_in_its_band_and_differs_from_firefly_to_firefly() {
+    fn a_fireflys_wander_turns_smoothly_stays_inside_the_window_and_differs_from_firefly_to_firefly()
+     {
         let steps = 600;
-        let path = |serial: u64| -> Vec<[f32; 2]> {
-            (0..=steps)
-                .map(|step| firefly_drift(serial, step as f32 / steps as f32))
-                .collect()
-        };
         let mut ends = std::collections::BTreeSet::new();
         let (mut widest, mut sharpest) = (0.0_f32, 0.0_f32);
+        let (mut highest, mut lowest) = (0.0_f32, 0.0_f32);
         for serial in 1..=300_u64 {
-            let path = path(serial);
+            // Lit anywhere from the top tenth to the bottom tenth of the window.
+            let y = 0.10 + 0.80 * ((serial * 7) % 101) as f32 / 100.0;
+            let path = path_again(serial, y, steps);
             assert_eq!(path[0], [0.0, 0.0], "lit where it was born");
-            assert_eq!(path, self::path_again(serial, steps), "a pure function");
+            assert_eq!(path, self::path_again(serial, y, steps), "a pure function");
             ends.insert(path[steps].map(f32::to_bits));
             let mut previous: Option<[f32; 2]> = None;
             for pair in path.windows(2) {
@@ -934,24 +944,58 @@ mod tests {
                 }
             }
             assert!(path.iter().all(|p| p[0].abs() <= WANDER_SIDE));
+            // Always inside the window, with its margin (final height in a 600 px window).
             assert!(
-                path.iter()
-                    .all(|p| (-WANDER_UP..=WANDER_DOWN).contains(&p[1]))
+                path.iter().all(|p| (WINDOW_MARGIN * 600.0 - 0.01
+                    ..=(1.0 - WINDOW_MARGIN) * 600.0 + 0.01)
+                    .contains(&(y * 600.0 + p[1]))),
+                "{serial} at {y}"
             );
+            assert!(path.iter().all(|p| p[1].abs() <= WANDER_VERTICAL));
             let sideways = path.iter().map(|p| p[0].abs()).fold(0.0, f32::max);
             widest = widest.max(sideways);
+            if (0.4..=0.6).contains(&y) {
+                highest = highest.min(path.iter().map(|p| p[1]).fold(0.0, f32::min));
+                lowest = lowest.max(path.iter().map(|p| p[1]).fold(0.0, f32::max));
+            }
         }
         // No sharp bend anywhere (the heading changes by well under a tenth of a turn per
         // 1/600 of the life).
         assert!(sharpest < 0.25, "sharpest turn {sharpest}");
         // A tenth of a 960 px window is 96 px: the wander can use most of it, never more.
         assert!(widest > 30.0 && widest <= 90.0, "{widest}");
+        // From mid-window it wanders both up and down, a good way either way.
+        assert!(highest < -40.0 && lowest > 40.0, "{highest} {lowest}");
         assert!(ends.len() > 280, "every firefly goes its own way");
     }
 
-    fn path_again(serial: u64, steps: usize) -> Vec<[f32; 2]> {
+    #[test]
+    fn a_firefly_lit_near_an_edge_stays_clear_of_it_and_can_go_the_other_way() {
+        for (y, up_room, down_room) in [(0.10, 24.0, 100.0), (0.90, 100.0, 24.0)] {
+            let (mut up, mut down) = (0.0_f32, 0.0_f32);
+            for serial in 1..=300_u64 {
+                for step in 0..=300 {
+                    let offset = firefly_drift(serial, step as f32 / 300.0, y)[1];
+                    up = up.min(offset);
+                    down = down.max(offset);
+                }
+            }
+            assert!(
+                -up <= up_room + 0.01 && down <= down_room + 0.01,
+                "{y}: {up} {down}"
+            );
+            // The way into the window is open: a good stretch of it is used.
+            if y < 0.5 {
+                assert!(down > 50.0, "{y}: {down}");
+            } else {
+                assert!(-up > 50.0, "{y}: {up}");
+            }
+        }
+    }
+
+    fn path_again(serial: u64, y: f32, steps: usize) -> Vec<[f32; 2]> {
         (0..=steps)
-            .map(|step| firefly_drift(serial, step as f32 / steps as f32))
+            .map(|step| firefly_drift(serial, step as f32 / steps as f32, y))
             .collect()
     }
 }
