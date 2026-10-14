@@ -1,7 +1,8 @@
-//! 秋の夜長: autumn-field insects and an occasional soft wind.
+//! 秋の夜長: autumn-field insects and a quiet, continuously undulating wind.
 //!
-//! Each insect is a fixed-pool singer with a species, a pitch, a stereo position and two levels of
-//! modulation. The SHORT period is the repeat of its phrase (a bell ring, a trill, three notes, a
+//! Each insect is a fixed-pool singer with a species, a pitch, a stereo position and three levels of
+//! modulation. The FASTEST level is the wing-stroke pulse of its species (tens of hertz, a few
+//! per cent faster at the top of the swell). The SHORT period is the repeat of its phrase (a bell ring, a trill, three notes, a
 //! rattle, a tap). The LONG period is a "bout": the insect starts singing, sings for 4 to 12
 //! seconds and stops, its loudness and calling rate following [`bout_envelope`]. The same pure
 //! function drives the firefly the picture draws for that bout (one firefly per bout, at the
@@ -162,16 +163,19 @@ const MATSUMUSHI_STARTS: [f32; 3] = [0.0, 0.27, 0.55];
 const MATSUMUSHI_LENGTHS: [f32; 3] = [0.09, 0.12, 0.24];
 const MATSUMUSHI_RATIOS: [f32; 3] = [1.06, 0.93, 1.0];
 const MATSUMUSHI_LEVELS: [f32; 3] = [0.9, 0.7, 1.0];
-// Kutsuwamushi: volley spacing, pulses per volley, their spacing and length.
+// Kutsuwamushi: volley spacing and length (the pulses inside it are the rattle's grains), and
+// the second partial and the noise of its rough voice.
 const KUTSUWAMUSHI_SPACING: f32 = 0.34;
-const KUTSUWAMUSHI_PULSES: u32 = 7;
-const KUTSUWAMUSHI_PULSE_SPACING: f32 = 0.018;
-const KUTSUWAMUSHI_PULSE: f32 = 0.011;
-const KUTSUWAMUSHI_VOLLEY: f32 =
-    KUTSUWAMUSHI_PULSE_SPACING * (KUTSUWAMUSHI_PULSES - 1) as f32 + KUTSUWAMUSHI_PULSE;
-// A rattle is a noisy buzz: a second partial a little above the first.
-const KUTSUWAMUSHI_PARTIAL: f32 = 1.1;
-const KANETATAKI_PING: f32 = 0.09;
+const KUTSUWAMUSHI_VOLLEY: f32 = 0.20;
+const KUTSUWAMUSHI_PARTIAL: f32 = 1.08;
+const ROUGH_HZ: f32 = 120.0;
+const ROUGH_DEPTH: f32 = 0.3;
+// Each matsumushi note's pulse speed and depth relative to the insect's own.
+const MATSUMUSHI_PULSE_RATES: [f32; 3] = [1.08, 0.92, 1.0];
+const MATSUMUSHI_PULSE_DEPTHS: [f32; 3] = [0.85, 1.15, 1.0];
+// Kanetataki: how long one tick rings (each tick draws its own).
+const KANETATAKI_RING_MIN: f32 = 0.08;
+const KANETATAKI_RING_MAX: f32 = 0.11;
 
 impl Species {
     /// The SPEC's frequency band of the species, in Hz (checked by the spectrum tests).
@@ -194,7 +198,7 @@ impl Species {
             Self::Suzumushi => (4_150.0, 5_350.0),
             Self::Cricket => (3_150.0, 4_350.0),
             Self::Matsumushi => (3_350.0, 3_600.0),
-            Self::Kutsuwamushi => (2_150.0, 2_550.0),
+            Self::Kutsuwamushi => (2_150.0, 2_450.0),
             Self::Kanetataki => (6_300.0, 7_700.0),
         }
     }
@@ -224,10 +228,10 @@ impl Species {
     /// differences are the point: kutsuwamushi and kanetataki are the small, quiet ones.
     const fn level(self) -> f32 {
         match self {
-            Self::Suzumushi => 0.042,
-            Self::Cricket => 0.048,
-            Self::Matsumushi => 0.045,
-            Self::Kutsuwamushi => 0.025,
+            Self::Suzumushi => 0.0525,
+            Self::Cricket => 0.082,
+            Self::Matsumushi => 0.061,
+            Self::Kutsuwamushi => 0.0425,
             Self::Kanetataki => 0.022,
         }
     }
@@ -237,6 +241,19 @@ impl Species {
         match self {
             Self::Kutsuwamushi => 1.8,
             _ => 1.0,
+        }
+    }
+
+    /// The species' wing-stroke pulse: the range of its rate (Hz) and of its depth. `None` for
+    /// the kanetataki, which has no fast pulse.
+    const fn pulse(self) -> Option<((f32, f32), (f32, f32))> {
+        match self {
+            Self::Suzumushi => Some(((50.0, 90.0), (0.30, 0.50))),
+            Self::Cricket => Some(((30.0, 50.0), (0.82, 0.95))),
+            // Three notes, each with its own speed and depth (see the per-note scales).
+            Self::Matsumushi => Some(((27.5, 31.5), (0.40, 0.55))),
+            Self::Kutsuwamushi => Some(((15.0, 30.0), (0.80, 0.95))),
+            Self::Kanetataki => None,
         }
     }
 
@@ -341,14 +358,70 @@ fn phrase_sound(species: Species, phrase: &Phrase) -> (f32, f32) {
                 return (0.0, 1.0);
             }
             let local = t - volley as f32 * spacing;
-            let pulse = (local / KUTSUWAMUSHI_PULSE_SPACING) as u32;
-            if pulse >= KUTSUWAMUSHI_PULSES {
+            // One rattling volley: a quick start, a held body (the pulses are its grains) and a
+            // short fall.
+            if local >= KUTSUWAMUSHI_VOLLEY {
                 return (0.0, 1.0);
             }
-            let inside = local - pulse as f32 * KUTSUWAMUSHI_PULSE_SPACING;
-            (hann(inside, KUTSUWAMUSHI_PULSE), 1.0)
+            (
+                smooth(local / 0.006) * smooth((KUTSUWAMUSHI_VOLLEY - local) / 0.045),
+                1.0,
+            )
         }
-        Species::Kanetataki => (tap(t, KANETATAKI_PING, 0.0015), 1.0),
+        Species::Kanetataki => (tap(t, phrase.ring, 0.0015), 1.0),
+    }
+}
+
+/// The pulse's rate follows the swell (warmer, faster) by up to this share either way, and
+/// wanders slowly by this share.
+const PULSE_WARMTH: f64 = 0.08;
+const PULSE_WANDER: f64 = 0.03;
+/// The deepest a pulse may be (never fully off).
+const MAX_DEPTH: f32 = 0.97;
+/// Share of a pulse period spent rising: a wing stroke bites fast and dies away a little slower.
+const PULSE_ATTACK: f32 = 0.28;
+/// A suzumushi's pitch rises by this share (0.4%) at the top of each stroke.
+const SUZUMUSHI_WOBBLE: f32 = 0.004;
+
+/// One wing-stroke pulse over its period (`p` in 0..1): 0 at both ends, 1 at the top, a quick
+/// smooth rise and a slightly longer smooth fall, so there is no step anywhere.
+fn pulse_shape(p: f32) -> f32 {
+    if p < PULSE_ATTACK {
+        smooth(p / PULSE_ATTACK)
+    } else {
+        let q = smooth((1.0 - p) / (1.0 - PULSE_ATTACK));
+        q * q.sqrt()
+    }
+}
+
+/// The pitch factor of a species at the top of its stroke: only the suzumushi's bell wobbles.
+fn pitch_wobble(species: Species, shape: f32) -> f32 {
+    if species == Species::Suzumushi {
+        1.0 + SUZUMUSHI_WOBBLE * shape
+    } else {
+        1.0
+    }
+}
+
+/// Which grain of the phrase a moment belongs to and how that grain scales the pulse: its rate
+/// and depth. Each cricket chirp and kutsuwamushi volley is a grain, so its strokes start afresh;
+/// each of a matsumushi's three notes also has a speed and depth of its own.
+fn stroke_context(species: Species, t: f32, tempo: f32) -> (u32, f32, f32) {
+    match species {
+        Species::Cricket => ((t / (CRICKET_SPACING * tempo)) as u32, 1.0, 1.0),
+        Species::Kutsuwamushi => ((t / (KUTSUWAMUSHI_SPACING * tempo)) as u32, 1.0, 1.0),
+        Species::Matsumushi => {
+            let note = (0..3)
+                .rev()
+                .find(|note| t >= MATSUMUSHI_STARTS[*note] * tempo)
+                .unwrap_or(0);
+            (
+                note as u32,
+                MATSUMUSHI_PULSE_RATES[note],
+                MATSUMUSHI_PULSE_DEPTHS[note],
+            )
+        }
+        _ => (0, 1.0, 1.0),
     }
 }
 
@@ -390,6 +463,22 @@ struct Insect {
     phrase: Phrase,
     phase: f32,
     partial_phase: f32,
+    /// The wing-stroke pulse: this insect's own rate (Hz, before the swell and wander) and depth,
+    /// the rate in use now, the phase (cycles, f64), the grain it belongs to, and its last gain.
+    pulse_base: f64,
+    pulse_depth: f32,
+    pulse_rate: f64,
+    pulse_phase: f64,
+    pulse_note: u32,
+    /// Rough voice (kutsuwamushi): the one-pole coefficient and unit-spread gain for the rate.
+    rough_pole: f32,
+    rough_gain: f32,
+    /// A slow wander of the pulse rate: its period (s) and phase.
+    wander_period: f64,
+    wander_phase: f64,
+    /// The noise of a rough voice (kutsuwamushi): generator and one-pole state.
+    rng: u64,
+    rough: f32,
 }
 
 impl Insect {
@@ -413,7 +502,20 @@ impl Insect {
         let drift_period = 17.0 + 28.0 * random.unit();
         let drift_phase = std::f64::consts::TAU * random.unit();
         let rest_remaining = 0.5 + 9.0 * random.unit();
-        Self {
+        // Its wing-stroke pulse (rate and depth within the species' range) and the slow wander of
+        // that rate, from its own generator, so the pulse never disturbs the draws above or the
+        // bouts after.
+        let mut pulse_random = WorldRandom::new(splitmix(seed ^ 0x9015_e5ed ^ index as u64));
+        let (pulse_base, pulse_depth) = match species.pulse() {
+            Some(((rate_low, rate_high), (depth_low, depth_high))) => (
+                f64::from(rate_low + (rate_high - rate_low) * pulse_random.unit() as f32),
+                depth_low + (depth_high - depth_low) * pulse_random.unit() as f32,
+            ),
+            None => (0.0, 0.0),
+        };
+        let wander_period = 9.0 + 14.0 * pulse_random.unit();
+        let wander_phase = TAU64 * pulse_random.unit();
+        let mut insect = Self {
             species,
             index,
             random,
@@ -435,7 +537,20 @@ impl Insect {
             phrase: Phrase::idle(),
             phase: 0.0,
             partial_phase: 0.0,
-        }
+            pulse_base,
+            pulse_depth,
+            pulse_rate: pulse_base,
+            pulse_phase: 0.0,
+            pulse_note: 0,
+            rough_pole: 0.0,
+            rough_gain: 1.0,
+            wander_period,
+            wander_phase,
+            rng: splitmix(seed ^ 0x5eed ^ index as u64) | 1,
+            rough: 0.0,
+        };
+        insect.set_rate(48_000);
+        insect
     }
 
     fn singing(&self) -> bool {
@@ -451,6 +566,15 @@ impl Insect {
     /// above `i / pool`.
     fn enabled(&self, moment: &Moment) -> bool {
         moment.knob * moment.pool as f32 > self.index as f32
+    }
+
+    /// The pulse rate now: the insect's own, up to 8% faster at the top of the bout's swell and
+    /// 8% slower at its ends (warmer, faster), and wandering slowly by 3% with the world time.
+    fn update_pulse(&mut self, time: f64) {
+        let warmth = 1.0 + PULSE_WARMTH * (2.0 * f64::from(self.envelope) - 1.0);
+        let wander =
+            1.0 + PULSE_WANDER * (TAU64 * time / self.wander_period + self.wander_phase).sin();
+        self.pulse_rate = self.pulse_base * warmth * wander;
     }
 
     /// Advance the world by one sample. Returns +1 if a bout started, -1 if one ended. A bout in
@@ -486,6 +610,7 @@ impl Insect {
             0.0
         };
         if self.phrase.sounding() {
+            self.update_pulse(moment.time);
             self.phrase.age += moment.delta;
         } else if self.singing() {
             let speed = if self.species.steady() {
@@ -580,10 +705,15 @@ impl Insect {
                 );
             }
             Species::Kanetataki => {
-                phrase.length = f64::from(KANETATAKI_PING);
+                // Each tick rings a little differently (and its interval wobbles a little more).
+                phrase.ring = KANETATAKI_RING_MIN
+                    + (KANETATAKI_RING_MAX - KANETATAKI_RING_MIN) * self.random.unit() as f32;
+                phrase.length = f64::from(phrase.ring);
             }
         }
         self.phrase = phrase;
+        self.pulse_phase = 0.0;
+        self.pulse_note = 0;
         self.phrases_in_bout += 1;
         let wobble = if self.species.steady() { 0.01 } else { 0.05 };
         self.gap_remaining = f64::from(self.gap_base)
@@ -599,7 +729,8 @@ impl Insect {
         }
     }
 
-    /// One mono sample of the insect: the phrase's pulse shape, times the bout's swell.
+    /// One mono sample of the insect: the phrase's shape, times the wing-stroke pulse, times the
+    /// bout's swell.
     fn render(&mut self, sample_rate: f32) -> f32 {
         if !self.phrase.sounding() || self.envelope <= 0.0 {
             return 0.0;
@@ -608,21 +739,71 @@ impl Insect {
         if amplitude <= 0.0 {
             return 0.0;
         }
-        let frequency = (self.phrase.pitch * ratio).min(sample_rate * 0.40);
+        // The wing stroke belongs to a grain (a cricket's chirp, a matsumushi note, a
+        // kutsuwamushi volley): which one and how it scales the pulse.
+        let (note, rate_scale, depth_scale) =
+            stroke_context(self.species, self.phrase.age as f32, self.phrase.tempo);
+        self.voice_sample(amplitude, ratio, note, rate_scale, depth_scale, sample_rate)
+    }
+
+    /// The voice itself, given the phrase's amplitude and pitch ratio and the grain's pulse
+    /// scales: the carrier (with the species' wobble, partial and roughness) under the
+    /// wing-stroke pulse, whose phase restarts with each grain. Kanetataki has no pulse.
+    fn voice_sample(
+        &mut self,
+        amplitude: f32,
+        ratio: f32,
+        note: u32,
+        rate_scale: f32,
+        depth_scale: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        if note != self.pulse_note {
+            self.pulse_note = note;
+            self.pulse_phase = 0.0;
+        }
+        let (gain, shape) = if self.species.pulse().is_some() {
+            self.pulse_phase = (self.pulse_phase
+                + self.pulse_rate * f64::from(rate_scale) / f64::from(sample_rate))
+            .fract();
+            let shape = pulse_shape(self.pulse_phase as f32);
+            let depth = (self.pulse_depth * depth_scale).min(MAX_DEPTH);
+            (1.0 - depth + depth * shape, shape)
+        } else {
+            (1.0, 0.0)
+        };
+        let wobble = pitch_wobble(self.species, shape);
+        let frequency = (self.phrase.pitch * ratio * wobble).min(sample_rate * 0.40);
         self.phase += TAU * frequency / sample_rate;
         if self.phase >= TAU {
             self.phase -= TAU;
         }
         let mut sample = self.phase.sin();
         if self.species == Species::Kutsuwamushi {
-            // The rattle is rough: a second partial just above the first.
+            // The rattle is rough: a second partial just above the first, and noise in its
+            // loudness (a few hundred hertz of it, so it stays around the carrier).
             self.partial_phase += TAU * frequency * KUTSUWAMUSHI_PARTIAL / sample_rate;
             if self.partial_phase >= TAU {
                 self.partial_phase -= TAU;
             }
-            sample = (sample + 0.7 * self.partial_phase.sin()) * 0.6;
+            self.rng ^= self.rng >> 12;
+            self.rng ^= self.rng << 25;
+            self.rng ^= self.rng >> 27;
+            let bits = self.rng.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            let white = (bits >> 40) as f32 * (2.0 / 16_777_216.0) - 1.0;
+            self.rough += (white - self.rough) * self.rough_pole;
+            let rough = (1.0 + ROUGH_DEPTH * self.rough * self.rough_gain).max(0.0);
+            sample = (sample + 0.7 * self.partial_phase.sin()) * 0.6 * rough;
         }
-        sample * amplitude * self.phrase.level * self.envelope
+        sample * amplitude * gain * self.phrase.level * self.envelope
+    }
+
+    /// The sample-rate constants of the rough voice, computed once (worker side, never per
+    /// sample): the one-pole's coefficient and the gain that makes its noise a unit spread.
+    fn set_rate(&mut self, sample_rate: u32) {
+        let pole = 1.0 - (-TAU * ROUGH_HZ / sample_rate as f32).exp();
+        self.rough_pole = pole;
+        self.rough_gain = 1.0 / ((1.0_f32 / 3.0).sqrt() * (pole / (2.0 - pole)).sqrt());
     }
 
     fn invalidate_history(&mut self) {
@@ -631,26 +812,44 @@ impl Insect {
         self.phrase.cancel();
         self.phase = 0.0;
         self.partial_phase = 0.0;
+        self.pulse_phase = 0.0;
+        self.pulse_note = 0;
+        self.rough = 0.0;
     }
 }
 
-// Wind: a gust every tens of seconds, rising and passing over seconds. A dark low rumble and a
-// high leaf rustle, never harsh.
-const GUST_MIN_SECONDS: f64 = 6.0;
-const GUST_MAX_SECONDS: f64 = 12.0;
-const RUMBLE_LEVEL: f32 = 0.14;
-const RUSTLE_LEVEL: f32 = 0.085;
+// Wind: a quiet, continuously undulating breeze behind the insects. A slow wave (period 10 to
+// 23 s, the period itself drifting over minutes) rises and falls without a break, with an
+// occasional larger swell on top; a low dark rumble and a high leaf rustle, both small. The wind
+// is meant to be well below the insects (see the margin test).
+const TAU64: f64 = std::f64::consts::TAU;
+const WAVE_PERIOD_MIDDLE: f64 = 16.5;
+const WAVE_PERIOD_SWING: f64 = 6.5;
+const WAVE_DRIFT_SECONDS: f64 = 480.0;
+const SWELL_MIN_SECONDS: f64 = 10.0;
+const SWELL_MAX_SECONDS: f64 = 18.0;
+/// The wind's level never falls below this share of its size: there is no gust-then-silence.
+const WIND_FLOOR: f32 = 0.30;
+const RUMBLE_LEVEL: f32 = 0.012;
+const RUSTLE_LEVEL: f32 = 0.0072;
 const RUSTLE_Q: f32 = 0.9;
 const FLUTTER_HZ: f32 = 22.0;
 
 struct Wind {
     random: WorldRandom,
-    idle_remaining: f64,
-    gust_age: f64,
-    /// 0 while no gust is blowing.
-    gust_length: f64,
-    gust_strength: f32,
-    /// Per-sample outputs of the world: the gust's shape times the knob's strength, 0 when calm.
+    /// Slow drift of the wave's period, and the wave's own phase (both radians, f64).
+    drift_phase: f64,
+    wave_phase: f64,
+    /// The wave, 0 to 1 (a smooth sine of `wave_phase`).
+    wave: f32,
+    swell_wait: f64,
+    swell_age: f64,
+    /// 0 while no swell is rising and falling.
+    swell_length: f64,
+    swell_strength: f32,
+    /// The swell's current share, 0 to 1.
+    swell: f32,
+    /// Per-sample level of the world: floor, wave and swell times the knob's size; 0 at knob 0.
     level: f32,
     rumble_cutoff: f32,
     rustle_center: f32,
@@ -672,7 +871,9 @@ fn pole(cutoff: f32, rate: u32) -> f32 {
 impl Wind {
     fn new(seed: u64, rate: u32) -> Self {
         let mut random = WorldRandom::new(splitmix(seed ^ 0x77_1d));
-        let idle_remaining = 8.0 + 20.0 * random.unit();
+        let drift_phase = TAU64 * random.unit();
+        let wave_phase = TAU64 * random.unit();
+        let swell_wait = 20.0 + 40.0 * random.unit();
         let noise = |salt: u64| {
             let mut noise = Noise::new();
             noise.set_hash(seed.wrapping_add(salt));
@@ -680,10 +881,14 @@ impl Wind {
         };
         Self {
             random,
-            idle_remaining,
-            gust_age: 0.0,
-            gust_length: 0.0,
-            gust_strength: 0.0,
+            drift_phase,
+            wave_phase,
+            wave: 0.5,
+            swell_wait,
+            swell_age: 0.0,
+            swell_length: 0.0,
+            swell_strength: 0.0,
+            swell: 0.0,
             level: 0.0,
             rumble_cutoff: 90.0,
             rustle_center: 2_600.0,
@@ -699,46 +904,60 @@ impl Wind {
         }
     }
 
+    /// The wave's current period in seconds: 10 to 23, drifting slowly.
+    fn period(&self) -> f64 {
+        WAVE_PERIOD_MIDDLE + WAVE_PERIOD_SWING * self.drift_phase.sin()
+    }
+
     fn advance(&mut self, delta: f64, wind: f32, contributing: bool, sample_rate: u32) {
-        if self.gust_length > 0.0 {
-            self.gust_age += delta;
-            if self.gust_age >= self.gust_length {
-                self.gust_length = 0.0;
-                self.gust_age = 0.0;
-                // Rarer when the knob is low, more frequent when high.
+        // The slow wave never stops (it is world time): it only becomes audible with the knob.
+        self.drift_phase = (self.drift_phase + TAU64 * delta / WAVE_DRIFT_SECONDS) % TAU64;
+        self.wave_phase = (self.wave_phase + TAU64 * delta / self.period()) % TAU64;
+        self.wave = (0.5 + 0.5 * self.wave_phase.sin()) as f32;
+        if self.swell_length > 0.0 {
+            self.swell_age += delta;
+            if self.swell_age >= self.swell_length {
+                self.swell_length = 0.0;
+                self.swell_age = 0.0;
+                // Swells come more often with a higher knob.
                 let scale = f64::from(1.9 - 1.3 * wind);
-                self.idle_remaining = (14.0 + 40.0 * self.random.unit()) * scale;
+                self.swell_wait = (35.0 + 45.0 * self.random.unit()) * scale;
             }
         } else {
             if wind > 0.0 {
-                self.idle_remaining -= delta;
+                self.swell_wait -= delta;
             }
-            if self.idle_remaining <= 0.0 {
+            if self.swell_wait <= 0.0 {
                 if contributing {
-                    self.gust_length = GUST_MIN_SECONDS
-                        + (GUST_MAX_SECONDS - GUST_MIN_SECONDS) * self.random.unit();
-                    self.gust_age = 0.0;
-                    self.gust_strength = 0.45 + 0.55 * self.random.unit() as f32;
+                    self.swell_length = SWELL_MIN_SECONDS
+                        + (SWELL_MAX_SECONDS - SWELL_MIN_SECONDS) * self.random.unit();
+                    self.swell_age = 0.0;
+                    self.swell_strength = 0.6 + 0.4 * self.random.unit() as f32;
                 } else {
-                    self.idle_remaining = 1.0 + self.random.unit();
+                    self.swell_wait = 1.0 + self.random.unit();
                 }
             }
         }
-        let shape = if self.gust_length > 0.0 {
-            let bell = (PI * (self.gust_age / self.gust_length) as f32).sin();
-            bell * bell
+        self.swell = if self.swell_length > 0.0 {
+            let bell = (PI * (self.swell_age / self.swell_length) as f32).sin();
+            bell * bell * self.swell_strength
         } else {
             0.0
         };
-        // The knob scales strength continuously down to exactly 0 (silent wind).
-        self.level = shape * self.gust_strength * wind.sqrt();
+        // A floor, the wave, and the occasional larger swell on top; the knob sets the size of
+        // all of them and reaches exactly 0 (silent) with it. Never above 1.
+        self.level = if wind > 0.0 {
+            wind.sqrt() * (WIND_FLOOR + (0.25 + 0.20 * wind) * self.wave + 0.25 * self.swell)
+        } else {
+            0.0
+        };
         self.rumble_cutoff = 70.0 + 110.0 * self.level;
         // The rustle's band follows the knob, always below Nyquist at any supported rate.
         self.rustle_center = (2_200.0 + 1_800.0 * wind).min(sample_rate as f32 * 0.40);
     }
 
-    /// Stereo wind sample. The noise is scaled before the filters, so a gust ending leaves
-    /// nothing behind in them.
+    /// Stereo wind sample. The noise is scaled before the filters, so the wind dying away with
+    /// the knob leaves nothing behind in them.
     fn render(&mut self) -> [f32; 2] {
         if self.level == 0.0 {
             return [0.0; 2];
@@ -970,6 +1189,9 @@ impl Voice for AutumnVoice {
         let spread =
             (1.0_f32 / 3.0).sqrt() * (wind.flutter_pole / (2.0 - wind.flutter_pole)).sqrt();
         wind.flutter_gain = 0.3 / spread;
+        for insect in &mut self.insects {
+            insect.set_rate(sample_rate);
+        }
         self.sample_rate = sample_rate;
         if let Some(reverb) = reverb {
             self.reverb = reverb;
@@ -1076,17 +1298,62 @@ mod tests {
         real * real + imag * imag
     }
 
-    /// The share of the energy between 400 Hz and 0.45 x the rate that lies in `low..=high`.
+    /// In-place radix-2 FFT of `data` (its length a power of two).
+    fn fft(data: &mut [(f64, f64)]) {
+        let n = data.len();
+        let mut j = 0;
+        for i in 1..n {
+            let mut bit = n >> 1;
+            while j & bit != 0 {
+                j ^= bit;
+                bit >>= 1;
+            }
+            j ^= bit;
+            if i < j {
+                data.swap(i, j);
+            }
+        }
+        let mut length = 2;
+        while length <= n {
+            let angle = -std::f64::consts::TAU / length as f64;
+            for start in (0..n).step_by(length) {
+                for k in 0..length / 2 {
+                    let (wr, wi) = ((angle * k as f64).cos(), (angle * k as f64).sin());
+                    let (ar, ai) = data[start + k];
+                    let (br, bi) = data[start + k + length / 2];
+                    let (tr, ti) = (br * wr - bi * wi, br * wi + bi * wr);
+                    data[start + k] = (ar + tr, ai + ti);
+                    data[start + k + length / 2] = (ar - tr, ai - ti);
+                }
+            }
+            length <<= 1;
+        }
+    }
+
+    /// The share of the energy between 400 Hz and 0.45 x the rate that lies in `low..=high`,
+    /// from a zero-padded FFT of at most 1.5 Hz per bin (the narrow-line voices must not fall
+    /// between the bins).
     fn band_share(samples: &[f32], rate: f32, low: f32, high: f32) -> f64 {
+        let size = ((rate / 1.5) as usize)
+            .next_power_of_two()
+            .max(samples.len().next_power_of_two());
+        let mut data = vec![(0.0_f64, 0.0_f64); size];
+        for (slot, sample) in data.iter_mut().zip(samples) {
+            slot.0 = f64::from(*sample);
+        }
+        fft(&mut data);
+        let bin = f64::from(rate) / size as f64;
         let (mut inside, mut total) = (0.0, 0.0);
-        let mut frequency = 400.0;
-        while frequency < rate * 0.45 {
-            let energy = energy_at(samples, frequency, rate);
+        for (index, (re, im)) in data.iter().enumerate().take(size / 2) {
+            let frequency = index as f64 * bin;
+            if frequency < 400.0 || frequency >= f64::from(rate) * 0.45 {
+                continue;
+            }
+            let energy = re * re + im * im;
             total += energy;
-            if (low..=high).contains(&frequency) {
+            if (f64::from(low)..=f64::from(high)).contains(&frequency) {
                 inside += energy;
             }
-            frequency += 40.0;
         }
         inside / total
     }
@@ -1094,6 +1361,7 @@ mod tests {
     /// One phrase of an insect, rendered offline at the full bout swell.
     fn rendered_phrase(index: usize, seed: u64, rate: u32) -> (Insect, Vec<f32>) {
         let mut insect = plateau_insect(index, seed);
+        insect.set_rate(rate);
         insect.envelope = 1.0;
         insect.start_phrase(&moment(3.0, 1.0 / f64::from(rate), 1.0));
         let samples = (0..(insect.phrase.length * f64::from(rate)) as usize + 200)
@@ -1168,7 +1436,7 @@ mod tests {
         let rate = 24_000;
         for (index, species) in SPECIES.into_iter().enumerate() {
             let (low, high) = species.band();
-            for seed in [1_u64, 2, 3] {
+            for seed in 1..=60_u64 {
                 let (insect, samples) = rendered_phrase(index, seed, rate);
                 let energy: f64 = samples.iter().map(|s| f64::from(*s).powi(2)).sum();
                 assert!(energy > 0.0, "{species:?} makes sound");
@@ -1233,7 +1501,7 @@ mod tests {
             .map(|ratio| (ratio * 1000.0) as u32)
             .collect();
         assert_eq!(ratios.len(), 3);
-        // "ガチャガチャ": volleys of many quick pulses (sampled finer than the pulses).
+        // "ガチャガチャ": one held volley after another (its rattle is the wing-stroke pulse).
         let volleys = 3;
         let length = f64::from((volleys - 1) as f32 * KUTSUWAMUSHI_SPACING + KUTSUWAMUSHI_VOLLEY);
         let fine = |tick: usize| tick as f64 / 10_000.0;
@@ -1255,12 +1523,452 @@ mod tests {
             }
             inside = amplitude > 0.02;
         }
-        assert_eq!(runs, volleys * KUTSUWAMUSHI_PULSES);
-        // A tap is one short ping.
-        assert_eq!(
-            pulses(Species::Kanetataki, 1, 1.0, 0.5, f64::from(KANETATAKI_PING)).0,
-            1
+        assert_eq!(runs, volleys);
+        // A tap is one short ping, of the length it was drawn with.
+        for ring in [KANETATAKI_RING_MIN, KANETATAKI_RING_MAX] {
+            assert_eq!(
+                pulses(Species::Kanetataki, 1, 1.0, ring, f64::from(ring)).0,
+                1
+            );
+        }
+    }
+
+    /// An insect of `index` mid-bout at `envelope` with a phrase lasting `seconds`, for measuring
+    /// its pulse (the phrase's own shape is not what is measured).
+    fn held(index: usize, seed: u64, envelope: f32, seconds: f64) -> Insect {
+        let mut insect = plateau_insect(index, seed);
+        insect.envelope = 1.0;
+        insect.start_phrase(&moment(3.0, 0.001, 1.0));
+        insect.phrase.length = seconds;
+        insect.phrase.ring = seconds as f32;
+        insect.phrase.count = (seconds * 20.0) as u32 + 1;
+        insect.envelope = envelope;
+        insect
+    }
+
+    #[test]
+    fn every_species_but_the_kanetataki_pulses_inside_its_range_and_the_kanetataki_does_not() {
+        for (index, species) in SPECIES.into_iter().enumerate() {
+            for seed in 1..=20_u64 {
+                let insect = Insect::new(index, seed);
+                let Some(((rate_low, rate_high), (depth_low, depth_high))) = species.pulse() else {
+                    assert_eq!(species, Species::Kanetataki);
+                    assert_eq!(insect.pulse_base, 0.0);
+                    continue;
+                };
+                assert!(
+                    (f64::from(rate_low)..=f64::from(rate_high)).contains(&insect.pulse_base),
+                    "{species:?}: {} Hz",
+                    insect.pulse_base
+                );
+                assert!((depth_low..=depth_high).contains(&insect.pulse_depth));
+            }
+        }
+        // The SPEC's ranges, spelled out.
+        let range = |species: Species| species.pulse().unwrap();
+        assert_eq!(range(Species::Suzumushi), ((50.0, 90.0), (0.30, 0.50)));
+        assert!(range(Species::Cricket).0 == (30.0, 50.0) && range(Species::Cricket).1.0 >= 0.8);
+        assert!(range(Species::Matsumushi).0.0 * MATSUMUSHI_PULSE_RATES[1] >= 25.0);
+        assert!(range(Species::Matsumushi).0.1 * MATSUMUSHI_PULSE_RATES[0] <= 35.0);
+        assert_eq!(range(Species::Kutsuwamushi), ((15.0, 30.0), (0.80, 0.95)));
+        // Several insects of one species differ from one another.
+        let rates: std::collections::BTreeSet<u64> = (1..=20)
+            .map(|seed| Insect::new(0, seed).pulse_base.to_bits())
+            .collect();
+        assert!(rates.len() > 15);
+    }
+
+    #[test]
+    fn the_pulse_rate_rises_eight_percent_with_the_swell_and_wanders_three_percent() {
+        for (index, species) in SPECIES.into_iter().enumerate() {
+            if species.pulse().is_none() {
+                continue;
+            }
+            let mut insect = Insect::new(index, 7);
+            let rate_at = |insect: &mut Insect, envelope: f32, time: f64| {
+                insect.envelope = envelope;
+                insect.update_pulse(time);
+                insect.pulse_rate
+            };
+            // The same moment, the swell at its foot and at its peak: 8% either side of the base.
+            let (low, middle, high) = (
+                rate_at(&mut insect, 0.0, 4.0),
+                rate_at(&mut insect, 0.5, 4.0),
+                rate_at(&mut insect, 1.0, 4.0),
+            );
+            assert!((high / middle - 1.08).abs() < 1e-9, "{species:?}");
+            assert!((low / middle - 0.92).abs() < 1e-9, "{species:?}");
+            assert!((high / low - 1.08 / 0.92).abs() < 1e-9);
+            // The wander: within 3% of the base at the middle of the swell, and it does move.
+            let swing: Vec<f64> = (0..400)
+                .map(|k| rate_at(&mut insect, 0.5, f64::from(k) * 0.5) / insect.pulse_base)
+                .collect();
+            assert!(
+                swing
+                    .iter()
+                    .all(|r| (0.97 - 1e-9..=1.03 + 1e-9).contains(r))
+            );
+            let (lo, hi) = swing
+                .iter()
+                .fold((9.0_f64, 0.0_f64), |(l, h), r| (l.min(*r), h.max(*r)));
+            assert!(hi - lo > 0.05, "{species:?}: it wanders {lo}..{hi}");
+            // Slowly: within the 3% wander, so at most 6% over ten seconds.
+            for pair in swing.windows(21) {
+                assert!((pair[20] - pair[0]).abs() <= 0.0601);
+            }
+        }
+    }
+
+    #[test]
+    fn a_real_bout_runs_its_pulse_faster_at_the_peak_of_its_swell_than_at_the_foot() {
+        let rate = 24_000;
+        let knobs = knobs(1.0, 0.0);
+        let mut voice = voice(rate, knobs);
+        let ring = VisualRing::new(32, 1);
+        let (mut foot, mut peak) = (Vec::new(), Vec::new());
+        for sample in 0..rate as usize * 200 {
+            step(&mut voice, &knobs, &ring, sample);
+            for insect in &voice.insects {
+                if insect.phrase.sounding() && insect.species.pulse().is_some() {
+                    let relative = insect.pulse_rate / insect.pulse_base;
+                    assert!((0.92 * 0.97 - 1e-9..=1.08 * 1.03 + 1e-9).contains(&relative));
+                    if insect.envelope > 0.99 {
+                        peak.push(relative);
+                    } else if insect.envelope < 0.15 {
+                        foot.push(relative);
+                    }
+                }
+            }
+        }
+        let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
+        assert!(!peak.is_empty() && !foot.is_empty());
+        assert!(
+            mean(&peak) / mean(&foot) > 1.10,
+            "peak {} foot {}",
+            mean(&peak),
+            mean(&foot)
         );
+    }
+
+    /// A held insect rendered flat (the phrase's own shape taken out, so only the carrier and the
+    /// wing-stroke pulse are heard): 24 kHz, `seconds` long, at the swell `envelope`, in the grain
+    /// `note` (the matsumushi's three notes scale the pulse; the rest pass 0).
+    fn flat_run(index: usize, seed: u64, envelope: f32, note: u32, seconds: f64) -> Vec<f32> {
+        let rate = 24_000_u32;
+        let mut insect = plateau_insect(index, seed);
+        insect.set_rate(rate);
+        insect.envelope = envelope;
+        insect.phrase.level = 1.0;
+        insect.phrase.pitch = insect.pitch;
+        let (rate_scale, depth_scale) = match (insect.species, note) {
+            (Species::Matsumushi, n) => (
+                MATSUMUSHI_PULSE_RATES[n as usize],
+                MATSUMUSHI_PULSE_DEPTHS[n as usize],
+            ),
+            _ => (1.0, 1.0),
+        };
+        (0..(seconds * f64::from(rate)) as usize)
+            .map(|tick| {
+                insect.update_pulse(3.0 + tick as f64 / f64::from(rate));
+                insect.voice_sample(1.0, 1.0, note, rate_scale, depth_scale, rate as f32)
+            })
+            .collect()
+    }
+
+    /// The rectified carrier smoothed over 1 ms and decimated to 2 kHz.
+    fn envelope_of(samples: &[f32]) -> Vec<f32> {
+        let window = 24;
+        let rectified: Vec<f32> = samples.iter().map(|s| s.abs()).collect();
+        let envelope: Vec<f32> = rectified
+            .windows(window)
+            .map(|w| w.iter().sum::<f32>() / window as f32)
+            .step_by(12)
+            .collect();
+        // Skip the first 0.1 s (the pulse's first attack and the smoothing's start).
+        envelope[200..].to_vec()
+    }
+
+    /// Where the envelope's spectrum peaks between 10 and 150 Hz (0.25 Hz steps).
+    fn envelope_peak_hz(envelope: &[f32]) -> f32 {
+        let mean = envelope.iter().sum::<f32>() / envelope.len() as f32;
+        let centred: Vec<f32> = envelope.iter().map(|v| v - mean).collect();
+        let (mut best, mut best_energy) = (0.0_f32, 0.0_f64);
+        let mut frequency = 10.0;
+        while frequency < 150.0 {
+            let energy = energy_at(&centred, frequency, 2_000.0);
+            if energy > best_energy {
+                (best, best_energy) = (frequency, energy);
+            }
+            frequency += 0.25;
+        }
+        best
+    }
+
+    /// How deep the envelope swings: 1 - min / max of the smoothed carrier.
+    fn envelope_depth(envelope: &[f32]) -> f32 {
+        let (low, high) = envelope
+            .iter()
+            .fold((f32::MAX, 0.0_f32), |(l, h), v| (l.min(*v), h.max(*v)));
+        1.0 - low / high
+    }
+
+    #[test]
+    fn rendered_pulse_rates_peak_inside_each_species_range_and_follow_the_insects_own_base() {
+        // (index, species range in Hz): suzumushi, cricket, kutsuwamushi.
+        for (index, low, high) in [(0, 50.0, 90.0), (1, 30.0, 50.0), (5, 15.0, 30.0)] {
+            for seed in 1..=8_u64 {
+                let base = Insect::new(index, seed).pulse_base as f32;
+                let peak = envelope_peak_hz(&envelope_of(&flat_run(index, seed, 0.5, 0, 3.0)));
+                assert!(
+                    (low * 0.97..=high * 1.03).contains(&peak),
+                    "{index} seed {seed}: the envelope peaks at {peak} Hz, outside {low}..{high}"
+                );
+                assert!(
+                    (peak - base).abs() < 0.05 * base + 0.4,
+                    "{index} seed {seed}: peak {peak} Hz vs base {base} Hz"
+                );
+            }
+        }
+        // A matsumushi's three notes pulse at 25 to 35 Hz, each at its own speed.
+        for seed in 1..=8_u64 {
+            let peaks: Vec<f32> = (0..3)
+                .map(|note| envelope_peak_hz(&envelope_of(&flat_run(2, seed, 0.5, note, 3.0))))
+                .collect();
+            assert!(
+                peaks
+                    .iter()
+                    .all(|p| (25.0 * 0.97..=35.0 * 1.03).contains(p)),
+                "seed {seed}: {peaks:?}"
+            );
+            assert!(
+                peaks[0] > peaks[1] * 1.1,
+                "the first note is the fastest: {peaks:?}"
+            );
+            assert!(
+                peaks[2] > peaks[1] * 1.05 && peaks[0] > peaks[2] * 1.03,
+                "{peaks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_pulse_depths_are_shallow_for_suzumushi_medium_for_matsumushi_and_deep_for_the_rest()
+    {
+        for seed in 1..=8_u64 {
+            let depth =
+                |index, note| envelope_depth(&envelope_of(&flat_run(index, seed, 0.5, note, 2.0)));
+            let suzumushi = depth(0, 0);
+            assert!((0.28..=0.52).contains(&suzumushi), "suzumushi {suzumushi}");
+            let cricket = depth(1, 0);
+            assert!(cricket >= 0.78, "cricket {cricket}");
+            let kutsuwamushi = depth(5, 0);
+            assert!(kutsuwamushi >= 0.75, "kutsuwamushi {kutsuwamushi}");
+            let notes: Vec<f32> = (0..3).map(|note| depth(2, note)).collect();
+            assert!(
+                notes.iter().all(|d| (0.3..=0.68).contains(d)),
+                "matsumushi {notes:?}"
+            );
+            assert!(
+                notes[1] > notes[0],
+                "each note has its own depth: {notes:?}"
+            );
+            // Sharp: a cricket's pulses are grains, so it is well below its top most of the time.
+            let envelope = envelope_of(&flat_run(1, seed, 0.5, 0, 2.0));
+            let top = envelope.iter().copied().fold(0.0, f32::max);
+            let high = envelope.iter().filter(|v| **v > 0.8 * top).count();
+            assert!(
+                high * 100 < envelope.len() * 40,
+                "cricket {high} of {}",
+                envelope.len()
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_pulses_run_faster_at_the_top_of_the_swell_within_eight_percent_of_the_base() {
+        for (index, species) in SPECIES.into_iter().enumerate() {
+            if species.pulse().is_none() {
+                continue;
+            }
+            for seed in [2_u64, 5, 9] {
+                let base = Insect::new(index, seed).pulse_base as f32;
+                let note_scale = if species == Species::Matsumushi {
+                    MATSUMUSHI_PULSE_RATES[0]
+                } else {
+                    1.0
+                };
+                let foot = envelope_peak_hz(&envelope_of(&flat_run(index, seed, 0.1, 0, 3.0)));
+                let top = envelope_peak_hz(&envelope_of(&flat_run(index, seed, 1.0, 0, 3.0)));
+                assert!(
+                    top / foot > 1.10 && top / foot < 1.21,
+                    "{species:?} seed {seed}: foot {foot} Hz, top {top} Hz"
+                );
+                // Within 8% (and the 3% wander, and the DFT's resolution) of its own base.
+                for peak in [foot, top] {
+                    assert!(
+                        (peak / (base * note_scale) - 1.0).abs() < 0.08 + 0.03 + 0.02 + 0.016,
+                        "{species:?} seed {seed}: {peak} Hz vs base {base} Hz"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kanetataki_has_no_pulse_and_every_tick_rings_its_own_length() {
+        let envelope = envelope_of(&flat_run(3, 5, 0.5, 0, 0.5));
+        // A pure carrier: its smoothed rectified envelope is flat (no fast pulse in it).
+        let (low, high) = envelope
+            .iter()
+            .fold((f32::MAX, 0.0_f32), |(l, h), v| (l.min(*v), h.max(*v)));
+        assert!((high - low) / high < 0.1, "{low}..{high}");
+        let rings: std::collections::BTreeSet<u32> = (0..60)
+            .map(|k| {
+                let mut insect = plateau_insect(3, 9);
+                insect.envelope = 1.0;
+                for _ in 0..k {
+                    insect.random.unit();
+                }
+                insect.start_phrase(&moment(2.0, 0.001, 1.0));
+                assert!((KANETATAKI_RING_MIN..=KANETATAKI_RING_MAX).contains(&insect.phrase.ring));
+                insect.phrase.ring.to_bits()
+            })
+            .collect();
+        assert!(
+            rings.len() > 40,
+            "a ring of its own each tick: {}",
+            rings.len()
+        );
+    }
+
+    #[test]
+    fn matsumushi_notes_differ_in_speed_and_depth_by_their_scales() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (note, start) in MATSUMUSHI_STARTS.into_iter().enumerate() {
+            let (id, speed, depth) = stroke_context(Species::Matsumushi, start + 0.01, 1.0);
+            assert_eq!(id as usize, note);
+            seen.insert(((speed * 1000.0) as u32, (depth * 1000.0) as u32));
+        }
+        assert_eq!(seen.len(), 3, "a speed and depth of its own for every note");
+    }
+
+    #[test]
+    fn the_pulse_makes_no_clicks_a_slow_attack_and_a_wobble_under_half_a_percent() {
+        // A stroke bites in at least 2.5 ms at the very fastest pulse (90 Hz, 8% warm, 3% wander).
+        let fastest_attack = std::hint::black_box(PULSE_ATTACK) / (90.0 * 1.08 * 1.03);
+        assert!(fastest_attack >= 0.0025, "{fastest_attack}");
+        let mut previous = pulse_shape(0.0);
+        assert_eq!(previous, 0.0);
+        let mut top = 0.0_f32;
+        for step in 1..=10_000 {
+            let value = pulse_shape(step as f32 / 10_000.0);
+            assert!((0.0..=1.0).contains(&value));
+            assert!((value - previous).abs() < 0.002, "a step at {step}");
+            top = top.max(value);
+            previous = value;
+        }
+        assert_eq!(
+            previous, 0.0,
+            "ends where it began: continuous across periods"
+        );
+        assert!((top - 1.0).abs() < 1e-3);
+        // Fast rise, slightly slower fall.
+        assert!(pulse_shape(PULSE_ATTACK) == 1.0 && PULSE_ATTACK < 0.5);
+        // The pitch wobble: at most 0.5%, suzumushi only.
+        for step in 0..=100 {
+            let shape = pulse_shape(step as f32 / 100.0);
+            let wobble = pitch_wobble(Species::Suzumushi, shape);
+            assert!((1.0..=1.005).contains(&wobble));
+            for other in [
+                Species::Cricket,
+                Species::Matsumushi,
+                Species::Kutsuwamushi,
+                Species::Kanetataki,
+            ] {
+                assert_eq!(pitch_wobble(other, shape), 1.0);
+            }
+        }
+        // The rendered voices: no sample-to-sample step beyond what the carrier itself makes.
+        // Flat (the phrase's shape taken out): beyond the carrier's own slope only the pulse's
+        // smooth gain may add to a step, a few per cent of the peak at the very most. A gain
+        // jump of a tenth would trip this; the roughness of the kutsuwamushi is noise, allowed
+        // more.
+        for (index, species) in SPECIES.into_iter().enumerate() {
+            for seed in 1..=5_u64 {
+                let samples = flat_run(index, seed, 1.0, 0, 1.5);
+                let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+                let pitch = Insect::new(index, seed).pitch;
+                let partial = if species == Species::Kutsuwamushi {
+                    1.08
+                } else {
+                    1.0
+                };
+                let slack = if species == Species::Kutsuwamushi {
+                    0.3
+                } else {
+                    0.035
+                };
+                let carrier = pitch * partial * 1.005;
+                let bound = peak * (TAU * carrier / 24_000.0 * 1.02 + slack);
+                let step = samples
+                    .windows(2)
+                    .map(|pair| (pair[1] - pair[0]).abs())
+                    .fold(0.0_f32, f32::max);
+                assert!(
+                    step <= bound,
+                    "{species:?} seed {seed}: step {step} over {bound}"
+                );
+            }
+        }
+        for rate in [24_000_u32, 48_000] {
+            for (index, species) in SPECIES.into_iter().enumerate() {
+                for seed in 1..=4_u64 {
+                    let mut insect = held(index, seed, 1.0, 0.8);
+                    insect.set_rate(rate);
+                    let pitch = insect.phrase.pitch;
+                    let mut samples = Vec::new();
+                    for tick in 0..(0.8 * f64::from(rate)) as usize {
+                        insect.update_pulse(3.0 + tick as f64 / f64::from(rate));
+                        samples.push(insect.render(rate as f32));
+                        insect.phrase.age += 1.0 / f64::from(rate);
+                    }
+                    let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+                    assert!(peak > 0.0, "{species:?} sounds");
+                    // The carrier's own steepest step, with the partial and the pitch ratios.
+                    let carrier = (pitch * 1.12 * 1.1).min(rate as f32 * 0.4);
+                    let bound = peak * TAU * carrier / rate as f32 * 1.3;
+                    let step = samples
+                        .windows(2)
+                        .map(|pair| (pair[1] - pair[0]).abs())
+                        .fold(0.0_f32, f32::max);
+                    assert!(
+                        step <= bound,
+                        "{species:?} {rate}: step {step} over {bound}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pulsing_voice_keeps_a_phase_that_advances_by_exactly_its_rate() {
+        let rate = 48_000_f64;
+        let mut insect = held(0, 4, 1.0, 1.0);
+        insect.set_rate(48_000);
+        let mut previous = None::<f64>;
+        let mut checked = 0;
+        for tick in 0..24_000 {
+            insect.update_pulse(3.0 + tick as f64 / rate);
+            insect.render(rate as f32);
+            insect.phrase.age += 1.0 / rate;
+            if let Some(before) = previous {
+                let advance = (insect.pulse_phase - before).rem_euclid(1.0);
+                assert!((advance - insect.pulse_rate / rate).abs() < 1e-9);
+                checked += 1;
+            }
+            previous = Some(insect.pulse_phase);
+        }
+        assert!(checked > 20_000);
     }
 
     /// The start times and lengths of the phrases a lone insect sings at the bout's peak.
@@ -1327,7 +2035,7 @@ mod tests {
                 let (min, max) = periods
                     .iter()
                     .fold((f64::MAX, 0.0_f64), |(a, b), p| (a.min(*p), b.max(*p)));
-                assert!(max / min < 1.06, "a steady tap: {min}..{max}");
+                assert!(max / min < 1.12, "a steady tap: {min}..{max}");
             }
             rates.push((species, starts.len()));
         }
@@ -1611,21 +2319,19 @@ mod tests {
         let mut voice = voice(rate, on);
         let ring = VisualRing::new(32, 1);
         let mut sample = 0;
-        // Run until a gust is going and several insects are inside a bout.
+        // Run until several insects are inside a bout and the wind is audible.
         while sample < rate as usize * 300
-            && !(voice.wind.gust_length > 0.0
-                && voice.wind.gust_age < 1.0
-                && voice
-                    .insects
-                    .iter()
-                    .filter(|insect| insect.singing())
-                    .count()
-                    >= 2)
+            && voice
+                .insects
+                .iter()
+                .filter(|insect| insect.singing())
+                .count()
+                < 2
         {
             step(&mut voice, &on, &ring, sample);
             sample += 1;
         }
-        assert!(voice.wind.gust_length > 0.0);
+        assert!(voice.wind.level > 0.0);
         // Let the knob reach zero (0.2 s), then look.
         for _ in 0..rate as usize {
             step(&mut voice, &off, &ring, sample);
@@ -1713,24 +2419,25 @@ mod tests {
     }
 
     #[test]
-    fn wind_at_zero_is_silent_and_no_gust_starts_but_a_running_gust_and_the_insects_carry_on() {
+    fn wind_at_zero_is_silent_and_no_swell_starts_but_a_running_one_ends_and_insects_carry_on() {
         let rate = 24_000;
         let on = knobs(1.0, 1.0);
         let off = knobs(1.0, 0.0);
-        // Two identical worlds; one keeps the wind, the other turns it to zero mid-gust.
+        // Two identical worlds; one keeps the wind, the other turns it to zero during a swell.
         let mut kept = voice(rate, on);
         let mut zeroed = voice(rate, on);
-        let ring = VisualRing::new(16, 1);
+        let ring = VisualRing::new(32, 1);
         let mut sample = 0;
-        while sample < rate as usize * 240 && zeroed.wind.gust_length == 0.0 {
+        while sample < rate as usize * 200 && zeroed.wind.swell_length == 0.0 {
             step(&mut kept, &on, &ring, sample);
             step(&mut zeroed, &on, &ring, sample);
             sample += 1;
         }
         assert!(
-            zeroed.wind.gust_length > 0.0,
-            "a gust is running at the switch"
+            zeroed.wind.swell_length > 0.0,
+            "a swell is running at the switch"
         );
+        assert!(zeroed.wind.level > 0.0);
         for _ in 0..rate as usize * 2 {
             step(&mut kept, &on, &ring, sample);
             step(&mut zeroed, &off, &ring, sample);
@@ -1738,29 +2445,26 @@ mod tests {
         }
         assert_eq!(zeroed.wind_knob.value(), 0.0);
         assert_eq!(zeroed.wind.level, 0.0);
-        assert!(
-            zeroed.wind.gust_length > 0.0,
-            "still the same gust, now silent"
-        );
+        assert!(zeroed.wind.swell_length > 0.0, "the same swell, now silent");
         let (mut starts_zeroed, mut starts_kept) = (0, 0);
-        let (mut was_zeroed, mut was_kept) = (true, kept.wind.gust_length > 0.0);
-        let mut frozen_idle = None;
+        let (mut was_zeroed, mut was_kept) = (true, kept.wind.swell_length > 0.0);
+        let mut frozen_wait = None;
         let mut insect_phrases = 0;
-        for _ in 0..rate as usize * 90 {
+        for _ in 0..rate as usize * 120 {
             step(&mut kept, &on, &ring, sample);
             step(&mut zeroed, &off, &ring, sample);
             sample += 1;
             assert_eq!(zeroed.wind.level, 0.0, "no wind while the knob is 0");
             assert_eq!(zeroed.wind.render(), [0.0; 2]);
             let (now_zeroed, now_kept) =
-                (zeroed.wind.gust_length > 0.0, kept.wind.gust_length > 0.0);
+                (zeroed.wind.swell_length > 0.0, kept.wind.swell_length > 0.0);
             starts_zeroed += usize::from(!was_zeroed && now_zeroed);
             starts_kept += usize::from(!was_kept && now_kept);
             (was_zeroed, was_kept) = (now_zeroed, now_kept);
             if !now_zeroed {
-                // Between gusts the idle clock does not run at zero.
-                let idle = *frozen_idle.get_or_insert(zeroed.wind.idle_remaining);
-                assert_eq!(zeroed.wind.idle_remaining, idle);
+                // Between swells the countdown does not run at zero.
+                let wait = *frozen_wait.get_or_insert(zeroed.wind.swell_wait);
+                assert_eq!(zeroed.wind.swell_wait, wait);
             }
             insect_phrases += zeroed
                 .insects
@@ -1768,79 +2472,170 @@ mod tests {
                 .filter(|insect| insect.phrase.sounding() && insect.phrase.age == 0.0)
                 .count();
         }
-        assert_eq!(starts_zeroed, 0, "no new gust at zero");
+        assert_eq!(starts_zeroed, 0, "no new swell at zero");
         assert!(
             starts_kept >= 1,
             "the same world with the wind on did start one"
         );
         assert!(
-            frozen_idle.is_some(),
-            "the running gust ended inside the window"
+            frozen_wait.is_some(),
+            "the running swell ended inside the window"
         );
         assert!(insect_phrases > 0, "insects are independent of the wind");
     }
 
-    #[test]
-    fn a_gust_is_slow_soft_and_arrives_every_tens_of_seconds() {
-        let rate = 24_000;
-        let knobs = knobs(0.0, 0.5);
-        let mut voice = voice(rate, knobs);
-        let ring = VisualRing::new(4, 1);
-        let mut starts = Vec::new();
-        let mut lengths = Vec::new();
-        let mut peak_level = 0.0_f32;
-        let mut previous_level = 0.0_f32;
-        let mut previous_gust = 0.0;
-        for sample in 0..rate as usize * 360 {
-            step(&mut voice, &knobs, &ring, sample);
-            if voice.wind.gust_length > 0.0 && previous_gust == 0.0 {
-                starts.push(sample as f64 / f64::from(rate));
-                lengths.push(voice.wind.gust_length);
+    /// The wind alone, advanced in world time only (no audio), sampled every 10 ms.
+    fn wind_series(knob: f32, seconds: usize) -> (Vec<f32>, Vec<f32>, usize) {
+        let mut wind = Wind::new(19, 24_000);
+        let (mut waves, mut levels, mut swells) = (Vec::new(), Vec::new(), 0);
+        let mut was = false;
+        for _ in 0..seconds * 100 {
+            wind.advance(0.01, knob, true, 24_000);
+            waves.push(wind.wave);
+            levels.push(wind.level);
+            let now = wind.swell_length > 0.0;
+            swells += usize::from(now && !was);
+            if now {
+                assert!((SWELL_MIN_SECONDS..=SWELL_MAX_SECONDS).contains(&wind.swell_length));
             }
-            previous_gust = voice.wind.gust_length;
-            let level = voice.wind.level;
-            assert!((level - previous_level).abs() < 2e-4, "a gust has no step");
-            previous_level = level;
-            peak_level = peak_level.max(level);
+            was = now;
         }
-        assert!(starts.len() >= 3, "{starts:?}");
-        for gap in starts.windows(2).map(|pair| pair[1] - pair[0]) {
-            assert!(
-                (15.0..=90.0).contains(&gap),
-                "a gust every tens of seconds: {gap}"
-            );
-        }
-        assert!(lengths.iter().all(|length| (6.0..=12.0).contains(length)));
-        assert!(peak_level > 0.3 && peak_level <= 1.0);
+        (waves, levels, swells)
     }
 
     #[test]
-    fn wind_knob_scales_how_often_and_how_strongly_it_blows() {
-        let rate = 24_000;
-        let gusts = |wind: f32| {
-            let knobs = knobs(0.0, wind);
-            let mut voice = voice(rate, knobs);
-            let ring = VisualRing::new(4, 1);
-            let mut count = 0;
-            let mut previous = 0.0;
-            let mut peak = 0.0_f32;
-            for sample in 0..rate as usize * 600 {
-                step(&mut voice, &knobs, &ring, sample);
-                if voice.wind.gust_length > 0.0 && previous == 0.0 {
-                    count += 1;
-                }
-                previous = voice.wind.gust_length;
-                peak = peak.max(voice.wind.level);
-            }
-            (count, peak)
-        };
-        let (soft_count, soft_peak) = gusts(0.15);
-        let (strong_count, strong_peak) = gusts(1.0);
-        assert!(strong_count > soft_count, "{soft_count} vs {strong_count}");
+    fn the_wind_wave_has_an_8_to_25_second_period_that_drifts_and_never_falls_silent() {
+        let (waves, levels, _) = wind_series(0.5, 3_600);
+        // Peaks of the wave (local maxima), one every period.
+        let peaks: Vec<f64> = (1..waves.len() - 1)
+            .filter(|&i| waves[i] > waves[i - 1] && waves[i] >= waves[i + 1] && waves[i] > 0.9)
+            .map(|i| i as f64 * 0.01)
+            .collect();
+        let periods: Vec<f64> = peaks.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(periods.len() > 150, "{} periods an hour", periods.len());
+        let (shortest, longest) = periods
+            .iter()
+            .fold((f64::MAX, 0.0_f64), |(a, b), p| (a.min(*p), b.max(*p)));
         assert!(
-            strong_peak > soft_peak * 1.5,
-            "{soft_peak} vs {strong_peak}"
+            shortest >= 8.0 && longest <= 25.0,
+            "{shortest}..{longest} s"
         );
+        assert!(
+            longest - shortest > 5.0,
+            "the period drifts: {shortest}..{longest}"
+        );
+        // Gradually: neighbouring periods differ by under two seconds.
+        assert!(periods.windows(2).all(|p| (p[1] - p[0]).abs() < 2.0));
+        // Smooth and continuous: never silent between waves, never a sharp onset.
+        let floor = 0.5_f32.sqrt() * WIND_FLOOR;
+        assert!(
+            levels.iter().all(|l| *l >= floor - 1e-6 && *l <= 1.0),
+            "floor {floor}"
+        );
+        // A swell on top of a wave can rise at 0.22 of full level per second at most: a long
+        // swing from the floor to the top, never a sharp onset (checked at knob 1, swells
+        // included, as well as at 0.5).
+        for knob in [0.5, 1.0] {
+            let (_, levels, swells) = wind_series(knob, 3_600);
+            assert!(swells > 10);
+            let steepest = levels
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs() / 0.01)
+                .fold(0.0, f32::max);
+            assert!(
+                steepest < 0.25,
+                "knob {knob}: steepest rise or fall {steepest} per second"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wind_knob_sets_the_wave_size_and_how_often_a_larger_swell_comes() {
+        let (_, soft, soft_swells) = wind_series(0.15, 3_600);
+        let (waves, loud, loud_swells) = wind_series(1.0, 3_600);
+        assert!(
+            loud_swells > soft_swells * 3 / 2,
+            "{soft_swells} vs {loud_swells}"
+        );
+        assert!(
+            soft_swells >= 5,
+            "even a soft wind swells now and then: {soft_swells}"
+        );
+        let peak = |levels: &[f32]| levels.iter().copied().fold(0.0, f32::max);
+        let low = |levels: &[f32]| levels.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            peak(&loud) > 1.5 * peak(&soft),
+            "{} vs {}",
+            peak(&soft),
+            peak(&loud)
+        );
+        // The swell adds on top of the wave: the loud wind's peak is above its wave's peak.
+        let wave_only = WIND_FLOOR + 0.45 * waves.iter().copied().fold(0.0, f32::max);
+        assert!(
+            peak(&loud) > wave_only + 0.1,
+            "{} vs {wave_only}",
+            peak(&loud)
+        );
+        // The wave undulates more at a higher knob.
+        assert!(peak(&loud) - low(&loud) > peak(&soft) - low(&soft));
+    }
+
+    /// The wind's loudest second is at least this many decibels below the insects' default RMS.
+    const WIND_MARGIN_DB: f64 = 6.0;
+
+    /// The loudest 1 s window (RMS in dBFS over both channels, hop 0.5 s) of a run with `seed`.
+    fn loudest_second(seed: u64, knobs: [Normalized; 2], seconds: usize) -> f64 {
+        let rate = 24_000_u32;
+        let mut voice = AutumnVoice::new(VoicePreparation {
+            sample_rate: rate,
+            seed,
+            grain_capacity: MAX_INSECTS,
+        })
+        .unwrap();
+        voice.insects_knob = KnobRamp::new(knobs[0]);
+        voice.wind_knob = KnobRamp::new(knobs[1]);
+        let ring = VisualRing::new(8, 1);
+        let half = rate as usize / 2;
+        let (mut halves, mut energy) = (Vec::new(), 0.0_f64);
+        for sample in 0..rate as usize * seconds {
+            let frame = step(&mut voice, &knobs, &ring, sample);
+            energy += f64::from(frame[0]).powi(2) + f64::from(frame[1]).powi(2);
+            if (sample + 1) % half == 0 {
+                halves.push(energy);
+                energy = 0.0;
+            }
+        }
+        let loudest = halves
+            .windows(2)
+            .map(|pair| pair[0] + pair[1])
+            .fold(0.0, f64::max);
+        20.0 * (loudest / (2.0 * f64::from(rate))).sqrt().log10()
+    }
+
+    #[test]
+    fn the_winds_loudest_second_stays_a_set_margin_below_the_insects_and_the_default_far_below() {
+        // Insects alone at the default knob, whole-run RMS.
+        let (insects, _) = levels(24_000, knobs(0.55, 0.0), 120);
+        let mut loudest = f64::MIN;
+        for seed in [3_u64, 19, 71] {
+            loudest = loudest.max(loudest_second(seed, knobs(0.0, 1.0), 300));
+        }
+        assert!(
+            loudest <= insects - WIND_MARGIN_DB,
+            "wind's loudest second {loudest:.1} dBFS vs insects {insects:.1} dBFS"
+        );
+        // Audible as a gentle undulation, not silent.
+        assert!(loudest > -60.0, "{loudest}");
+        // At the default wind knob it is much lower still.
+        let default = loudest_second(19, knobs(0.0, 0.20), 300);
+        assert!(
+            default <= loudest - 8.0,
+            "default {default:.1} vs full {loudest:.1}"
+        );
+        assert!(default > -75.0, "default is not silent: {default}");
+        // The default scene is not made louder by its wind.
+        let (both, _) = levels(24_000, knobs(0.55, 0.20), 120);
+        assert!(both - insects < 0.5, "{both:.1} vs {insects:.1}");
     }
 
     #[test]
@@ -1935,7 +2730,7 @@ mod tests {
     fn default_loudness_matches_the_other_situations_and_peaks_stay_under_the_knee() {
         // Rain, rock and deep were balanced at about -35 dBFS RMS at 100% app volume
         // (docs/verification.md: raw -40.8/-51.1/-46.6 with trims 2.0/6.0/4.0).
-        // Measured with this same method (24 kHz, 90 s, both channels): autumn -34.7 dBFS, rain
+        // Measured with this same method (24 kHz, 90 s, both channels): autumn -34.9 dBFS (P37), rain
         // -35.1 and deep -35.1 at their default knobs.
         let (rms, peak) = levels(24_000, knobs(0.55, 0.20), 90);
         assert!((-37.0..=-33.0).contains(&rms), "default RMS {rms} dBFS");
