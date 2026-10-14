@@ -23,6 +23,7 @@ use crate::{
         appearance::{AccessibilityState, Motion},
         backdrop,
         look::{Budget, Mark, ParticleInput, look, spikes, vertices},
+        stars,
     },
 };
 
@@ -108,7 +109,7 @@ impl VisibleParticles {
         }
         let elapsed = self.present.get().saturating_sub(event.present.get());
         let age = (elapsed as f64 / event.lifetime.as_nanos() as f64) as f32;
-        let fade = motion.particle_fade(age);
+        let fade = motion.particle_fade(event.shape, age);
         let opacity = event.strength.get() * fade * contribution;
         (opacity > 0.0).then_some((age, opacity))
     }
@@ -434,6 +435,40 @@ impl SceneView {
                     }
                 }
             }
+            // A starry situation's sky, behind the particles: only as bright as that situation is
+            // heard, so it comes and goes with a transition. Fixed bound, no allocation.
+            let sky = source
+                .registry
+                .definitions()
+                .iter()
+                .enumerate()
+                .filter(|(_, definition)| definition.visual.stars)
+                .map(|(index, _)| {
+                    stars::presence(
+                        self.particles.contributions[index],
+                        self.particles.breath[index],
+                    )
+                })
+                .fold(0.0_f32, f32::max);
+            // The night: one full-viewport indigo film over the backdrop lights, behind the stars
+            // and the particles, as heard as the sky is (so it fades with a transition). It makes
+            // the window dark in a light appearance too, so the pale stars and fireflies read.
+            if let Some((rgb, alpha)) = stars::film(dark, sky) {
+                window.paint_quad(fill(bounds, rgba(rgb, alpha)));
+            }
+            if sky > 0.0 {
+                let time = self.world_seconds();
+                let scale_factor = window.scale_factor();
+                // More window, more sky: the count grows with the logical area (same stars, only
+                // more of them), bounded per level so a frame never paints more than 1400 dots.
+                let area = f32::from(bounds.size.width) * f32::from(bounds.size.height);
+                for index in 0..stars::count(self.intensity, area) {
+                    let star = stars::star(index, time, sky, self.motion);
+                    if star.opacity >= stars::MIN_VISIBLE {
+                        paint_star(window, bounds, &star, scale, scale_factor);
+                    }
+                }
+            }
             // When many particles are alive each gets fewer decoration marks, and the frame has a
             // fixed number of blurred shadows; the core light is always the first mark, so it is
             // never the one given up.
@@ -630,6 +665,34 @@ fn paint_glow_at(
         }],
     );
     window.paint_quad(fill(bounds, color).corner_radii(px(radius)));
+}
+
+/// One star: a plain hard-edged dot, no glow or shadow. Its diameter is in logical pixels at the
+/// default window size, scaled like everything else by the window's short side. The dot is snapped
+/// to whole physical pixels (see [`stars::pixel_quad`]) so a one or two pixel star keeps its full
+/// alpha instead of smearing over neighbouring pixels.
+fn paint_star(
+    window: &mut Window,
+    viewport: Bounds<Pixels>,
+    star: &stars::Star,
+    scale: f32,
+    scale_factor: f32,
+) {
+    let center = [
+        f32::from(viewport.origin.x) + f32::from(viewport.size.width) * star.position[0],
+        f32::from(viewport.origin.y) + f32::from(viewport.size.height) * star.position[1],
+    ];
+    let quad = stars::pixel_quad(center, star.diameter * scale, scale_factor);
+    let bounds = Bounds::new(
+        point(px(quad.origin[0]), px(quad.origin[1])),
+        size(px(quad.size), px(quad.size)),
+    );
+    let paint = fill(bounds, rgba(star.rgb, star.opacity));
+    window.paint_quad(if quad.round {
+        paint.corner_radii(px(quad.size * 0.5))
+    } else {
+        paint
+    });
 }
 
 fn paint_mark(window: &mut Window, viewport: Bounds<Pixels>, position: [f32; 2], mark: &Mark) {
@@ -1173,6 +1236,75 @@ mod tests {
         cache.refresh_at(&source, MachNanos::new(112));
         let (_, soft) = cache.particle_frame(&particle, Motion::Reduced).unwrap();
         assert!(soft > 0.0 && soft <= 1.0);
+    }
+
+    #[test]
+    fn a_fireflys_brightness_is_its_insects_bout_envelope_at_every_age_in_both_motions() {
+        let mut source = source();
+        let count = source.registry.definitions().len();
+        source.visuals = Arc::new(VisualRing::new(8, count));
+        let autumn = source.registry.resolve("autumn").unwrap();
+        publish_state(&source, 1.0, 1_000, 0, 1.0, 0.5);
+        // An eight-second bout, in the ring's nanoseconds.
+        let lifetime = 8_000_000_000_u64;
+        let strength = 0.8;
+        let firefly = VisualEvent {
+            epoch: source.epoch,
+            world: WorldSeconds::new(1.0).unwrap(),
+            present: MachNanos::new(1_000),
+            situation: autumn,
+            x: Normalized::new(0.4).unwrap(),
+            y: Normalized::new(0.7).unwrap(),
+            strength: Normalized::new(strength).unwrap(),
+            radius: LogicalPixels::new(5.0).unwrap(),
+            shape: VisualShape::Firefly,
+            large: true,
+            lifetime: Duration::from_nanos(lifetime),
+            serial: 0,
+        };
+        assert!(source.visuals.push_event(firefly));
+        let mut cache = VisibleParticles::new(count);
+        // Born: dark, so nothing is drawn yet; every later age is the shared formula's value.
+        cache.refresh_at(&source, MachNanos::new(1_000));
+        let particle = cache.events.iter().flatten().next().copied().unwrap();
+        for motion in [Motion::Full, Motion::Reduced] {
+            assert_eq!(cache.particle_frame(&particle, motion), None);
+        }
+        let mut brightest = 0.0_f32;
+        for step in 1..100 {
+            let age = step as f32 / 100.0;
+            cache.refresh_at(
+                &source,
+                MachNanos::new(1_000 + (age * lifetime as f32) as u64),
+            );
+            for motion in [Motion::Full, Motion::Reduced] {
+                let (seen_age, opacity) = cache.particle_frame(&particle, motion).unwrap();
+                let expected = strength * crate::situations::bout_envelope(seen_age);
+                assert!(
+                    (opacity - expected).abs() < 1e-6,
+                    "age {age}: {opacity} vs {expected}"
+                );
+                brightest = brightest.max(opacity);
+            }
+        }
+        assert!(
+            (brightest - strength).abs() < 1e-6,
+            "the swell's peak is full strength"
+        );
+        // The same birth with another shape fades the generic way: brightest when born.
+        let mut dot = firefly;
+        dot.shape = VisualShape::Point;
+        dot.present = MachNanos::new(1_001);
+        assert!(source.visuals.push_event(dot));
+        cache.refresh_at(&source, MachNanos::new(1_001));
+        let point = cache
+            .events
+            .iter()
+            .flatten()
+            .find(|e| e.shape == VisualShape::Point)
+            .copied()
+            .unwrap();
+        assert!((cache.particle_frame(&point, Motion::Full).unwrap().1 - strength).abs() < 1e-4);
     }
 
     #[test]

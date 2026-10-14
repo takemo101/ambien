@@ -1328,6 +1328,49 @@ mod tests {
     }
 
     #[test]
+    fn autumn_knobs_default_clamp_round_trip_and_keep_knob_keys_this_version_does_not_know() {
+        let fixture = Fixture::new();
+        let registry = registry();
+        let autumn = registry.resolve("autumn").unwrap();
+        let range = registry.knob_range(autumn);
+        let normalized = |values: [f32; 2]| values.map(|value| Normalized::new(value).unwrap());
+        // Absent: the registered initial values, and the situation is a valid resume target.
+        fixture.write(&json!({"version":1, "last":"autumn"}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.manual_target, autumn);
+        assert_eq!(
+            state.controls.knobs[range.clone()],
+            normalized([0.55, 0.20])
+        );
+        assert_eq!(notice, None);
+        // Out of range is clamped; a knob from some other version is left alone.
+        fixture.write(&json!({"version":1, "situations":{"autumn":{
+            "insects":1.7, "wind":"loud", "frogs":0.9}}}));
+        let (state, _, _, notice) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.knobs[range.clone()], normalized([1.0, 0.20]));
+        assert!(notice.is_some(), "the wrong type is reported as repaired");
+        // A save writes the two knobs, keeps the unknown one and loads back the same values.
+        let (worker, startup, notices) =
+            SaveWorker::start(fixture.path(), registry.clone()).unwrap();
+        startup.recv_blocking().unwrap();
+        let revision = Revision::from_raw(1);
+        let mut request = snapshot(&registry, 0.5);
+        request.controls.knobs[range.start] = Normalized::new(0.25).unwrap();
+        request.controls.knobs[range.start + 1] = Normalized::new(0.75).unwrap();
+        request.resume_target = autumn;
+        worker.submit(revision, request).unwrap();
+        worker.flush(revision).unwrap();
+        notices.recv_blocking().unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(fixture.path()).unwrap()).unwrap();
+        assert_eq!(saved["situations"]["autumn"]["frogs"], json!(0.9));
+        assert!(saved["situations"]["autumn"].get("insects").is_some());
+        assert!(saved["situations"]["autumn"].get("wind").is_some());
+        let (state, _, _, _) = loaded(load_state(&fixture.path(), &registry));
+        assert_eq!(state.controls.knobs[range], normalized([0.25, 0.75]));
+        assert_eq!(state.controls.manual_target, autumn);
+    }
+
+    #[test]
     fn visual_intensity_defaults_to_calm_repairs_unknown_names_and_round_trips() {
         let fixture = Fixture::new();
         let registry = registry();

@@ -62,6 +62,7 @@ const BURST_SECONDS: f64 = 0.9;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.65, 0.65, 0.65],
     shape: VisualShape::Impact,
+    stars: false,
 };
 // Modes of a struck ball: a small low body (the "tock"), the clear main ring, and a bright
 // shimmer above it. The first number is the main ring's pitch ratio of the tone's centre.

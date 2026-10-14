@@ -53,6 +53,7 @@ const SPLASH_SECONDS: f64 = 0.85;
 const VISUAL: VisualStyle = VisualStyle {
     color: [0.50, 0.72, 0.92],
     shape: VisualShape::Point,
+    stars: false,
 };
 
 pub(super) fn definition() -> SituationDefinition {
