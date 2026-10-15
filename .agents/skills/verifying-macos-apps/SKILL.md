@@ -1,6 +1,6 @@
 ---
 name: verifying-macos-apps
-description: Use when verifying a macOS desktop app through its real UI - driving it, capturing its windows, reading its accessibility tree, handling missing Accessibility or Screen Recording permission, focus loss, quitting, or deciding what counts as pass, fail or blocked and what evidence to keep. A verification-discipline layer, not an automation tool: it tells you how to judge and record what you observed, and pairs with a project-specific recipe and whatever tool actually clicks.
+description: "Use when verifying a macOS desktop app through its real UI - driving it, capturing its windows, reading its accessibility tree, handling missing Accessibility or Screen Recording permission, focus loss, quitting, or deciding what counts as pass, fail or blocked and what evidence to keep. A verification-discipline layer, not an automation tool: it tells you how to judge and record what you observed, and pairs with a project-specific recipe and whatever tool actually clicks."
 ---
 
 # Verifying macOS apps
